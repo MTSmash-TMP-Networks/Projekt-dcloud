@@ -1247,15 +1247,17 @@ def create_app(
         redirect_target = _safe_next(request.form.get("next"), url_for("dashboard"))
         try:
             manifest = manifest_store.load(manifest_id)
-            if manifest.owner_node_id != identity.node_id:
-                raise StorageError("Only the owner can delete this manifest")
-            cleanup = _delete_owned_manifest_with_peer_cleanup(manifest)
-            if cleanup["delivered"]:
-                message = f"Datei gelöscht und bei {cleanup['delivered']} Peer(s) bereinigt: {manifest.file_name}"
-            elif cleanup["target_count"]:
-                message = f"Datei gelöscht; Peer-Bereinigung wird nachgeholt, sobald die Peers erreichbar sind: {manifest.file_name}"
+            if manifest.owner_node_id == identity.node_id:
+                cleanup = _delete_owned_manifest_with_peer_cleanup(manifest)
+                if cleanup["delivered"]:
+                    message = f"Datei gelöscht und bei {cleanup['delivered']} Peer(s) bereinigt: {manifest.file_name}"
+                elif cleanup["target_count"]:
+                    message = f"Datei gelöscht; Peer-Bereinigung wird nachgeholt, sobald die Peers erreichbar sind: {manifest.file_name}"
+                else:
+                    message = f"Datei gelöscht: {manifest.file_name}"
             else:
-                message = f"Datei gelöscht: {manifest.file_name}"
+                manifest_store.delete(manifest.manifest_id, delete_unreferenced_chunks=True)
+                message = f"Freigegebene Datei lokal entfernt: {manifest.file_name}"
             if _is_ajax_request():
                 return jsonify({"ok": True, "message": message, "state": state_payload()})
             flash(message, "success")
