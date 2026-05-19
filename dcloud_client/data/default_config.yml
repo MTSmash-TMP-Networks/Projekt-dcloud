@@ -38,3 +38,10 @@ network:
   relay_chunk_size_bytes: 524288 # 512 KiB: PHP-Relay-sichere Chunk-Größe gegen post_max_size/JSON-Limits
 security:
   protocol_magic: DCLOUD1
+smb:
+  enabled: false
+  host: 0.0.0.0
+  port: 445
+  share_name: DCLOUD
+  username: ""
+  password: ""

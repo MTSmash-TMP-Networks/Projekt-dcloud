@@ -33,6 +33,7 @@ Der MVP verteilt Uploads jetzt tatsächlich über aktive Speicher-Peers: Jeder C
 | `dcloud_client/network/transport.py` | Transport-Protokollinterface für spätere UDP/QUIC/libp2p/WebRTC-Backends. |
 | `dcloud_client/network/udp_discovery.py` | UDP-Discovery mit automatischer LAN-Suche auf Port 6881, Bootstrap-Hello, manuell startbarem Peer-Einstieg, aktivem Peer-Listen-Gossip, Offline-Bereinigung, NAT-Tree-Relay und Magic-Header-Filter. |
 | `dcloud_client/network/http_relay.py` | Optionaler HTTP/PHP-Relay-Transport für entfernte Peers hinter NAT: Registrierung, Peer-Discovery, Mailbox-Polling und Weiterleitung der bestehenden P2P-API. |
+| `dcloud_client/network/smb_server.py` | Optionaler eingebetteter SMB-Server für direkten Dateizugriff auf den lokalen `storage/`-Pfad. |
 | `dcloud_client/network/p2p_storage.py` | HTTP-basierter Peer-Transfer für komprimierte Chunks, Manifest-Freigaben, signierte Freigabe-Revocations und signierte Datei-Löschungen inklusive Chunk-Bereinigung. Discovery bleibt UDP; Daten laufen direkt über die Flask Peer-API oder optional über das PHP-Relay. |
 | `relay/dcloud_relay.php` | Einzelne PHP-Datei für einen Webserver, der entfernten Peers als HTTP-Mailbox/Proxy dient. |
 | `relay/dcloud_relay_server.py` | Optionale Python-Relay-Alternative fuer VPS/Plesk-Python-Apps; schneller und stabiler als PHP bei vielen Chunk-Transfers. |
@@ -161,6 +162,24 @@ python3 dcloud_relay_server.py --host 0.0.0.0 --port 8788
 ```
 
 Danach kannst du per nginx/Apache/Plesk eine HTTPS-URL auf diesen Port weiterleiten und diese URL in den dcloud-Einstellungen als weiteres Relay eintragen. Das feste PHP-Relay bleibt weiterhin aktiv; die Python-Relay-URL wird wie alle Zusatz-Relays im Netzwerk verteilt.
+
+
+
+## Optional integrierter SMB-Server
+
+Der Client kann optional einen eigenen SMB-Server starten, damit der lokale Speicherpfad zusätzlich als Netzlaufwerk erreichbar ist (z. B. `\\<node-ip>\DCLOUD`).
+
+```yaml
+smb:
+  enabled: true
+  host: 0.0.0.0
+  port: 445
+  share_name: DCLOUD
+  username: ""
+  password: ""
+```
+
+Hinweis: Für den SMB-Server wird `impacket` benötigt (ist in `requirements.txt` enthalten). Auf Linux ist Port 445 ggf. nur mit erhöhten Rechten bindbar.
 
 ## Client-Typ und Speicherfreigabe
 

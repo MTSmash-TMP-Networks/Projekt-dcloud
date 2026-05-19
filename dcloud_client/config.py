@@ -85,6 +85,16 @@ class SecurityConfig:
 
 
 @dataclass(slots=True)
+class SmbConfig:
+    enabled: bool = False
+    host: str = "0.0.0.0"
+    port: int = 445
+    share_name: str = "DCLOUD"
+    username: str = ""
+    password: str = ""
+
+
+@dataclass(slots=True)
 class AppConfig:
     node: NodeConfig
     storage: StorageConfig
@@ -92,6 +102,7 @@ class AppConfig:
     network: NetworkConfig
     security: SecurityConfig
     config_path: Path
+    smb: SmbConfig = field(default_factory=SmbConfig)
 
 
 def deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
@@ -304,6 +315,14 @@ def load_config(config_path: str | Path = "config.yml", *, create_if_missing: bo
             relay_chunk_size_bytes=max(64 * 1024, min(int(network_raw.get("relay_chunk_size_bytes", DEFAULT_RELAY_CHUNK_SIZE_BYTES)), 2 * 1024 * 1024)),
         ),
         security=SecurityConfig(protocol_magic=str(security_raw.get("protocol_magic", "DCLOUD1"))),
+        smb=SmbConfig(
+            enabled=bool(raw.get("smb", {}).get("enabled", False)),
+            host=str(raw.get("smb", {}).get("host", "0.0.0.0")),
+            port=int(raw.get("smb", {}).get("port", 445)),
+            share_name=str(raw.get("smb", {}).get("share_name", "DCLOUD")).strip() or "DCLOUD",
+            username=str(raw.get("smb", {}).get("username", "")).strip(),
+            password=str(raw.get("smb", {}).get("password", "")),
+        ),
         config_path=path,
     )
 
