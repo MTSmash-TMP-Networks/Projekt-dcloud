@@ -136,16 +136,24 @@ def main() -> None:
         smb_status["last_error"] = smb_server.last_error
 
         def sync_smb_virtual_view() -> None:
+            previous_expected: set[Path] = set()
             while not smb_sync_stop.is_set():
                 try:
                     manifests = manifest_store.list_visible_for_node(identity.node_id)
                     smb_root.mkdir(parents=True, exist_ok=True)
                     expected: set[Path] = set()
+                    expected_dirs: set[Path] = {smb_root.resolve()}
                     manifest_by_virtual_path: dict[Path, object] = {}
+                    visible_folders = manifest_store.list_folders_for_node(identity.node_id)
+                    for folder_path in visible_folders:
+                        folder_dir = (smb_root / Path(folder_path)).resolve()
+                        folder_dir.mkdir(parents=True, exist_ok=True)
+                        expected_dirs.add(folder_dir)
                     for manifest in manifests:
                         folder = Path(manifest.folder_path or DEFAULT_FOLDER)
                         target_dir = smb_root / folder
                         target_dir.mkdir(parents=True, exist_ok=True)
+                        expected_dirs.add(target_dir.resolve())
                         target_file = target_dir / manifest.file_name
                         expected.add(target_file.resolve())
                         manifest_by_virtual_path[target_file.resolve()] = manifest
@@ -161,6 +169,12 @@ def main() -> None:
                         resolved = existing.resolve()
                         manifest = manifest_by_virtual_path.get(resolved)
                         if manifest is None:
+                            if resolved in previous_expected:
+                                # Diese Datei wurde im vorherigen Sync noch von einem Manifest
+                                # abgedeckt, inzwischen aber gelöscht (z. B. via UI). In diesem
+                                # Fall darf sie nicht als neue SMB-Datei re-importiert werden.
+                                existing.unlink(missing_ok=True)
+                                continue
                             # Neue Datei via SMB angelegt -> als neues Manifest importieren
                             rel = resolved.relative_to(smb_root.resolve())
                             folder_path = sanitize_folder_path(str(rel.parent).replace("\\", "/"))
@@ -178,6 +192,21 @@ def main() -> None:
                                 manifest_store.create_for_file(existing, identity, folder_path=folder_path or DEFAULT_FOLDER)
                             except Exception:
                                 LOG.debug("SMB-View Sync: Update fehlgeschlagen für %s", existing, exc_info=True)
+                    # Neue Ordner via SMB angelegt -> als virtuelle Ordner persistieren
+                    existing_dirs = [p for p in smb_root.rglob("*") if p.is_dir()]
+                    for existing_dir in existing_dirs:
+                        resolved_dir = existing_dir.resolve()
+                        if resolved_dir == smb_root.resolve():
+                            continue
+                        rel = resolved_dir.relative_to(smb_root.resolve())
+                        folder_path = sanitize_folder_path(str(rel).replace("\\", "/"))
+                        if not folder_path or folder_path == DEFAULT_FOLDER:
+                            continue
+                        try:
+                            manifest_store.create_folder(folder_path, identity.node_id)
+                            expected_dirs.add(resolved_dir)
+                        except Exception:
+                            LOG.debug("SMB-View Sync: Folder-Import fehlgeschlagen für %s", existing_dir, exc_info=True)
                     # Datei via SMB gelöscht -> zugehöriges Manifest löschen
                     for virtual_path, manifest in manifest_by_virtual_path.items():
                         if not virtual_path.exists():
@@ -189,12 +218,15 @@ def main() -> None:
                         if existing.is_file() and existing.resolve() not in expected:
                             existing.unlink(missing_ok=True)
                     for existing_dir in sorted([p for p in smb_root.rglob("*") if p.is_dir()], reverse=True):
+                        if existing_dir.resolve() in expected_dirs:
+                            continue
                         try:
                             existing_dir.rmdir()
                         except OSError:
                             pass
                 except Exception:
                     LOG.debug("SMB-View Sync fehlgeschlagen", exc_info=True)
+                previous_expected = set(expected) if "expected" in locals() else set()
                 smb_sync_stop.wait(5.0)
 
         smb_sync_thread = threading.Thread(target=sync_smb_virtual_view, name="dcloud-smb-sync", daemon=True)
