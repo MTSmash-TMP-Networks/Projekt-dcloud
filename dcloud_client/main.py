@@ -137,6 +137,7 @@ def main() -> None:
 
         def sync_smb_virtual_view() -> None:
             previous_expected: set[Path] = set()
+            previous_expected_dirs: set[Path] = {smb_root.resolve()}
             while not smb_sync_stop.is_set():
                 try:
                     manifests = manifest_store.list_visible_for_node(identity.node_id)
@@ -145,8 +146,26 @@ def main() -> None:
                     expected_dirs: set[Path] = {smb_root.resolve()}
                     manifest_by_virtual_path: dict[Path, object] = {}
                     visible_folders = manifest_store.list_folders_for_node(identity.node_id)
+                    manifest_folders = {
+                        sanitize_folder_path(str(manifest.folder_path or DEFAULT_FOLDER))
+                        for manifest in manifests
+                    }
                     for folder_path in visible_folders:
-                        folder_dir = (smb_root / Path(folder_path)).resolve()
+                        clean_folder = sanitize_folder_path(str(folder_path))
+                        folder_dir = (smb_root / Path(clean_folder)).resolve()
+                        # SMB-seitig gelöschte, leere virtuelle Ordner nicht automatisch
+                        # wieder anlegen: sonst tauchen sie alle 5s erneut auf.
+                        if (
+                            clean_folder != DEFAULT_FOLDER
+                            and clean_folder not in manifest_folders
+                            and folder_dir in previous_expected_dirs
+                            and not folder_dir.exists()
+                        ):
+                            try:
+                                manifest_store.delete_folder(clean_folder, identity.node_id, delete_files=False)
+                            except Exception:
+                                LOG.debug("SMB-View Sync: Folder-Delete fehlgeschlagen für %s", clean_folder, exc_info=True)
+                            continue
                         folder_dir.mkdir(parents=True, exist_ok=True)
                         expected_dirs.add(folder_dir)
                     existing_file_paths = {p.resolve() for p in smb_root.rglob("*") if p.is_file()}
@@ -161,7 +180,7 @@ def main() -> None:
                     # Datei via SMB gelöscht -> zugehöriges Manifest zuerst löschen.
                     # Wichtig: vor restore(), sonst wird die Datei direkt wiederhergestellt.
                     for virtual_path, manifest in list(manifest_by_virtual_path.items()):
-                        if virtual_path not in existing_file_paths:
+                        if virtual_path not in existing_file_paths and virtual_path in previous_expected:
                             try:
                                 manifest_store.delete(manifest.manifest_id, delete_unreferenced_chunks=True)
                                 expected.discard(virtual_path)
@@ -215,6 +234,8 @@ def main() -> None:
                         folder_path = sanitize_folder_path(str(rel).replace("\\", "/"))
                         if not folder_path or folder_path == DEFAULT_FOLDER:
                             continue
+                        if resolved_dir in previous_expected_dirs:
+                            continue
                         try:
                             manifest_store.create_folder(folder_path, identity.node_id)
                             expected_dirs.add(resolved_dir)
@@ -233,6 +254,7 @@ def main() -> None:
                 except Exception:
                     LOG.debug("SMB-View Sync fehlgeschlagen", exc_info=True)
                 previous_expected = set(expected) if "expected" in locals() else set()
+                previous_expected_dirs = set(expected_dirs) if "expected_dirs" in locals() else {smb_root.resolve()}
                 smb_sync_stop.wait(5.0)
 
         smb_sync_thread = threading.Thread(target=sync_smb_virtual_view, name="dcloud-smb-sync", daemon=True)

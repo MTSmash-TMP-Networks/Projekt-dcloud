@@ -967,7 +967,7 @@
         if(!windows.explorer.hidden) renderExplorer();
       }
       async function refreshState(){
-        const response = await fetch("/api/state", { headers: { "Accept":"application/json" } });
+        const response = await fetch("/api/state", { cache:"no-store", headers: { "Accept":"application/json" } });
         const data = await response.json();
         applyState(data);
       }
