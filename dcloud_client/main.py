@@ -6,6 +6,7 @@ import argparse
 import logging
 import socket
 import sys
+import threading
 from contextlib import closing
 from pathlib import Path
 
@@ -20,6 +21,7 @@ from .config import AppConfig, load_config
 from .identity import IdentityManager
 from .manifests import ManifestStore
 from .network.peers import InMemoryPeerProvider
+from .network.smb_server import EmbeddedSmbServer
 from .network.udp_discovery import UdpDiscoveryTransport
 from .storage import ChunkStore
 from .web.app import create_app
@@ -99,6 +101,20 @@ def main() -> None:
     )
     discovery.start()
 
+    smb_server = None
+    smb_thread = None
+    if config.smb.enabled:
+        smb_server = EmbeddedSmbServer(
+            root=config.storage.path,
+            host=config.smb.host,
+            port=config.smb.port,
+            share_name=config.smb.share_name,
+            username=config.smb.username,
+            password=config.smb.password,
+        )
+        smb_thread = threading.Thread(target=smb_server.start, name="dcloud-smb", daemon=True)
+        smb_thread.start()
+
     config.network.udp_port = udp_port
     app = create_app(config, identity, chunk_store, manifest_store, peer_provider, discovery)
     LOG.info("Starting local web UI on http://%s:%s", config.web.host, config.web.port)
@@ -108,6 +124,8 @@ def main() -> None:
         stop_relays = app.config.get("DCLOUD_STOP_RELAYS")
         if callable(stop_relays):
             stop_relays()
+        if smb_server is not None:
+            smb_server.stop()
         discovery.stop()
 
 
