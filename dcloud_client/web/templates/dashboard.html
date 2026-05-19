@@ -568,6 +568,7 @@
             <button class="explorer-btn" id="explorer-back" type="button">⬅ Zurück</button>
             <div class="explorer-breadcrumbs" id="explorer-breadcrumbs" aria-label="Pfad"></div>
             <button class="explorer-btn" id="explorer-upload" type="button">⬆ Upload</button>
+            <button class="explorer-btn" id="explorer-upload-smb" type="button">🌐 SMB Upload</button>
             <button class="explorer-btn" id="explorer-newfolder" type="button">➕ Ordner erstellen</button>
           </div>
           <main class="explorer-main" id="explorer-main"></main>
@@ -1572,6 +1573,43 @@
         xhr.send(data);
       }
 
+
+      async function uploadFromSmb(folder){
+        const smbHost = prompt("SMB Host/IP (z.B. 192.168.1.20)");
+        if(!smbHost) return;
+        const smbShare = prompt("SMB Freigabe (Share-Name)");
+        if(!smbShare) return;
+        const smbPath = prompt("Dateipfad im Share (z.B. /daten/test.pdf)");
+        if(!smbPath) return;
+        const smbUsername = prompt("SMB Benutzername (leer = Gast)") || "";
+        const smbPassword = prompt("SMB Passwort (optional)") || "";
+        const targetFolder = normalizeFolderPath(folder || DEFAULT_FOLDER);
+        const uploadId = makeUploadId();
+        showTransfer({name: smbPath.split('/').pop() || 'smb-file', size:0}, targetFolder);
+        document.getElementById("transfer-status").textContent = "SMB-Import wird gestartet…";
+        startUploadPolling(uploadId);
+        const data = new FormData();
+        data.append("upload_id", uploadId);
+        data.append("folder", targetFolder);
+        data.append("smb_host", smbHost);
+        data.append("smb_share", smbShare);
+        data.append("smb_path", smbPath);
+        data.append("smb_username", smbUsername);
+        data.append("smb_password", smbPassword);
+        try{
+          const response = await fetch('/upload/smb', { method:'POST', headers:{ 'X-Requested-With':'XMLHttpRequest', 'Accept':'application/json' }, body:data });
+          const payload = await response.json();
+          if(!response.ok || !payload.ok) throw new Error(payload.message || 'SMB-Upload fehlgeschlagen');
+          applyState(payload.state);
+          finishTransfer(payload.message || 'SMB-Upload abgeschlossen', true, payload.uploadProgress || null);
+          showToast(payload.message || 'SMB-Upload abgeschlossen', 'success');
+          openExplorerAt(targetFolder);
+        }catch(error){
+          finishTransfer(error.message, false);
+          showToast(error.message, 'error');
+        }
+      }
+
       async function ajaxPost(url, values){
         const response = await fetch(url, {
           method:"POST",
@@ -1709,6 +1747,7 @@
       document.getElementById("explorer-back").onclick = () => openExplorerAt(parentPath(explorerPath));
       document.getElementById("explorer-newfolder").onclick = () => openFolderDialog(explorerPath);
       document.getElementById("explorer-upload").onclick = () => openUploadPicker(explorerPath || DEFAULT_FOLDER);
+      document.getElementById("explorer-upload-smb").onclick = () => uploadFromSmb(explorerPath || DEFAULT_FOLDER);
       document.getElementById("startBtn").onclick = () => openWindow("explorer");
       async function triggerDiscoveryRefresh(){
         try{

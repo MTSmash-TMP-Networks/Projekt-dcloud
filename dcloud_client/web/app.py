@@ -5,13 +5,17 @@ from __future__ import annotations
 from pathlib import Path
 import tempfile
 from typing import Any, Protocol
+from io import BytesIO
 import threading
 from uuid import uuid4
 import atexit
 import base64
+import socket
 
 from flask import Flask, Response, abort, flash, jsonify, redirect, render_template, request, send_file, url_for
 from werkzeug.utils import secure_filename
+from smb.SMBConnection import SMBConnection
+
 
 from ..config import (
     AppConfig,
@@ -629,6 +633,63 @@ def create_app(
     @app.get("/api/uploads/<upload_id>")
     def api_upload_progress(upload_id: str) -> Response:
         return jsonify(upload_progress.get(_safe_upload_id(upload_id)))
+
+    def _store_uploaded_temp_file(temp_path: Path, safe_name: str, folder_path: str, upload_id: str) -> tuple[bool, dict[str, Any], int]:
+        file_size = temp_path.stat().st_size
+        _sync_peer_connector_settings()
+        storage_peers = _eligible_storage_peers()
+        upload_progress.update(
+            upload_id,
+            phase="select_targets",
+            status="Speicherziele werden ausgewählt…",
+            percent=40,
+            server_percent=4,
+            total_bytes=file_size,
+            target_count=len(storage_peers) + 1,
+            details={"peerTargets": [peer.to_dict().get("display_name") or peer.node_id[:12] for peer in storage_peers]},
+        )
+        uses_relay_storage = any(getattr(peer, "host", "") == RELAY_HOST for peer in storage_peers)
+        relay_safe_chunk_size = int(getattr(config.network, "relay_chunk_size_bytes", 512 * 1024))
+        effective_chunk_size = min(chunk_store.chunk_size, relay_safe_chunk_size) if uses_relay_storage else chunk_store.chunk_size
+        upload_result = distribute_file_chunks(source_path=temp_path, chunk_store=chunk_store, local_node_id=identity.node_id, peers=storage_peers, p2p_client=p2p_client, progress_callback=_upload_server_progress(upload_id), chunk_size_bytes=effective_chunk_size)
+        placement = {"strategy": "distributed_round_robin_chunks", "target_count": len(upload_result.targets), "targets": upload_result.targets, "transfer_status": upload_result.transfer_status, "remote_successes": upload_result.remote_successes, "remote_failures": upload_result.remote_failures, "local_chunks": upload_result.local_chunks, "compressed_chunks": upload_result.compressed_chunks, "desired_replicas": upload_result.desired_replicas, "replicated_chunks": upload_result.replicated_chunks, "under_replicated_chunks": upload_result.under_replicated_chunks, "raw_bytes": upload_result.raw_bytes, "stored_bytes": upload_result.stored_bytes}
+        manifest = manifest_store.create_from_chunk_entries(file_name=safe_name, file_size=file_size, chunk_entries=upload_result.chunks, identity=identity, folder_path=folder_path, placement=placement)
+        return True, {"manifest": manifest, "upload_result": upload_result}, file_size
+
+    @app.post("/upload/smb")
+    def upload_from_smb() -> Response:
+        upload_id = _safe_upload_id(request.form.get("upload_id"))
+        folder_path = sanitize_folder_path(request.form.get("folder", DEFAULT_FOLDER))
+        host = (request.form.get("smb_host") or "").strip()
+        share = (request.form.get("smb_share") or "").strip()
+        remote_path = (request.form.get("smb_path") or "").strip().replace("\\", "/")
+        username = request.form.get("smb_username") or ""
+        password = request.form.get("smb_password") or ""
+        domain = request.form.get("smb_domain") or ""
+        if not host or not share or not remote_path:
+            return jsonify({"ok": False, "message": "SMB Host, Freigabe und Dateipfad sind erforderlich."}), 400
+        safe_name = secure_filename(Path(remote_path).name) or "smb_upload.bin"
+        upload_progress.start(upload_id, file_name=safe_name, folder_path=folder_path)
+        with tempfile.NamedTemporaryFile(prefix="upload-smb-", suffix=".tmp", dir=chunk_store.tmp_dir, delete=False) as tmp:
+            temp_path = Path(tmp.name)
+        try:
+            upload_progress.update(upload_id, phase="smb_connect", status="SMB-Verbindung wird aufgebaut…", percent=8, server_percent=0)
+            client_name = socket.gethostname()[:15] or "dcloud"
+            conn = SMBConnection(username, password, client_name, host, domain=domain, use_ntlm_v2=True, is_direct_tcp=True)
+            if not conn.connect(host, 445, timeout=20):
+                raise StorageError("SMB-Verbindung konnte nicht aufgebaut werden")
+            with temp_path.open("wb") as out:
+                conn.retrieveFile(share, remote_path, out)
+            conn.close()
+            upload_progress.update(upload_id, phase="smb_downloaded", status="Datei vom SMB-Share geladen, verarbeite Upload…", percent=35, server_percent=2)
+            ok, payload, _ = _store_uploaded_temp_file(temp_path, safe_name, folder_path, upload_id)
+            manifest = payload["manifest"]
+            return jsonify({"ok": ok, "message": f"SMB-Datei importiert: {safe_name}", "manifest": manifest_payload(manifest), "state": state_payload(), "uploadId": upload_id, "uploadProgress": upload_progress.get(upload_id)})
+        except Exception as exc:
+            upload_progress.finish(upload_id, ok=False, message=str(exc))
+            return jsonify({"ok": False, "message": f"SMB-Import fehlgeschlagen: {exc}", "uploadId": upload_id, "uploadProgress": upload_progress.get(upload_id)}), 400
+        finally:
+            temp_path.unlink(missing_ok=True)
 
     @app.post("/upload")
     def upload() -> Response | str:
