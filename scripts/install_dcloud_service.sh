@@ -3,7 +3,7 @@ set -eu
 
 # dcloud Service Installer (Linux / OpenWrt / Windows bootstrap)
 # Beispiel via curl:
-#   curl -fsSL https://raw.githubusercontent.com/<org>/<repo>/<branch>/scripts/install_dcloud_service.sh | sh -s -- --role server --storage-gb 200 --enable-smb
+#   curl -fsSL https://raw.githubusercontent.com/MTSmash-TMP-Networks/Projekt-dcloud/main/scripts/install_dcloud_service.sh | sh -s -- --role server --storage-gb 200 --enable-smb
 
 ROLE="pc"
 STORAGE_GB="50"
@@ -143,7 +143,7 @@ install_repo() {
   if [ -d "$INSTALL_DIR/.git" ]; then
     git -C "$INSTALL_DIR" pull --ff-only
   else
-    git clone https://github.com/<org>/Projekt-dcloud.git "$INSTALL_DIR"
+    git clone https://github.com/MTSmash-TMP-Networks/Projekt-dcloud.git "$INSTALL_DIR"
   fi
 }
 
