@@ -50,7 +50,16 @@ class EmbeddedSmbServer:
             # Older impacket versions do not support the `comment` kwarg.
             server.addShare(self.share_name, str(self.root))
         if self.username:
-            server.addCredential(self.username, 0, "", self.password)
+            # impacket expects LM/NT hashes, not plain-text password strings.
+            try:
+                from impacket import ntlm
+
+                lm_hash = ntlm.compute_lmhash(self.password)
+                nt_hash = ntlm.compute_nthash(self.password)
+                server.addCredential(self.username, 0, lm_hash, nt_hash)
+            except Exception:
+                # Fallback for impacket variants expecting legacy string inputs.
+                server.addCredential(self.username, 0, "", self.password)
         try:
             server.setSMB2Support(True)
         except Exception:
