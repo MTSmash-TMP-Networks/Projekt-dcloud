@@ -46,6 +46,19 @@ Der MVP verteilt Uploads jetzt tatsächlich über aktive Speicher-Peers: Jeder C
 - Primär Linux und Windows
 - Perspektivisch OpenWrt: Die Runtime hält Abhängigkeiten klein (`Flask`, `PyYAML`, `cryptography`). Für sehr kleine Router kann später eine abgespeckte HTTP-UI oder ein reines CLI-Profil ergänzt werden.
 
+## Installer-Skripte
+
+- **Linux/OpenWrt/Windows-Bootstrap:** `scripts/install_dcloud_service.sh`
+- **macOS (launchd):** `scripts/install_dcloud_service_mac.sh`
+
+Beispiel für macOS:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/MTSmash-TMP-Networks/Projekt-dcloud/main/scripts/install_dcloud_service_mac.sh | bash -s -- --role server --storage-gb 200
+```
+
+Der macOS-Installer legt einen User-`launchd`-Service unter `~/Library/LaunchAgents/` an und startet ihn automatisch.
+
 ## Installation und Start
 
 ```bash
