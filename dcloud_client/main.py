@@ -146,8 +146,26 @@ def main() -> None:
                     expected_dirs: set[Path] = {smb_root.resolve()}
                     manifest_by_virtual_path: dict[Path, object] = {}
                     visible_folders = manifest_store.list_folders_for_node(identity.node_id)
+                    manifest_folders = {
+                        sanitize_folder_path(str(manifest.folder_path or DEFAULT_FOLDER))
+                        for manifest in manifests
+                    }
                     for folder_path in visible_folders:
-                        folder_dir = (smb_root / Path(folder_path)).resolve()
+                        clean_folder = sanitize_folder_path(str(folder_path))
+                        folder_dir = (smb_root / Path(clean_folder)).resolve()
+                        # SMB-seitig gelöschte, leere virtuelle Ordner nicht automatisch
+                        # wieder anlegen: sonst tauchen sie alle 5s erneut auf.
+                        if (
+                            clean_folder != DEFAULT_FOLDER
+                            and clean_folder not in manifest_folders
+                            and folder_dir in previous_expected_dirs
+                            and not folder_dir.exists()
+                        ):
+                            try:
+                                manifest_store.delete_folder(clean_folder, identity.node_id, delete_files=False)
+                            except Exception:
+                                LOG.debug("SMB-View Sync: Folder-Delete fehlgeschlagen für %s", clean_folder, exc_info=True)
+                            continue
                         folder_dir.mkdir(parents=True, exist_ok=True)
                         expected_dirs.add(folder_dir)
                     existing_file_paths = {p.resolve() for p in smb_root.rglob("*") if p.is_file()}
