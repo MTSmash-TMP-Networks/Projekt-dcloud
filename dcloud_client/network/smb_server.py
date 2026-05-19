@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
+import errno
 
 LOG = logging.getLogger(__name__)
 
@@ -17,28 +18,54 @@ class EmbeddedSmbServer:
         self.username = username
         self.password = password
         self._server = None
+        self.running = False
+        self.actual_port = self.port
+        self.last_error = ""
 
     def start(self) -> None:
         try:
             from impacket import smbserver
         except Exception as exc:  # pragma: no cover - depends on optional dependency
-            raise RuntimeError("impacket ist nicht installiert. Bitte 'pip install impacket' ausführen.") from exc
+            self.running = False
+            self.last_error = "impacket ist nicht installiert. Bitte 'pip install impacket' ausführen."
+            raise RuntimeError(self.last_error) from exc
 
         self.root.mkdir(parents=True, exist_ok=True)
-        server = smbserver.SimpleSMBServer(listenAddress=self.host, listenPort=self.port)
-        server.addShare(self.share_name, str(self.root), comment="dcloud storage")
+        listen_port = self.port
+        for candidate in [self.port, 1445] if self.port == 445 else [self.port]:
+            try:
+                server = smbserver.SimpleSMBServer(listenAddress=self.host, listenPort=candidate)
+                listen_port = candidate
+                break
+            except OSError as exc:
+                if exc.errno == errno.EACCES and candidate == 445:
+                    LOG.warning("SMB-Port 445 benötigt Root-Rechte; weiche auf Port 1445 aus")
+                    continue
+                self.running = False
+                self.last_error = str(exc)
+                raise
+        try:
+            server.addShare(self.share_name, str(self.root), comment="dcloud storage")
+        except TypeError:
+            # Older impacket versions do not support the `comment` kwarg.
+            server.addShare(self.share_name, str(self.root))
         if self.username:
             server.addCredential(self.username, 0, "", self.password)
-
-        # Keep modern SMB support enabled where available.
         try:
             server.setSMB2Support(True)
         except Exception:
             pass
-
         self._server = server
-        LOG.info("Embedded SMB server started on smb://%s:%s/%s", self.host, self.port, self.share_name)
-        server.start()
+        self.actual_port = listen_port
+        self.running = True
+        self.last_error = ""
+        LOG.info("Embedded SMB server started on smb://%s:%s/%s", self.host, listen_port, self.share_name)
+        try:
+            server.start()
+        except Exception as exc:
+            self.running = False
+            self.last_error = str(exc)
+            raise
 
     def stop(self) -> None:
         if self._server is None:
@@ -46,4 +73,5 @@ class EmbeddedSmbServer:
         try:
             self._server.stop()
         finally:
+            self.running = False
             self._server = None
