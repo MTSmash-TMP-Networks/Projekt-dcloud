@@ -303,7 +303,7 @@ Es gibt ein Install-Script unter `scripts/install_dcloud_service.sh`, das den Cl
 Beispiel:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/<org>/<repo>/<branch>/scripts/install_dcloud_service.sh | sh -s -- \
+curl -fsSL https://raw.githubusercontent.com/MTSmash-TMP-Networks/Projekt-dcloud/main/scripts/install_dcloud_service.sh | sh -s -- \
   --target linux \
   --role server \
   --storage-gb 200 \
