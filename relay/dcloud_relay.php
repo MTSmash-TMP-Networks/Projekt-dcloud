@@ -38,6 +38,11 @@ if (ob_get_level() === 0) {
 }
 
 function dcloud_storage_dir(): string {
+    static $cachedDir = null;
+    if (is_string($cachedDir) && $cachedDir !== '') {
+        return $cachedDir;
+    }
+
     $dir = __DIR__ . DIRECTORY_SEPARATOR . 'dcloud-relay-data';
     if (!is_dir($dir) && !@mkdir($dir, 0700, true) && !is_dir($dir)) {
         dcloud_fail('Relay-Datenverzeichnis konnte nicht erstellt werden', 500);
@@ -52,6 +57,7 @@ function dcloud_storage_dir(): string {
             dcloud_fail('Relay-Unterverzeichnis konnte nicht erstellt werden', 500);
         }
     }
+    $cachedDir = $dir;
     return $dir;
 }
 
@@ -60,6 +66,11 @@ function dcloud_seed_file(): string {
 }
 
 function dcloud_relay_seed(): string {
+    static $cachedSeed = null;
+    if (is_string($cachedSeed) && $cachedSeed !== '') {
+        return $cachedSeed;
+    }
+
     $file = dcloud_seed_file();
     if (!file_exists($file)) {
         $seed = bin2hex(random_bytes(32));
@@ -67,6 +78,7 @@ function dcloud_relay_seed(): string {
             dcloud_fail('Relay-Token-Seed konnte nicht erstellt werden', 500);
         }
         @chmod($file, 0600);
+        $cachedSeed = $seed;
         return $seed;
     }
     $seed = trim((string)file_get_contents($file));
@@ -77,6 +89,7 @@ function dcloud_relay_seed(): string {
         }
         @chmod($file, 0600);
     }
+    $cachedSeed = $seed;
     return $seed;
 }
 
@@ -704,8 +717,12 @@ function dcloud_normalize_action(string $action): string {
 
 try {
     $input = dcloud_read_input();
-    dcloud_cleanup_if_due();
     $action = dcloud_normalize_action((string)($input['action'] ?? ''));
+    // Polling actions are latency-sensitive and can run very frequently.
+    // Avoid a full relay filesystem sweep on every long-poll cycle.
+    if (!in_array($action, ['poll_requests', 'poll_response'], true)) {
+        dcloud_cleanup_if_due();
+    }
     $input['action'] = $action;
 
     switch ($action) {
