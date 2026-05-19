@@ -253,6 +253,7 @@ class P2PStorageClient:
         path: str,
         headers: dict[str, str] | None = None,
         body: bytes = b"",
+        timeout: float | None = None,
     ) -> RelayHttpResponse:
         relay_client = self._relay_client_for(peer)
         if relay_client is None:
@@ -263,7 +264,7 @@ class P2PStorageClient:
             path=path,
             headers=headers or {},
             body=body,
-            timeout=relay_client.request_timeout,
+            timeout=relay_client.request_timeout if timeout is None else timeout,
         )
 
     def put_chunk(
@@ -302,7 +303,9 @@ class P2PStorageClient:
             last_error = ""
             for attempt in range(3):
                 try:
-                    response = self._forward_via_relay(peer, method="POST", path=path, headers=headers, body=stored_data)
+                    relay_client = self._relay_client_for(peer)
+                    chunk_timeout = min(float(getattr(relay_client, "request_timeout", 45.0) or 45.0), 45.0) if relay_client is not None else 45.0
+                    response = self._forward_via_relay(peer, method="POST", path=path, headers=headers, body=stored_data, timeout=chunk_timeout)
                     if 200 <= response.status_code < 300:
                         suffix = "" if attempt == 0 else f" nach Retry {attempt}"
                         return PeerTransferResult(peer.node_id, True, "stored via relay" + suffix)
@@ -336,7 +339,9 @@ class P2PStorageClient:
             last_error: Exception | None = None
             for attempt in range(3):
                 try:
-                    response = self._forward_via_relay(peer, method="GET", path=path, headers={"Accept": "application/octet-stream"})
+                    relay_client = self._relay_client_for(peer)
+                    chunk_timeout = min(float(getattr(relay_client, "request_timeout", 45.0) or 45.0), 45.0) if relay_client is not None else 45.0
+                    response = self._forward_via_relay(peer, method="GET", path=path, headers={"Accept": "application/octet-stream"}, timeout=chunk_timeout)
                     if response.status_code == 200:
                         return response.body
                     last_error = StorageError(f"Peer {peer.node_id} returned relay HTTP {response.status_code} for chunk {digest}")

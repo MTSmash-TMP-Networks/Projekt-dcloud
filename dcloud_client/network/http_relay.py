@@ -307,7 +307,7 @@ class HttpRelayClient:
                 "headers": headers,
                 "body_base64": base64.b64encode(response.body).decode("ascii"),
             },
-            timeout=max(self.timeout, min(self.request_timeout, 30.0)),
+            timeout=max(self.timeout, min(self.request_timeout, 12.0)),
         )
 
     def forward_request(
@@ -457,6 +457,14 @@ class HttpRelayTransport:
         self.relay_discovery_callback = relay_discovery_callback
         self.last_error: str | None = None
         self.last_success_at: float | None = None
+        self.active_request_workers = 0
+        # Relay-dispatched peer requests must not block mailbox polling. On
+        # slow PHP/FastCGI hosts a response POST can stall for several seconds;
+        # handling envelopes in small worker threads keeps the receiver polling
+        # and prevents uploads from freezing mid-file.
+        self.max_request_workers = 4
+        self._worker_lock = threading.Lock()
+        self._worker_slots = threading.BoundedSemaphore(self.max_request_workers)
         self._stop_event = threading.Event()
         self._thread: threading.Thread | None = None
 
@@ -541,11 +549,13 @@ class HttpRelayTransport:
         if self.relay_client.last_discovered_relay_urls and self.relay_discovery_callback is not None:
             self.relay_discovery_callback(self.relay_client.last_discovered_relay_urls)
 
-    def _poll_and_process_requests(self) -> None:
-        for envelope in self.relay_client.poll_requests(max_requests=16, wait_seconds=5.0):
-            request_id = str(envelope.get("request_id", ""))
-            if not request_id:
-                continue
+    def _handle_relay_envelope(self, envelope: dict[str, Any]) -> None:
+        request_id = str(envelope.get("request_id", ""))
+        if not request_id:
+            return
+        with self._worker_lock:
+            self.active_request_workers += 1
+        try:
             try:
                 response = self.dispatcher(envelope)
             except Exception as exc:
@@ -559,3 +569,29 @@ class HttpRelayTransport:
                 self.relay_client.post_response(request_id, response)
             except RelayError:
                 LOG.debug("Posting relay response failed", exc_info=True)
+        finally:
+            with self._worker_lock:
+                self.active_request_workers = max(0, self.active_request_workers - 1)
+            try:
+                self._worker_slots.release()
+            except ValueError:
+                pass
+
+    def _poll_and_process_requests(self) -> None:
+        for envelope in self.relay_client.poll_requests(max_requests=16, wait_seconds=5.0):
+            request_id = str(envelope.get("request_id", ""))
+            if not request_id:
+                continue
+            if self._worker_slots.acquire(blocking=False):
+                worker = threading.Thread(
+                    target=self._handle_relay_envelope,
+                    args=(envelope,),
+                    name=f"http-relay-request-{request_id[:8]}",
+                    daemon=True,
+                )
+                worker.start()
+            else:
+                # If all slots are busy, process the envelope inline instead of
+                # dropping it. This is rare and still safer than losing a queued
+                # chunk request.
+                self._handle_relay_envelope(envelope)

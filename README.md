@@ -35,6 +35,7 @@ Der MVP verteilt Uploads jetzt tatsächlich über aktive Speicher-Peers: Jeder C
 | `dcloud_client/network/http_relay.py` | Optionaler HTTP/PHP-Relay-Transport für entfernte Peers hinter NAT: Registrierung, Peer-Discovery, Mailbox-Polling und Weiterleitung der bestehenden P2P-API. |
 | `dcloud_client/network/p2p_storage.py` | HTTP-basierter Peer-Transfer für komprimierte Chunks, Manifest-Freigaben, signierte Freigabe-Revocations und signierte Datei-Löschungen inklusive Chunk-Bereinigung. Discovery bleibt UDP; Daten laufen direkt über die Flask Peer-API oder optional über das PHP-Relay. |
 | `relay/dcloud_relay.php` | Einzelne PHP-Datei für einen Webserver, der entfernten Peers als HTTP-Mailbox/Proxy dient. |
+| `relay/dcloud_relay_server.py` | Optionale Python-Relay-Alternative fuer VPS/Plesk-Python-Apps; schneller und stabiler als PHP bei vielen Chunk-Transfers. |
 | `dcloud_client/web/app.py` | Flask-App mit Dashboard, Upload, Download und Healthcheck. |
 | `dcloud_client/web/templates/` | HTML-Templates für Dashboard und Dateiliste. |
 
@@ -146,7 +147,20 @@ Das Relay-Passwort muss nicht mehr manuell gepflegt werden. Die PHP-Datei erzeug
 
 Ab Relay-Version **1.2.9** ist die PHP-Eingabeprüfung zusätzlich gegen leere Bodies, ungültiges JSON und fehlerhafte `register`-Requests mit fehlenden `peer`-Metadaten gehärtet. Solche Requests liefern eine saubere JSON-Fehlermeldung, statt einen PHP-Fatal-Error im Webserver zu erzeugen. Zusätzlich nutzt das Relay Long-Polling für Requests/Antworten und überschreibt vorhandene Speicher-Metadaten nicht mehr durch minimale Heartbeats.
 
-Wichtig für große Dateien: Chunk-Daten werden über JSON/Base64 durch PHP übertragen. Damit typische Webhosting-Limits nicht direkt jeden Remote-Chunk ablehnen, nutzt der Client für reine Relay-Peers automatisch kleinere Relay-Chunks (`network.relay_chunk_size_bytes`, Standard 512 KiB), auch wenn lokale/LAN-Chunks größer konfiguriert sind. Bei sehr restriktiven Webspaces müssen trotzdem `post_max_size`, `memory_limit` und gegebenenfalls Request-Timeouts ausreichend groß sein. Der Standard-Timeout für Relay-Transfers liegt deshalb bei 180 Sekunden; langsame PHP-Relays dürfen Chunks also verspätet beantworten, ohne dass der Upload sofort lokal-only zurückfällt. Der Relay-Worker registriert sich nicht mehr bei jedem Poll-Zyklus neu, sondern hält per Long-Polling die Mailbox warm, damit eingehende Chunk-Requests schneller abgearbeitet werden. Für das LAN bleibt der direkte HTTP-Transfer schneller; das Relay ist als Fallback/Internet-Brücke gedacht.
+Wichtig für große Dateien: Chunk-Daten werden über JSON/Base64 durch PHP übertragen. Damit typische Webhosting-Limits nicht direkt jeden Remote-Chunk ablehnen, nutzt der Client für reine Relay-Peers automatisch kleinere Relay-Chunks (`network.relay_chunk_size_bytes`, Standard 512 KiB), auch wenn lokale/LAN-Chunks größer konfiguriert sind. Bei sehr restriktiven Webspaces müssen trotzdem `post_max_size`, `memory_limit` und gegebenenfalls Request-Timeouts ausreichend groß sein. Der Relay-Worker registriert sich nicht mehr bei jedem Poll-Zyklus neu, sondern hält per Long-Polling die Mailbox warm. Ab dieser Version verarbeitet der empfangende Client Relay-Requests parallel in kleinen Worker-Threads. Wenn ein Webspace beim Zurückschreiben einer Antwort hängt, blockiert das nicht mehr die komplette Mailbox und der Upload bleibt nicht mitten in der Datei stehen. Chunk-Transfers über Relay haben zusätzlich einen harten 45-Sekunden-Teiltimeout pro Versuch und fallen danach sauber auf lokale Sicherheitskopien zurück, statt die UI minutenlang einzufrieren. Für das LAN bleibt der direkte HTTP-Transfer schneller; das Relay ist als Fallback/Internet-Brücke gedacht.
+
+### Optionale Python-Relay-Alternative
+
+Wenn dein Webserver Python als dauerhafte App oder kleinen Hintergrundprozess ausführen kann, ist `relay/dcloud_relay_server.py` oft besser als PHP. Die Python-Variante verwendet das gleiche JSON-Protokoll und das gleiche automatische Tages-Token-System, arbeitet aber mit einem `ThreadingHTTPServer` und blockiert bei vielen gleichzeitigen Chunk-Requests deutlich weniger.
+
+Beispiel lokal/VPS:
+
+```bash
+cd relay
+python3 dcloud_relay_server.py --host 0.0.0.0 --port 8788
+```
+
+Danach kannst du per nginx/Apache/Plesk eine HTTPS-URL auf diesen Port weiterleiten und diese URL in den dcloud-Einstellungen als weiteres Relay eintragen. Das feste PHP-Relay bleibt weiterhin aktiv; die Python-Relay-URL wird wie alle Zusatz-Relays im Netzwerk verteilt.
 
 ## Client-Typ und Speicherfreigabe
 
