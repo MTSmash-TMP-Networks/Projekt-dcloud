@@ -1,0 +1,1840 @@
+<!doctype html>
+<html lang="de">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>dcloud Desktop</title>
+  <style>
+    :root{
+      color-scheme: light;
+      --desktop: radial-gradient(circle at 10% 8%, #7cc1ff 0, #286fcf 36%, #10366f 72%, #081f45 100%);
+      --glass: rgba(255,255,255,.74);
+      --glass-strong: rgba(255,255,255,.92);
+      --taskbar: rgba(8, 22, 50, .88);
+      --window: #f8fbff;
+      --window-border: rgba(125, 151, 195, .92);
+      --titlebar: linear-gradient(90deg, #0b5fc2, #2f86ff);
+      --text: #162238;
+      --muted: #5c6b82;
+      --line: #d9e3f3;
+      --accent: #0b65d8;
+      --danger: #b42318;
+      --success: #067647;
+      --warning: #b54708;
+      --shadow: 0 22px 70px rgba(0, 17, 55, .42);
+      --shadow-soft: 0 12px 32px rgba(0, 17, 55, .24);
+      --radius: 14px;
+      --icon: 48px;
+      --tile-w: 112px;
+      --tile-h: 98px;
+    }
+    *{ box-sizing:border-box; }
+    html, body{ height:100%; }
+    body{
+      margin:0;
+      font-family:"Segoe UI", system-ui, -apple-system, BlinkMacSystemFont, sans-serif;
+      background: var(--desktop);
+      color:#fff;
+      overflow:hidden;
+      user-select:none;
+    }
+    button, input, select{ font: inherit; }
+    button{ cursor:pointer; }
+    a{ color:inherit; text-decoration:none; }
+    .desktop{
+      position:relative;
+      width:100vw;
+      height:100vh;
+      overflow:hidden;
+    }
+    .desktop::before{
+      content:"";
+      position:absolute;
+      inset:0;
+      pointer-events:none;
+      background:
+        radial-gradient(circle at 82% 18%, rgba(255,255,255,.20), transparent 22%),
+        linear-gradient(145deg, rgba(255,255,255,.08), transparent 42%);
+      z-index:0;
+    }
+    .desktop-area{
+      position:absolute;
+      inset:0 0 52px 0;
+      padding:16px;
+      display:grid;
+      grid-auto-flow:column;
+      grid-auto-columns:var(--tile-w);
+      grid-template-rows:repeat(auto-fill, minmax(var(--tile-h), var(--tile-h)));
+      gap:10px;
+      align-content:start;
+      justify-content:start;
+      z-index:1;
+    }
+    .desk-item{
+      width:var(--tile-w);
+      height:var(--tile-h);
+      display:flex;
+      flex-direction:column;
+      align-items:center;
+      justify-content:flex-start;
+      gap:6px;
+      padding:8px 7px 6px;
+      border:1px solid transparent;
+      border-radius:10px;
+      background:transparent;
+      color:#fff;
+      text-align:center;
+      outline:none;
+      transition:background .12s ease, border-color .12s ease, transform .12s ease;
+    }
+    .desk-item:hover,
+    .desk-item:focus-visible{
+      background:rgba(255,255,255,.12);
+      border-color:rgba(255,255,255,.24);
+    }
+    .desk-item.selected{
+      background:rgba(255,255,255,.20);
+      border-color:rgba(255,255,255,.40);
+    }
+    .desk-item:active{ transform:scale(.985); }
+    .desk-item .glyph{
+      width:var(--icon);
+      height:var(--icon);
+      display:grid;
+      place-items:center;
+      font-size:32px;
+      filter:drop-shadow(0 2px 4px rgba(0,0,0,.45));
+    }
+    .desk-item .label{
+      max-width:100%;
+      padding:2px 5px;
+      border-radius:6px;
+      font-size:.84rem;
+      line-height:1.16;
+      white-space:normal;
+      overflow:hidden;
+      display:-webkit-box;
+      -webkit-line-clamp:2;
+      -webkit-box-orient:vertical;
+      text-shadow:0 1px 3px rgba(0,0,0,.78);
+      overflow-wrap:anywhere;
+    }
+
+    .window{
+      position:absolute;
+      min-width:360px;
+      min-height:260px;
+      max-width:calc(100vw - 16px);
+      max-height:calc(100vh - 62px);
+      border:1px solid var(--window-border);
+      border-radius:var(--radius);
+      background:var(--window);
+      color:var(--text);
+      box-shadow:var(--shadow);
+      overflow:hidden;
+      display:flex;
+      flex-direction:column;
+      resize:both;
+      z-index:10;
+      animation:pop .16s ease;
+    }
+    .window[hidden]{ display:none; }
+    .window.maximized{
+      resize:none;
+      border-radius:10px;
+    }
+    #win-explorer{ left:150px; top:58px; width:min(900px, calc(100vw - 190px)); height:min(620px, calc(100vh - 126px)); }
+    #win-network{ left:260px; top:98px; width:690px; height:490px; }
+    #win-status{ left:310px; top:126px; width:680px; height:450px; }
+    #win-settings{ left:360px; top:154px; width:720px; height:620px; }
+    #win-transfer{ left:calc(50vw - 275px); top:calc(50vh - 250px); width:550px; height:500px; min-width:500px; min-height:440px; resize:none; }
+    @keyframes pop{ from{ opacity:.35; transform:scale(.982); } to{ opacity:1; transform:none; } }
+
+    .titlebar{
+      display:flex;
+      align-items:center;
+      justify-content:space-between;
+      gap:12px;
+      padding:9px 11px 9px 13px;
+      color:#fff;
+      background:var(--titlebar);
+      font-weight:650;
+      cursor:move;
+      user-select:none;
+      flex:0 0 auto;
+    }
+    .titlebar .title{
+      display:flex;
+      align-items:center;
+      gap:9px;
+      min-width:0;
+    }
+    .titlebar .title span:last-child{
+      overflow:hidden;
+      white-space:nowrap;
+      text-overflow:ellipsis;
+    }
+    .window-controls{ display:flex; gap:6px; }
+    .window-controls button{
+      width:34px;
+      height:24px;
+      border:1px solid rgba(255,255,255,.60);
+      border-radius:7px;
+      background:rgba(255,255,255,.13);
+      color:#fff;
+      font-weight:800;
+      line-height:1;
+    }
+    .window-controls button:hover{ background:rgba(255,255,255,.25); }
+    .window-controls button[data-action="close"]:hover{ background:#d92d20; border-color:#d92d20; }
+    .window-content{ flex:1; min-height:0; overflow:auto; background:#f8fbff; }
+
+    .explorer-shell{ display:grid; grid-template-columns:230px minmax(0, 1fr); flex:1; min-height:0; }
+    .explorer-sidebar{
+      border-right:1px solid var(--line);
+      background:#edf4fd;
+      padding:12px;
+      overflow:auto;
+    }
+    .explorer-sidebar h3{ margin:.2rem 0 .55rem; color:#183456; font-size:.95rem; }
+    .nav-item{
+      width:100%;
+      display:flex;
+      align-items:center;
+      gap:.55rem;
+      border:0;
+      border-radius:10px;
+      padding:.55rem .55rem;
+      background:transparent;
+      color:var(--text);
+      text-align:left;
+    }
+    .nav-item:hover, .nav-item.active{ background:#dbeaff; }
+    .explorer-pane{ display:flex; flex-direction:column; min-width:0; min-height:0; }
+    .explorer-toolbar{
+      display:flex;
+      align-items:center;
+      gap:.5rem;
+      padding:10px 12px;
+      border-bottom:1px solid var(--line);
+      background:#eef5ff;
+      flex:0 0 auto;
+    }
+    .explorer-btn, .button-like{
+      border:1px solid #96acd0;
+      border-radius:10px;
+      padding:.42rem .7rem;
+      background:linear-gradient(#fff, #dfeaff);
+      color:var(--text);
+      cursor:pointer;
+      white-space:nowrap;
+    }
+    .explorer-btn:hover, .button-like:hover{ border-color:var(--accent); }
+    .explorer-btn:disabled{ opacity:.48; cursor:not-allowed; }
+    .explorer-breadcrumbs{
+      min-width:0;
+      flex:1;
+      display:flex;
+      align-items:center;
+      gap:4px;
+      padding:.36rem .55rem;
+      border:1px solid #b8c7dc;
+      border-radius:10px;
+      background:#fff;
+      color:var(--muted);
+      overflow:hidden;
+    }
+    .crumb-btn{
+      border:0;
+      background:transparent;
+      color:#24466f;
+      padding:.12rem .18rem;
+      border-radius:6px;
+      white-space:nowrap;
+    }
+    .crumb-btn:hover{ background:#e8f2ff; color:var(--accent); }
+    .crumb-sep{ color:#8a99ad; }
+    .explorer-main{ padding:14px; overflow:auto; }
+    .explorer-heading{
+      display:flex;
+      align-items:center;
+      justify-content:space-between;
+      gap:12px;
+      margin:0 0 12px;
+      color:#1f3555;
+    }
+    .explorer-heading h2{ margin:0; font-size:1.05rem; }
+    .explorer-grid{
+      display:grid;
+      grid-template-columns:repeat(auto-fill, minmax(136px, 1fr));
+      gap:12px;
+      align-items:start;
+    }
+    .explorer-tile{
+      min-height:112px;
+      display:flex;
+      flex-direction:column;
+      align-items:center;
+      gap:.24rem;
+      padding:12px 10px;
+      border:1px solid transparent;
+      border-radius:13px;
+      background:#ffffffd8;
+      color:#162238;
+      text-align:center;
+      box-shadow:0 1px 2px rgba(0,0,0,.06);
+      cursor:pointer;
+      outline:none;
+    }
+    .explorer-tile:hover, .explorer-tile:focus-visible, .explorer-tile.selected{
+      border-color:#8ab8f4;
+      background:#e8f2ff;
+    }
+    .explorer-tile .icon{ font-size:2.35rem; line-height:1; }
+    .tile-name{ font-weight:650; overflow-wrap:anywhere; max-width:100%; }
+    .tile-meta{ color:var(--muted); font-size:.82rem; }
+    .empty{
+      padding:2rem;
+      border:1px dashed #9fb4d7;
+      border-radius:14px;
+      background:#fff;
+      color:var(--muted);
+      text-align:center;
+    }
+
+    .dummy-app{ padding:1.6rem; color:#22314b; font-size:1.03rem; }
+    .dummy-app h2{ margin-top:0; }
+    .status-grid{ display:grid; grid-template-columns:repeat(auto-fit, minmax(210px, 1fr)); gap:12px; margin:1rem 0; }
+    .status-card{ background:#fff; border:1px solid #d8e4f6; border-radius:13px; padding:.9rem; box-shadow:0 1px 2px rgba(0,0,0,.06); }
+    .status-card h3{ margin:.1rem 0 .5rem; color:#173053; font-size:1rem; }
+    .status-kpi{ font-size:1.32rem; font-weight:760; color:var(--accent); overflow-wrap:anywhere; }
+    .status-sub{ color:var(--muted); font-size:.87rem; }
+    .status-list{ margin:.45rem 0 0; padding-left:1rem; color:#1c2f4d; font-size:.92rem; }
+    .settings-form{ max-width:640px; display:grid; gap:.85rem; }
+    .settings-form input[type="text"], .settings-form input[type="number"], .settings-form input[type="url"], .settings-form input[type="password"], .settings-form textarea, .settings-form select{
+      width:100%; padding:.55rem .6rem; border:1px solid #aebbd0; border-radius:10px; background:#fff; color:var(--text);
+    }
+    .settings-panel{
+      border:1px solid #d8e4f6;
+      border-radius:14px;
+      padding:.9rem;
+      background:#fff;
+      box-shadow:0 1px 2px rgba(0,0,0,.05);
+    }
+    .settings-panel h3{ margin:.05rem 0 .55rem; font-size:1rem; color:#173053; }
+    .radio-grid{ display:grid; grid-template-columns:repeat(auto-fit, minmax(220px, 1fr)); gap:.7rem; }
+    .radio-card{
+      display:flex;
+      align-items:flex-start;
+      gap:.55rem;
+      padding:.75rem;
+      border:1px solid #d8e4f6;
+      border-radius:13px;
+      background:#f8fbff;
+      cursor:pointer;
+    }
+    .radio-card:hover{ border-color:#8ab8f4; background:#eef6ff; }
+    .radio-card input{ margin-top:.18rem; }
+    .radio-card strong{ display:block; color:#173053; }
+    .radio-card span{ display:block; margin-top:.2rem; color:var(--muted); font-size:.87rem; line-height:1.35; }
+    .settings-note{ margin:.45rem 0 0; color:var(--muted); font-size:.9rem; line-height:1.4; }
+    .settings-inline{ display:flex; align-items:center; gap:.6rem; flex-wrap:wrap; }
+    .settings-inline input[type="number"]{ max-width:150px; }
+
+    .transfer-content{ padding:18px; background:#f8fbff; display:flex; flex-direction:column; gap:12px; }
+    .transfer-head{ display:flex; align-items:center; gap:12px; color:#1f3555; }
+    .transfer-icon{ width:44px; height:44px; display:grid; place-items:center; border-radius:12px; background:#e8f2ff; font-size:1.8rem; }
+    .transfer-title{ font-weight:750; }
+    .transfer-sub{ color:var(--muted); font-size:.9rem; margin-top:.12rem; }
+    .transfer-progress-wrap{ padding:12px; border:1px solid #d8e4f6; border-radius:13px; background:#fff; }
+    .transfer-progress{
+      height:14px;
+      border-radius:999px;
+      background:#e6eefb;
+      border:1px solid #d3def2;
+      overflow:hidden;
+    }
+    .transfer-progress > div{
+      height:100%; width:0%;
+      background:linear-gradient(90deg, #59a5ff, #0b65d8);
+      transition:width .12s ease;
+    }
+    .transfer-row{ display:flex; align-items:center; justify-content:space-between; gap:10px; margin-top:8px; color:var(--muted); font-size:.9rem; }
+    .transfer-row span:last-child{ text-align:right; overflow-wrap:anywhere; }
+    .transfer-row strong{ color:#173053; }
+    .transfer-detail{ margin-top:10px; padding:.65rem; border-radius:11px; background:#f2f7ff; color:#24466f; font-size:.86rem; line-height:1.35; white-space:pre-line; }
+    .transfer-phase-list{ display:grid; gap:8px; margin-top:11px; }
+    .transfer-phase{
+      display:grid;
+      grid-template-columns:138px minmax(0, 1fr) 48px;
+      align-items:center;
+      gap:8px;
+      color:#314866;
+      font-size:.83rem;
+    }
+    .transfer-phase strong{ font-weight:650; color:#1f3555; }
+    .transfer-mini-progress{
+      height:8px;
+      border-radius:999px;
+      border:1px solid #d3def2;
+      background:#e8effb;
+      overflow:hidden;
+      position:relative;
+    }
+    .transfer-mini-progress > div{
+      height:100%;
+      width:0%;
+      background:linear-gradient(90deg, #7eb9ff, #0b65d8);
+      transition:width .16s ease;
+    }
+    .transfer-metrics{
+      margin-top:9px;
+      display:grid;
+      grid-template-columns:repeat(2, minmax(0, 1fr));
+      gap:6px 10px;
+      color:var(--muted);
+      font-size:.82rem;
+    }
+    .transfer-metrics span{ overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+    .transfer-actions{ margin-top:auto; display:flex; justify-content:flex-end; gap:8px; }
+
+    .ctx{
+      position:fixed;
+      z-index:9999;
+      min-width:250px;
+      padding:6px;
+      border:1px solid rgba(255,255,255,.65);
+      border-radius:13px;
+      background:rgba(255,255,255,.94);
+      color:#0b1a33;
+      box-shadow:var(--shadow-soft);
+      backdrop-filter:blur(12px);
+      display:none;
+      user-select:none;
+    }
+    .ctx.open{ display:block; }
+    .ctx button{
+      width:100%; display:flex; align-items:center; justify-content:space-between; gap:12px;
+      padding:9px 10px; border:0; border-radius:10px; background:transparent; color:inherit; text-align:left;
+    }
+    .ctx button:hover{ background:rgba(11,101,216,.10); }
+    .ctx button[hidden]{ display:none; }
+    .sep{ height:1px; background:rgba(10,30,60,.12); margin:6px 4px; }
+    .kbd{ font-size:.78rem; opacity:.72; border:1px solid rgba(0,0,0,.12); padding:1px 6px; border-radius:8px; background:rgba(255,255,255,.7); }
+
+    .taskbar{
+      position:absolute;
+      left:0; right:0; bottom:0;
+      height:52px;
+      display:flex;
+      align-items:center;
+      gap:10px;
+      padding:8px 12px;
+      background:var(--taskbar);
+      box-shadow:0 -2px 16px rgba(0,0,0,.34);
+      backdrop-filter:blur(15px);
+      user-select:none;
+      z-index:100;
+    }
+    .start{
+      border:0;
+      padding:.48rem .95rem;
+      border-radius:11px;
+      background:#1f7ae0;
+      color:#fff;
+      font-weight:800;
+    }
+    .start:hover{ background:#2f86ff; }
+    .task-btn{
+      padding:.44rem .78rem;
+      border:1px solid rgba(255,255,255,.28);
+      border-radius:11px;
+      background:rgba(255,255,255,.13);
+      color:#fff;
+      display:inline-flex;
+      align-items:center;
+      gap:6px;
+      max-width:190px;
+      overflow:hidden;
+      white-space:nowrap;
+      text-overflow:ellipsis;
+    }
+    .task-btn.active{ background:#e8f2ff; color:#0b65d8; }
+    .tray{ margin-left:auto; display:flex; align-items:center; gap:10px; opacity:.94; font-size:.92rem; }
+
+    .notifications{
+      position:absolute;
+      right:14px;
+      bottom:66px;
+      z-index:250;
+      display:grid;
+      gap:8px;
+      max-width:min(360px, calc(100vw - 28px));
+      pointer-events:none;
+    }
+    .toast{
+      padding:.72rem .85rem;
+      border-radius:13px;
+      background:rgba(255,255,255,.95);
+      color:#15243b;
+      border-left:6px solid var(--accent);
+      box-shadow:var(--shadow-soft);
+      pointer-events:auto;
+    }
+    .toast.success{ border-left-color:var(--success); }
+    .toast.error{ border-left-color:var(--danger); }
+    .toast.warning{ border-left-color:var(--warning); }
+
+    .dialog-backdrop{
+      position:absolute;
+      inset:0;
+      z-index:300;
+      display:grid;
+      place-items:center;
+      background:rgba(3, 16, 38, .28);
+      backdrop-filter:blur(2px);
+    }
+    .dialog-backdrop[hidden]{ display:none; }
+    .folder-dialog{
+      width:min(420px, calc(100vw - 30px));
+      border:1px solid var(--window-border);
+      border-radius:16px;
+      background:var(--window);
+      color:var(--text);
+      box-shadow:var(--shadow);
+      overflow:hidden;
+    }
+    .folder-dialog header{ padding:12px 14px; background:var(--titlebar); color:#fff; font-weight:750; }
+    .folder-dialog main{ padding:16px; }
+    .folder-dialog label{ display:block; color:#31486b; margin-bottom:8px; }
+    .folder-dialog input, .folder-dialog select{ width:100%; padding:.62rem .7rem; border:1px solid #aebbd0; border-radius:10px; background:#fff; color:var(--text); }
+    .dialog-actions{ display:flex; justify-content:flex-end; gap:8px; margin-top:14px; }
+
+    .sr-only{ position:absolute; left:-9999px; top:-9999px; }
+    @media (max-width:900px){
+      body{ overflow:auto; }
+      .desktop{ min-height:100vh; height:auto; overflow:auto; padding-bottom:52px; }
+      .desktop-area{ position:relative; inset:auto; grid-auto-flow:row; grid-template-columns:repeat(auto-fill, minmax(var(--tile-w), 1fr)); grid-template-rows:auto; }
+      .window{ position:relative; left:auto !important; top:auto !important; width:auto !important; height:auto !important; min-height:520px; margin:10px; max-width:none; max-height:none; }
+      .explorer-shell{ grid-template-columns:1fr; }
+      .explorer-sidebar{ border-right:0; border-bottom:1px solid var(--line); max-height:210px; }
+      .taskbar{ position:fixed; }
+      .notifications{ position:fixed; }
+    }
+  </style>
+</head>
+<body>
+  <span class="sr-only">dcloud Datenspeicher - Datei-Explorer</span>
+  <div class="desktop" id="desktopRoot" role="application" aria-label="dcloud Desktop">
+    <div class="desktop-area" id="desktopArea" aria-label="Desktop">
+      <button class="desk-item app-icon" data-app="explorer" type="button">
+        <span class="glyph">📁</span><span class="label">Datei-Explorer</span>
+      </button>
+      <button class="desk-item app-icon" data-app="network" type="button">
+        <span class="glyph">🌐</span><span class="label">Netzwerk</span>
+      </button>
+      <button class="desk-item app-icon" data-app="status" type="button">
+        <span class="glyph">🖥️</span><span class="label">System-Status</span>
+      </button>
+      <button class="desk-item app-icon" data-app="settings" type="button">
+        <span class="glyph">⚙️</span><span class="label">Einstellungen</span>
+      </button>
+    </div>
+
+    <div class="notifications" id="notifications">
+      {% with messages = get_flashed_messages(with_categories=true) %}
+        {% for category, message in messages %}
+          <div class="toast {{ category }}">{{ message }}</div>
+        {% endfor %}
+      {% endwith %}
+    </div>
+
+    <section class="window" id="win-explorer" hidden>
+      <div class="titlebar" data-app="explorer">
+        <span class="title"><span>📁</span><span>Datei-Explorer</span></span>
+        <div class="window-controls">
+          <button type="button" data-action="min" aria-label="Minimieren">–</button>
+          <button type="button" data-action="max" aria-label="Maximieren">□</button>
+          <button type="button" data-action="close" aria-label="Schließen">×</button>
+        </div>
+      </div>
+      <div class="explorer-shell window-content">
+        <aside class="explorer-sidebar">
+          <h3>Schnellzugriff</h3>
+          <div id="explorer-nav"></div>
+        </aside>
+        <div class="explorer-pane">
+          <div class="explorer-toolbar">
+            <button class="explorer-btn" id="explorer-back" type="button">⬅ Zurück</button>
+            <div class="explorer-breadcrumbs" id="explorer-breadcrumbs" aria-label="Pfad"></div>
+            <button class="explorer-btn" id="explorer-upload" type="button">⬆ Upload</button>
+            <button class="explorer-btn" id="explorer-newfolder" type="button">➕ Ordner erstellen</button>
+          </div>
+          <main class="explorer-main" id="explorer-main"></main>
+        </div>
+      </div>
+    </section>
+
+    <section class="window" id="win-network" hidden>
+      <div class="titlebar" data-app="network">
+        <span class="title"><span>🌐</span><span>Netzwerk</span></span>
+        <div class="window-controls">
+          <button type="button" data-action="min" aria-label="Minimieren">–</button>
+          <button type="button" data-action="max" aria-label="Maximieren">□</button>
+          <button type="button" data-action="close" aria-label="Schließen">×</button>
+        </div>
+      </div>
+      <div class="window-content dummy-app">
+        <h2>Netzwerk</h2>
+        <p>Live-Übersicht über aktive Peers und Cloud-Verfügbarkeit. Offline-Clients werden automatisch aus der Liste entfernt.</p>
+        <div class="status-grid">
+          <section class="status-card"><h3>Aktive Peers</h3><div class="status-kpi" id="network-peer-count">0</div><div class="status-sub">Nur aktuell erreichbare Knoten im dcloud-Netzwerk</div></section>
+          <section class="status-card"><h3>Netzwerk-Speicher</h3><div class="status-kpi" id="network-storage-limit">0 B</div><div class="status-sub">Lokale Freigabe plus aktive Speicher-Peers</div></section>
+          <section class="status-card"><h3>Verfügbar für neue Daten</h3><div class="status-kpi" id="network-storage-free">0 B</div><div class="status-sub">Freier Speicher im erreichbaren Verbund</div></section>
+          <section class="status-card"><h3>Auto-Verbindung</h3><div class="status-kpi" id="network-auto-discovery">Aktiv</div><div class="status-sub" id="network-auto-discovery-sub">Port 6881 wird automatisch gesucht</div></section>
+        </div>
+        <h3>Aktive Peer-Liste</h3>
+        <ul class="status-list" id="network-peer-list"><li>Keine aktiven Peers online.</li></ul>
+      </div>
+    </section>
+
+    <section class="window" id="win-status" hidden>
+      <div class="titlebar" data-app="status">
+        <span class="title"><span>🖥️</span><span>System-Status</span></span>
+        <div class="window-controls">
+          <button type="button" data-action="min" aria-label="Minimieren">–</button>
+          <button type="button" data-action="max" aria-label="Maximieren">□</button>
+          <button type="button" data-action="close" aria-label="Schließen">×</button>
+        </div>
+      </div>
+      <div class="window-content dummy-app">
+        <h2>System-Status</h2>
+        <p>Aktueller Zustand dieses Knotens auf deinem Desktop.</p>
+        <div class="status-grid">
+          <section class="status-card"><h3>Node ID</h3><div class="status-kpi" id="status-node-id">-</div><div class="status-sub">Identität dieser Instanz</div></section>
+          <section class="status-card"><h3>Client-Typ</h3><div class="status-kpi" id="status-client-type">PC</div><div class="status-sub">Server oder PC für P2P-Speicher</div></section>
+          <section class="status-card"><h3>P2P-Ablage</h3><div class="status-kpi" id="status-peer-storage">Wartet</div><div class="status-sub" id="status-peer-storage-sub">-</div></section>
+          <section class="status-card"><h3>Discovery-Port</h3><div class="status-kpi" id="status-discovery-port">6881</div><div class="status-sub">UDP-Port dieser Instanz</div></section>
+          <section class="status-card"><h3>PHP-Relay</h3><div class="status-kpi" id="status-relay-state">Aus</div><div class="status-sub" id="status-relay-sub">Nur LAN-Verbindungen</div></section>
+          <section class="status-card"><h3>Gespeicherte Dateien</h3><div class="status-kpi" id="status-file-count">0</div><div class="status-sub">Sichtbar in deinem Explorer</div></section>
+          <section class="status-card"><h3>Verwendeter Speicher</h3><div class="status-kpi" id="status-storage-used">0 B</div><div class="status-sub">Lokale Chunks + Manifeste</div></section>
+          <section class="status-card"><h3>Verbund-Kapazität</h3><div class="status-kpi" id="status-network-capacity">0 B</div><div class="status-sub" id="status-network-capacity-sub">0 aktive Speicher-Peers</div></section>
+        </div>
+      </div>
+    </section>
+
+    <section class="window" id="win-settings" hidden>
+      <div class="titlebar" data-app="settings">
+        <span class="title"><span>⚙️</span><span>Einstellungen</span></span>
+        <div class="window-controls">
+          <button type="button" data-action="min" aria-label="Minimieren">–</button>
+          <button type="button" data-action="max" aria-label="Maximieren">□</button>
+          <button type="button" data-action="close" aria-label="Schließen">×</button>
+        </div>
+      </div>
+      <div class="window-content dummy-app">
+        <h2>Einstellungen</h2>
+        <p>Lege fest, ob dieser Client als dauerhafter Server oder als normaler PC arbeitet, und wie viel Speicher du dem dcloud-Netzwerk freigibst.</p>
+
+        <form method="post" action="/settings" class="settings-form" id="settings-form">
+          <input type="hidden" name="next" value="/">
+          <section class="settings-panel">
+            <h3>Client-Typ</h3>
+            <div class="radio-grid">
+              <label class="radio-card">
+                <input type="radio" name="client_type" value="server" {% if config.node.client_type == 'server' %}checked{% endif %}>
+                <span><strong>Server</strong>Daten aus dem Peer-to-Peer-Netzwerk dürfen auf diesem Client abgelegt werden. Diese Option ist für Geräte gedacht, die möglichst dauerhaft online sind.</span>
+              </label>
+              <label class="radio-card">
+                <input type="radio" name="client_type" value="pc" {% if config.node.client_type == 'pc' %}checked{% endif %}>
+                <span><strong>PC</strong>Daten werden nur als P2P-Ziel genutzt, wenn mindestens ein weiterer PC erreichbar ist. So wird vermieden, dass ein oft ausgeschalteter PC die einzige Kopie hält.</span>
+              </label>
+            </div>
+            <p class="settings-note" id="settings-current-policy">{{ settings_json.storagePolicy }}</p>
+          </section>
+
+          <section class="settings-panel">
+            <h3>Freigegebener Speicher</h3>
+            <label class="settings-inline" for="settings-storage-gb">
+              <span>Speicher freigeben:</span>
+              <input id="settings-storage-gb" type="number" name="shared_storage_gb" min="{{ settings_json.minSharedStorageGb }}" step="1" value="{{ settings_json.sharedStorageGb | int }}" required>
+              <span>GB</span>
+            </label>
+            <p class="settings-note">Minimum: {{ settings_json.minSharedStorageGb }} GB. Aktuell frei innerhalb der Freigabe: <strong id="settings-storage-free">{{ stats.free_limit_bytes | human_bytes }}</strong>.</p>
+          </section>
+
+          <section class="settings-panel">
+            <h3>PHP-Relay / Proxy für Internet-Peers</h3>
+            <label for="settings-relay-url">Festes Standard-Relay</label>
+            <input id="settings-relay-url" type="url" value="{{ settings_json.fixedRelayUrl }}" readonly>
+            <label for="settings-relay-urls">Weitere Relay-URLs hinzufügen</label>
+            <textarea id="settings-relay-urls" name="relay_server_urls" rows="3" placeholder="https://deine-domain.de/dcloud_relay.php">{{ settings_json.additionalRelayUrlsText }}</textarea>
+            <p class="settings-note"><strong>Relay-Zugriff:</strong> <span id="settings-relay-token-mode">{{ settings_json.relayTokenLabel }}</span>. Der Tages-Schlüssel wird automatisch vom Relay erzeugt, täglich erneuert und vom Client bei Bedarf direkt abgerufen.</p>
+            <p class="settings-note" id="settings-relay-note">Das Standard-Relay ist fest hinterlegt. Zusätzliche Relays werden gespeichert, automatisch genutzt und per LAN-/Relay-Discovery an andere Peers verteilt, damit das Netzwerk auch über Heimnetzgrenzen hinweg erreichbar bleibt.</p>
+          </section>
+
+          <button type="submit" class="explorer-btn">Einstellungen speichern</button>
+        </form>
+
+        <hr style="border:0;border-top:1px solid #d8e4f6;margin:1.1rem 0;">
+        <p>Peers manuell eintragen oder per Netzwerksuche automatisch finden.</p>
+        <form method="post" action="/peers" class="settings-form">
+          <label for="settings-peer">Peer-Adresse (host:port)</label>
+          <input id="settings-peer" type="text" name="peer" placeholder="192.168.1.10:6881" required>
+          <label style="display:flex;align-items:center;gap:.45rem;">
+            <input type="checkbox" name="use_as_tree_parent"> Als NAT-Parent verwenden
+          </label>
+          <button type="submit" class="explorer-btn">Verbinden</button>
+        </form>
+        <div style="margin-top:1rem;">
+          <strong>Automatische Netzwerksuche:</strong>
+          <span id="settings-auto-discovery">aktiv auf Port 6881</span>
+          <p class="settings-note">Beim Start sendet der Client sofort LAN-Discovery-Hellos an sichtbare dcloud-Clients auf UDP-Port 6881 und danach regelmäßig weiter.</p>
+          <p class="settings-note"><strong>PHP-Relay:</strong> <span id="settings-relay-status">nicht konfiguriert</span></p>
+          <div style="margin-top:.5rem;"><button type="button" class="explorer-btn" id="settings-refresh">Netzwerksuche aktualisieren</button></div>
+        </div>
+      </div>
+    </section>
+
+    <section class="window" id="win-transfer" hidden>
+      <div class="titlebar" data-app="transfer">
+        <span class="title"><span>📋</span><span id="transfer-window-title">Upload-Status</span></span>
+        <div class="window-controls">
+          <button type="button" data-action="min" aria-label="Minimieren">–</button>
+          <button type="button" data-action="close" aria-label="Schließen">×</button>
+        </div>
+      </div>
+      <div class="window-content transfer-content">
+        <div class="transfer-head">
+          <div class="transfer-icon">⬆️</div>
+          <div>
+            <div class="transfer-title" id="transfer-title">Datei wird hochgeladen</div>
+            <div class="transfer-sub" id="transfer-subtitle">Vorbereitung…</div>
+          </div>
+        </div>
+        <div class="transfer-progress-wrap">
+          <div class="transfer-progress" aria-label="Upload Fortschritt"><div id="transfer-progress"></div></div>
+          <div class="transfer-row"><span id="transfer-name">—</span><strong id="transfer-percent">0%</strong></div>
+          <div class="transfer-row"><span>Ziel:</span><span id="transfer-target">—</span></div>
+          <div class="transfer-row"><span>Status:</span><span id="transfer-status">Bereit</span></div>
+          <div class="transfer-row"><span>Browser-Transfer:</span><span id="transfer-browser">0 B / 0 B</span></div>
+          <div class="transfer-row"><span>Server-Verarbeitung:</span><span id="transfer-server">wartet…</span></div>
+          <div class="transfer-row"><span>Chunks:</span><span id="transfer-chunks">—</span></div>
+          <div class="transfer-row"><span>Komprimierung:</span><span id="transfer-compression">—</span></div>
+          <div class="transfer-row"><span>Peer-Speicher:</span><span id="transfer-peers">—</span></div>
+          <div class="transfer-row"><span>Lokale Kopien:</span><span id="transfer-local">—</span></div>
+          <div class="transfer-detail" id="transfer-detail">Nach dem Browser-Upload wird angezeigt, wie die Datei in Chunks zerlegt, komprimiert und im Peer-Netz verteilt wird.</div>
+          <div class="transfer-phase-list" aria-label="Upload-Schritte">
+            <div class="transfer-phase"><strong>Übertragen</strong><div class="transfer-mini-progress"><div id="transfer-client-progress"></div></div><span id="transfer-client-label">0%</span></div>
+            <div class="transfer-phase"><strong>Chunks</strong><div class="transfer-mini-progress"><div id="transfer-server-progress"></div></div><span id="transfer-server-label">0%</span></div>
+            <div class="transfer-phase"><strong>Peer-Netz</strong><div class="transfer-mini-progress"><div id="transfer-peer-progress"></div></div><span id="transfer-peer-label">0%</span></div>
+          </div>
+          <div class="transfer-metrics" id="transfer-metrics">
+            <span>Chunks: —</span>
+            <span>Komprimiert: —</span>
+            <span>Peer-Schreibvorgänge: —</span>
+            <span>Lokal: —</span>
+          </div>
+        </div>
+        <div class="transfer-actions">
+          <button type="button" class="explorer-btn" id="transfer-cancel">Abbrechen</button>
+        </div>
+      </div>
+    </section>
+
+    <div class="ctx" id="ctxMenu" role="menu" aria-label="Desktop Kontextmenü">
+      <button type="button" id="ctxOpen"><span>Öffnen</span><span class="kbd">Enter</span></button>
+      <button type="button" id="ctxDownload"><span>Download</span><span class="kbd">Ctrl+S</span></button>
+      <button type="button" id="ctxShare"><span>Freigabe…</span><span class="kbd">Ctrl+H</span></button>
+      <button type="button" id="ctxDelete" style="color:#b42318;"><span>Löschen</span><span class="kbd">Del</span></button>
+      <div class="sep"></div>
+      <button type="button" id="ctxUpload"><span>Upload hier…</span><span class="kbd">Ctrl+U</span></button>
+      <button type="button" id="ctxNewFolder"><span>Neuer Ordner…</span><span class="kbd">Shift+N</span></button>
+      <button type="button" id="ctxRefresh"><span>Aktualisieren</span><span class="kbd">F5</span></button>
+    </div>
+
+    <div class="dialog-backdrop" id="folderDialog" hidden>
+      <form class="folder-dialog" id="folderDialogForm">
+        <header>Neuer Ordner</header>
+        <main>
+          <label for="folderNameInput">Ordnername</label>
+          <input id="folderNameInput" name="folder" autocomplete="off" required>
+          <div class="dialog-actions">
+            <button type="button" class="explorer-btn" id="folderDialogCancel">Abbrechen</button>
+            <button type="submit" class="explorer-btn">Ordner erstellen</button>
+          </div>
+        </main>
+      </form>
+    </div>
+
+
+
+    <div class="dialog-backdrop" id="shareDialog" hidden>
+      <form class="folder-dialog" id="shareDialogForm">
+        <header>Datei freigeben</header>
+        <main>
+          <p class="settings-note" id="shareFileLabel">Datei auswählen…</p>
+          <label for="sharePeerSelect">Peer auswählen</label>
+          <select id="sharePeerSelect" name="peer_node_id"></select>
+          <p class="settings-note" id="sharePeerHelp">Das Manifest wird direkt an den ausgewählten Peer übertragen. Die Chunks bleiben verteilt auf den im Manifest genannten Speicher-Knoten.</p>
+          <div class="dialog-actions">
+            <button type="button" class="explorer-btn" id="shareDialogCancel">Abbrechen</button>
+            <button type="submit" class="explorer-btn">Freigeben</button>
+          </div>
+        </main>
+      </form>
+    </div>
+
+    <input type="file" id="desktop-upload-input" hidden>
+
+    <nav class="taskbar" aria-label="Taskleiste" id="taskbar">
+      <button class="start" id="startBtn" type="button">Start</button>
+      <span id="taskbar-apps"></span>
+      <span class="tray"><span id="tray-files">0 Datei(en)</span><span>dcloud</span></span>
+    </nav>
+  </div>
+
+  <script>
+    const INITIAL_STATE = {
+      nodeId: {{ identity.node_id | tojson }},
+      stats: {{ stats_json | tojson }},
+      settings: {{ settings_json | tojson }},
+      network: {{ network_json | tojson }},
+      peers: {{ peers_json | tojson }},
+      fileCount: {{ manifests | length | tojson }},
+      folders: {{ folders | tojson }},
+      folderTree: {{ folder_tree_json | tojson }}
+    };
+    const DEFAULT_FOLDER = {{ default_folder | tojson }};
+
+    (function(){
+      "use strict";
+      const VROOT = "";
+      let appState = JSON.parse(JSON.stringify(INITIAL_STATE));
+      let fsMap = new Map();
+      let explorerPath = VROOT;
+      let selectedTarget = { kind:"desktop" };
+      let folderDialogBasePath = VROOT;
+      let pendingUploadTarget = DEFAULT_FOLDER;
+      let currentUploadXhr = null;
+      let currentUploadPoll = null;
+      let currentUploadId = null;
+      let lastTransferPercent = 0;
+      let activeWindow = null;
+      let z = 20;
+      let openOrder = [];
+      const prevGeometry = Object.create(null);
+
+      const desktopArea = document.getElementById("desktopArea");
+      const taskbarApps = document.getElementById("taskbar-apps");
+      const uploadInput = document.getElementById("desktop-upload-input");
+      const ctx = document.getElementById("ctxMenu");
+      const folderDialog = document.getElementById("folderDialog");
+      const folderNameInput = document.getElementById("folderNameInput");
+      const shareDialog = document.getElementById("shareDialog");
+      const sharePeerSelect = document.getElementById("sharePeerSelect");
+      const shareFileLabel = document.getElementById("shareFileLabel");
+      let pendingShareFile = null;
+
+      const windows = {
+        explorer: document.getElementById("win-explorer"),
+        network: document.getElementById("win-network"),
+        status: document.getElementById("win-status"),
+        settings: document.getElementById("win-settings"),
+        transfer: document.getElementById("win-transfer")
+      };
+      const appLabels = {
+        explorer:"📁 Datei-Explorer",
+        network:"🌐 Netzwerk",
+        status:"🖥️ Status",
+        settings:"⚙️ Einstellungen",
+        transfer:"📋 Upload"
+      };
+
+      function normalizeFolderPath(value){
+        const raw = String(value || DEFAULT_FOLDER).replace(/\\/g, "/");
+        const parts = raw.split("/").map(part => part.trim()).filter(part => part && part !== "." && part !== "..");
+        return parts.join("/") || DEFAULT_FOLDER;
+      }
+      function pathJoin(parent, child){
+        const clean = String(child || "").trim().replace(/\\/g, "/");
+        if(!clean) return parent || DEFAULT_FOLDER;
+        return parent ? `${parent}/${clean}` : clean;
+      }
+      function parentPath(path){
+        if(!path) return VROOT;
+        const parts = path.split("/").filter(Boolean);
+        parts.pop();
+        return parts.join("/");
+      }
+      function displayPath(path){ return path || "Desktop"; }
+      function ensureNode(path){
+        const key = path || VROOT;
+        if(!fsMap.has(key)) fsMap.set(key, { folders: [], files: [] });
+        return fsMap.get(key);
+      }
+      function addUnique(list, value){ if(value && !list.includes(value)) list.push(value); }
+      function ingestFolderPath(path){
+        const normalized = normalizeFolderPath(path);
+        const parts = normalized.split("/").filter(Boolean);
+        let current = VROOT;
+        parts.forEach(segment => {
+          addUnique(ensureNode(current).folders, segment);
+          current = current ? `${current}/${segment}` : segment;
+          ensureNode(current);
+        });
+      }
+      function buildFileSystem(){
+        fsMap = new Map();
+        ensureNode(VROOT);
+        (appState.folders || []).forEach(ingestFolderPath);
+        (appState.folderTree || []).forEach(folder => {
+          const folderPath = normalizeFolderPath(folder.name);
+          ingestFolderPath(folderPath);
+          const node = ensureNode(folderPath);
+          node.files = (folder.files || []).map(file => ({
+            id: file.manifest_id,
+            name: file.file_name,
+            size: Number(file.file_size || 0),
+            chunks: Number(file.chunk_count || 0),
+            folder: normalizeFolderPath(file.folder_path || folderPath),
+            shared: !!(file.access && file.access.visibility === "shared"),
+            sharedWith: (file.access && Array.isArray(file.access.shared_with)) ? file.access.shared_with : [],
+            placement: file.placement || {},
+            remoteStorageCount: Number(file.remote_storage_count || 0),
+            owner: file.owner_node_id === appState.nodeId,
+            downloadUrl: file.download_url || `/download/${file.manifest_id}`,
+            deleteUrl: file.delete_url || `/files/${file.manifest_id}/delete`,
+            shareUrl: file.share_url || `/files/${file.manifest_id}/share`
+          })).sort((a,b)=>a.name.localeCompare(b.name));
+        });
+        fsMap.forEach(node => node.folders.sort((a,b)=>a.localeCompare(b)));
+      }
+      function flattenFolderPaths(){
+        const paths = [];
+        function walk(path){
+          const node = ensureNode(path);
+          node.folders.forEach(name => {
+            const child = pathJoin(path, name);
+            paths.push(child);
+            walk(child);
+          });
+        }
+        walk(VROOT);
+        return paths;
+      }
+
+      function formatBytes(value){
+        const units = ["B","KiB","MiB","GiB","TiB"];
+        let amount = Number(value || 0);
+        let unit = units[0];
+        for(let i=0; i<units.length; i++){
+          unit = units[i];
+          if(amount < 1024 || i === units.length - 1) break;
+          amount /= 1024;
+        }
+        return `${amount.toFixed(1)} ${unit}`;
+      }
+      function showToast(message, type="success"){
+        const wrap = document.getElementById("notifications");
+        const toast = document.createElement("div");
+        toast.className = `toast ${type}`;
+        toast.textContent = message;
+        wrap.prepend(toast);
+        setTimeout(()=>toast.remove(), 5200);
+      }
+      function applyState(nextState){
+        if(nextState){ appState = Object.assign({}, appState, nextState); }
+        buildFileSystem();
+        if(explorerPath && !fsMap.has(explorerPath)) explorerPath = parentPath(explorerPath);
+        renderStats();
+        renderDesktopFolders();
+        renderExplorerNav();
+        if(!windows.explorer.hidden) renderExplorer();
+      }
+      async function refreshState(){
+        const response = await fetch("/api/state", { headers: { "Accept":"application/json" } });
+        const data = await response.json();
+        applyState(data);
+      }
+
+      function renderStats(){
+        const settings = appState.settings || {};
+        const network = appState.network || {};
+        const autoPorts = Array.isArray(network.autoDiscoveryPorts) ? network.autoDiscoveryPorts : [6881];
+        const autoText = network.autoDiscoveryEnabled === false ? "Aus" : "Aktiv";
+        const autoSub = network.autoDiscoveryEnabled === false
+          ? "Automatische LAN-Suche ist deaktiviert"
+          : `Sucht sofort sichtbare Clients auf UDP-Port ${autoPorts.join(", ")} · Offline-Timeout ${network.peerTimeoutSeconds || 35}s`;
+        const capacity = appState.networkCapacity || settings || {};
+        document.getElementById("network-peer-count").textContent = String((appState.peers || []).length);
+        document.getElementById("network-storage-limit").textContent = formatBytes(capacity.networkLimitBytes || settings.networkLimitBytes || appState.stats.limitBytes);
+        document.getElementById("network-storage-free").textContent = formatBytes(capacity.networkFreeBytes || settings.networkFreeBytes || appState.stats.freeLimitBytes);
+        document.getElementById("network-auto-discovery").textContent = autoText;
+        document.getElementById("network-auto-discovery-sub").textContent = autoSub;
+        document.getElementById("status-node-id").textContent = appState.nodeId.slice(0, 12) + "…";
+        document.getElementById("status-discovery-port").textContent = String(network.udpPort || 6881);
+        const relayUrls = Array.isArray(network.relayUrls) ? network.relayUrls : (network.relayUrl ? [network.relayUrl] : []);
+        const relayState = network.relayEnabled ? (network.relayStatus || "startet") : "aus";
+        const relayStateEl = document.getElementById("status-relay-state");
+        const relaySubEl = document.getElementById("status-relay-sub");
+        if(relayStateEl) relayStateEl.textContent = network.relayEnabled ? (relayState === "verbunden" ? "Aktiv" : relayState === "fehler" ? "Fehler" : "Startet") : "Aus";
+        if(relaySubEl){
+          const relayNames = relayUrls.length ? `${relayUrls.length} Relay(s): ${relayUrls.slice(0,2).join(", ")}${relayUrls.length > 2 ? " …" : ""}` : "Nur LAN-Verbindungen";
+          relaySubEl.textContent = network.relayEnabled
+            ? (network.relayLastError ? `Relay-Fehler: ${network.relayLastError}` : relayNames)
+            : "Nur LAN-Verbindungen";
+        }
+        document.getElementById("status-client-type").textContent = settings.clientTypeLabel || (settings.clientType === "server" ? "Server" : "PC");
+        document.getElementById("status-peer-storage").textContent = settings.acceptsPeerStorage ? "Aktiv" : "Wartet";
+        document.getElementById("status-peer-storage-sub").textContent = settings.storagePolicy || "-";
+        document.getElementById("status-file-count").textContent = String(appState.fileCount || 0);
+        document.getElementById("status-storage-used").textContent = formatBytes(appState.stats.usedBytes);
+        document.getElementById("status-network-capacity").textContent = formatBytes(capacity.networkLimitBytes || settings.networkLimitBytes || appState.stats.limitBytes);
+        document.getElementById("status-network-capacity-sub").textContent = `${capacity.storagePeerCount || settings.storagePeerCount || 0} aktive Speicher-Peer(s)`;
+        document.getElementById("tray-files").textContent = `${appState.fileCount || 0} Datei(en)`;
+        const policy = document.getElementById("settings-current-policy");
+        if(policy) policy.textContent = settings.storagePolicy || "";
+        const settingsAuto = document.getElementById("settings-auto-discovery");
+        if(settingsAuto) settingsAuto.textContent = network.autoDiscoveryEnabled === false
+          ? "deaktiviert"
+          : `aktiv auf UDP-Port ${autoPorts.join(", ")} · Intervall ${network.discoveryIntervalSeconds || 10}s · Offline-Timeout ${network.peerTimeoutSeconds || 35}s`;
+        const free = document.getElementById("settings-storage-free");
+        if(free) free.textContent = formatBytes(settings.freeSharedStorageBytes || appState.stats.freeLimitBytes);
+        const storageGbInput = document.getElementById("settings-storage-gb");
+        if(storageGbInput && document.activeElement !== storageGbInput){
+          storageGbInput.min = String(settings.minSharedStorageGb || 5);
+          storageGbInput.value = String(Math.max(settings.minSharedStorageGb || 5, Math.round(Number(settings.sharedStorageGb || 5))));
+        }
+        const relayUrlInput = document.getElementById("settings-relay-url");
+        if(relayUrlInput) relayUrlInput.value = settings.fixedRelayUrl || settings.relayUrl || "";
+        const relayUrlsInput = document.getElementById("settings-relay-urls");
+        if(relayUrlsInput && document.activeElement !== relayUrlsInput) relayUrlsInput.value = settings.additionalRelayUrlsText || "";
+        const relayTokenMode = document.getElementById("settings-relay-token-mode");
+        if(relayTokenMode) relayTokenMode.textContent = settings.relayTokenLabel || "Automatisch, tägliche Rotation";
+        const relayStatus = document.getElementById("settings-relay-status");
+        if(relayStatus){
+          const urls = Array.isArray(network.relayUrls) ? network.relayUrls : [];
+          relayStatus.textContent = network.relayEnabled
+            ? `${network.relayStatus || "startet"} · ${urls.length || 1} Relay(s)`
+            : "nicht konfiguriert";
+        }
+        const selectedType = settings.clientType || "pc";
+        document.querySelectorAll('input[name="client_type"]').forEach(input => {
+          if(document.activeElement !== input) input.checked = input.value === selectedType;
+        });
+
+        const peerList = document.getElementById("network-peer-list");
+        peerList.innerHTML = "";
+        if(!(appState.peers || []).length){
+          const item = document.createElement("li");
+          item.textContent = "Keine aktiven Peers online.";
+          peerList.appendChild(item);
+        }else{
+          appState.peers.forEach(peer => {
+            const item = document.createElement("li");
+            const label = peer.display_name || peer.name || String(peer.node_id || "Peer").slice(0, 10);
+            const type = peer.client_type === "server" ? "Server" : (peer.client_type === "pc" ? "PC" : "unbekannt");
+            const storage = peer.accepts_peer_storage ? `P2P-Speicher aktiv · frei ${formatBytes(peer.free_storage_bytes || peer.shared_storage_bytes || 0)}` : "keine P2P-Ablage";
+            const api = peer.web_port ? `API :${peer.web_port}` : "API unbekannt";
+            const route = peer.transport === "relay" ? "PHP-Relay" : (peer.transport === "direct+relay" ? `${peer.host}:${peer.udp_port} · Relay-Fallback` : `${peer.host}:${peer.udp_port}`);
+            const age = Number(peer.last_seen_age_seconds || 0);
+            const seen = age < 2 ? "gerade aktiv" : `vor ${Math.round(age)}s gesehen`;
+            item.textContent = `${label} · ${type} · ${route} · ${api} · ${storage} · ${seen}`;
+            peerList.appendChild(item);
+          });
+        }
+      }
+
+      function makeDesktopItem({glyph, label, app, folder}){
+        const button = document.createElement("button");
+        button.className = "desk-item" + (folder ? " folder-icon" : " app-icon");
+        button.type = "button";
+        if(app) button.dataset.app = app;
+        if(folder) button.dataset.folder = folder;
+        const icon = document.createElement("span");
+        icon.className = "glyph";
+        icon.textContent = glyph;
+        const text = document.createElement("span");
+        text.className = "label";
+        text.textContent = label;
+        button.append(icon, text);
+        return button;
+      }
+      function renderDesktopFolders(){
+        desktopArea.querySelectorAll(".folder-icon").forEach(item => item.remove());
+        const root = ensureNode(VROOT);
+        root.folders.forEach(folderName => {
+          const fullPath = pathJoin(VROOT, folderName);
+          desktopArea.appendChild(makeDesktopItem({ glyph:"📁", label:folderName, folder:fullPath }));
+        });
+      }
+
+      function renderExplorerNav(){
+        const nav = document.getElementById("explorer-nav");
+        nav.innerHTML = "";
+        const rootButton = document.createElement("button");
+        rootButton.type = "button";
+        rootButton.className = "nav-item" + (explorerPath === VROOT ? " active" : "");
+        rootButton.textContent = "🖥️ Desktop";
+        rootButton.onclick = () => openExplorerAt(VROOT);
+        nav.appendChild(rootButton);
+        flattenFolderPaths().forEach(path => {
+          const button = document.createElement("button");
+          button.type = "button";
+          button.className = "nav-item" + (explorerPath === path ? " active" : "");
+          const level = Math.max(0, path.split("/").length - 1);
+          button.textContent = `${"  ".repeat(level)}📁 ${path.split("/").pop()}`;
+          button.title = path;
+          button.onclick = () => openExplorerAt(path);
+          nav.appendChild(button);
+        });
+      }
+      function renderBreadcrumbs(){
+        const bc = document.getElementById("explorer-breadcrumbs");
+        bc.innerHTML = "";
+        const rootBtn = document.createElement("button");
+        rootBtn.className = "crumb-btn";
+        rootBtn.type = "button";
+        rootBtn.textContent = "Desktop";
+        rootBtn.onclick = () => openExplorerAt(VROOT);
+        bc.appendChild(rootBtn);
+        let current = VROOT;
+        explorerPath.split("/").filter(Boolean).forEach(part => {
+          const sep = document.createElement("span");
+          sep.className = "crumb-sep";
+          sep.textContent = "›";
+          bc.appendChild(sep);
+          current = pathJoin(current, part);
+          const btn = document.createElement("button");
+          btn.className = "crumb-btn";
+          btn.type = "button";
+          btn.textContent = part;
+          const target = current;
+          btn.onclick = () => openExplorerAt(target);
+          bc.appendChild(btn);
+        });
+      }
+      function renderExplorer(){
+        const main = document.getElementById("explorer-main");
+        const data = ensureNode(explorerPath);
+        document.getElementById("explorer-back").disabled = explorerPath === VROOT;
+        renderBreadcrumbs();
+        renderExplorerNav();
+        main.innerHTML = "";
+        const head = document.createElement("div");
+        head.className = "explorer-heading";
+        const title = document.createElement("h2");
+        title.textContent = displayPath(explorerPath);
+        const hint = document.createElement("span");
+        hint.className = "tile-meta";
+        hint.textContent = "Doppelklick öffnet, Rechtsklick zeigt Aktionen";
+        head.append(title, hint);
+        const grid = document.createElement("div");
+        grid.className = "explorer-grid";
+        data.folders.forEach(folder => {
+          const fullPath = pathJoin(explorerPath, folder);
+          const tile = document.createElement("button");
+          tile.type = "button";
+          tile.className = "explorer-tile";
+          tile.dataset.kind = "folder";
+          tile.dataset.folder = fullPath;
+          tile.innerHTML = "<span class=\"icon\">📁</span>";
+          const name = document.createElement("span");
+          name.className = "tile-name";
+          name.textContent = folder;
+          const meta = document.createElement("span");
+          meta.className = "tile-meta";
+          const childNode = ensureNode(fullPath);
+          meta.textContent = `${childNode.folders.length} Ordner · ${childNode.files.length} Datei(en)`;
+          tile.append(name, meta);
+          tile.addEventListener("dblclick", () => openExplorerAt(fullPath));
+          tile.addEventListener("click", () => selectExplorerTile(tile, { kind:"folder", path:fullPath }));
+          tile.addEventListener("contextmenu", event => {
+            event.preventDefault();
+            selectExplorerTile(tile, { kind:"folder", path:fullPath });
+            openCtx(event.clientX, event.clientY);
+          });
+          grid.appendChild(tile);
+        });
+        data.files.forEach(file => {
+          const tile = document.createElement("button");
+          tile.type = "button";
+          tile.className = "explorer-tile";
+          tile.dataset.kind = "file";
+          tile.innerHTML = "<span class=\"icon\">📄</span>";
+          const name = document.createElement("span");
+          name.className = "tile-name";
+          name.textContent = file.name;
+          const meta = document.createElement("span");
+          meta.className = "tile-meta";
+          const distribution = file.remoteStorageCount > 0 ? ` · verteilt auf ${file.remoteStorageCount + 1} Knoten` : " · lokal";
+          meta.textContent = `${formatBytes(file.size)} · ${file.chunks} Chunk(s)${distribution}`;
+          const access = document.createElement("span");
+          access.className = "tile-meta";
+          access.textContent = file.shared ? "🌐 freigegeben" : "🔒 privat";
+          tile.append(name, meta, access);
+          tile.addEventListener("dblclick", () => { window.location.href = file.downloadUrl; });
+          tile.addEventListener("click", () => selectExplorerTile(tile, { kind:"file", file }));
+          tile.addEventListener("contextmenu", event => {
+            event.preventDefault();
+            selectExplorerTile(tile, { kind:"file", file });
+            openCtx(event.clientX, event.clientY);
+          });
+          grid.appendChild(tile);
+        });
+        if(!data.folders.length && !data.files.length){
+          const empty = document.createElement("div");
+          empty.className = "empty";
+          empty.textContent = "📂 Dieser Ordner ist leer. Erstelle einen Ordner oder lade eine Datei hoch.";
+          main.append(head, empty);
+          return;
+        }
+        main.append(head, grid);
+      }
+      function selectExplorerTile(tile, target){
+        document.querySelectorAll(".explorer-tile.selected").forEach(item => item.classList.remove("selected"));
+        tile.classList.add("selected");
+        selectedTarget = target;
+      }
+      function openExplorerAt(path){
+        explorerPath = path || VROOT;
+        openWindow("explorer");
+        renderExplorer();
+      }
+
+      function openWindow(app){
+        const win = windows[app];
+        if(!win) return;
+        win.hidden = false;
+        focusWindow(app);
+        if(!openOrder.includes(app)) openOrder.push(app);
+        if(app === "explorer") renderExplorer();
+        updateTaskbar();
+      }
+      function focusWindow(app){
+        const win = windows[app];
+        if(!win || win.hidden) return;
+        win.style.zIndex = String(++z);
+        activeWindow = app;
+        updateTaskbar();
+      }
+      function minimizeWindow(app){
+        const win = windows[app];
+        if(!win) return;
+        win.hidden = true;
+        if(activeWindow === app) activeWindow = null;
+        updateTaskbar();
+      }
+      function closeWindow(app){
+        const win = windows[app];
+        if(!win) return;
+        if(app === "transfer" && currentUploadXhr){
+          return;
+        }
+        win.hidden = true;
+        win.classList.remove("maximized");
+        openOrder = openOrder.filter(item => item !== app);
+        if(activeWindow === app) activeWindow = null;
+        updateTaskbar();
+      }
+      function toggleMaximize(app){
+        const win = windows[app];
+        if(!win || app === "transfer") return;
+        if(win.classList.contains("maximized")){
+          const prev = prevGeometry[app];
+          if(prev){ Object.assign(win.style, prev); }
+          win.classList.remove("maximized");
+          return;
+        }
+        const rect = win.getBoundingClientRect();
+        prevGeometry[app] = {
+          left: win.style.left || `${rect.left}px`,
+          top: win.style.top || `${rect.top}px`,
+          width: win.style.width || `${rect.width}px`,
+          height: win.style.height || `${rect.height}px`
+        };
+        win.style.left = "8px";
+        win.style.top = "8px";
+        win.style.width = "calc(100vw - 16px)";
+        win.style.height = "calc(100vh - 68px)";
+        win.classList.add("maximized");
+      }
+      function updateTaskbar(){
+        taskbarApps.innerHTML = "";
+        openOrder.forEach(app => {
+          const btn = document.createElement("button");
+          btn.type = "button";
+          btn.className = "task-btn" + (!windows[app].hidden && activeWindow === app ? " active" : "");
+          btn.textContent = appLabels[app] || app;
+          btn.onclick = () => {
+            if(windows[app].hidden){ openWindow(app); }
+            else { focusWindow(app); }
+          };
+          taskbarApps.appendChild(btn);
+        });
+      }
+
+      function openCtx(x, y){
+        updateCtxEnabled();
+        ctx.classList.add("open");
+        const pad = 8;
+        const rect = ctx.getBoundingClientRect();
+        let nx = x, ny = y;
+        if(nx + rect.width + pad > window.innerWidth) nx = window.innerWidth - rect.width - pad;
+        if(ny + rect.height + pad > window.innerHeight) ny = window.innerHeight - rect.height - pad;
+        ctx.style.left = `${Math.max(pad, nx)}px`;
+        ctx.style.top = `${Math.max(pad, ny)}px`;
+      }
+      function closeCtx(){ ctx.classList.remove("open"); ctx.style.left = "-9999px"; ctx.style.top = "-9999px"; }
+      function updateCtxEnabled(){
+        const isFile = selectedTarget.kind === "file";
+        const isFolder = selectedTarget.kind === "folder";
+        const isOwnerFile = isFile && selectedTarget.file.owner;
+        const isDeletableFolder = isFolder && normalizeFolderPath(selectedTarget.path) !== DEFAULT_FOLDER;
+        document.getElementById("ctxOpen").hidden = !(isFile || isFolder);
+        document.getElementById("ctxDownload").hidden = !isFile;
+        document.getElementById("ctxShare").hidden = !isOwnerFile;
+        document.getElementById("ctxDelete").hidden = !(isOwnerFile || isDeletableFolder);
+        document.getElementById("ctxUpload").hidden = false;
+        const share = document.getElementById("ctxShare").querySelector("span");
+        if(isOwnerFile) share.textContent = selectedTarget.file.shared ? "Freigabe deaktivieren" : "Freigeben an Peer…";
+        const deleteLabel = document.getElementById("ctxDelete").querySelector("span");
+        if(isDeletableFolder) deleteLabel.textContent = "Ordner löschen";
+        else if(isOwnerFile) deleteLabel.textContent = "Datei löschen";
+        else deleteLabel.textContent = "Löschen";
+      }
+
+      function suggestFolderName(basePath){
+        const node = ensureNode(basePath || VROOT);
+        const base = "Neuer Ordner";
+        let candidate = base;
+        let counter = 2;
+        while(node.folders.includes(candidate)){
+          candidate = `${base} (${counter})`;
+          counter += 1;
+        }
+        return candidate;
+      }
+      function openFolderDialog(basePath){
+        folderDialogBasePath = basePath || VROOT;
+        folderNameInput.value = suggestFolderName(folderDialogBasePath);
+        folderDialog.hidden = false;
+        setTimeout(() => { folderNameInput.focus(); folderNameInput.select(); }, 40);
+      }
+      function closeFolderDialog(){ folderDialog.hidden = true; }
+      async function createFolder(basePath, name){
+        const cleanName = String(name || "").trim();
+        if(!cleanName){ showToast("Ordnername darf nicht leer sein", "error"); return; }
+        const targetPath = pathJoin(basePath || VROOT, cleanName);
+        const body = new URLSearchParams({ folder: targetPath, next: "/" });
+        const response = await fetch("/folders", {
+          method:"POST",
+          headers:{ "X-Requested-With":"XMLHttpRequest", "Content-Type":"application/x-www-form-urlencoded", "Accept":"application/json" },
+          body
+        });
+        const data = await response.json();
+        if(!response.ok || !data.ok) throw new Error(data.message || "Ordner konnte nicht erstellt werden");
+        applyState(data.state);
+        showToast(data.message || `Ordner erstellt: ${targetPath}`, "success");
+        closeFolderDialog();
+        openExplorerAt(parentPath(normalizeFolderPath(targetPath)));
+      }
+
+      function chooseUploadTarget(){
+        if(selectedTarget.kind === "folder") return selectedTarget.path;
+        if(!windows.explorer.hidden) return explorerPath || DEFAULT_FOLDER;
+        return DEFAULT_FOLDER;
+      }
+      function openUploadPicker(targetPath){
+        pendingUploadTarget = normalizeFolderPath(targetPath || DEFAULT_FOLDER);
+        uploadInput.value = "";
+        uploadInput.click();
+      }
+      function makeUploadId(){
+        if(window.crypto && typeof window.crypto.randomUUID === "function"){
+          return window.crypto.randomUUID().replace(/[^a-zA-Z0-9_-]/g, "");
+        }
+        return `upload_${Date.now()}_${Math.random().toString(16).slice(2)}`.replace(/[^a-zA-Z0-9_-]/g, "");
+      }
+      function stopUploadPolling(){
+        if(currentUploadPoll){
+          clearInterval(currentUploadPoll);
+          currentUploadPoll = null;
+        }
+      }
+      function setMiniProgress(kind, percent){
+        const safe = Math.max(0, Math.min(100, Number(percent || 0)));
+        const bar = document.getElementById(`transfer-${kind}-progress`);
+        const label = document.getElementById(`transfer-${kind}-label`);
+        if(bar) bar.style.width = `${safe}%`;
+        if(label) label.textContent = `${safe.toFixed(0)}%`;
+      }
+      function renderTransferMetrics(items){
+        const box = document.getElementById("transfer-metrics");
+        if(!box) return;
+        box.innerHTML = "";
+        items.forEach(item => {
+          const span = document.createElement("span");
+          span.textContent = item;
+          box.appendChild(span);
+        });
+      }
+      function resetTransferDetails(file){
+        lastTransferPercent = 0;
+        document.getElementById("transfer-browser").textContent = file ? `0 B / ${formatBytes(file.size)}` : "0 B / 0 B";
+        document.getElementById("transfer-server").textContent = "wartet auf Dateiübertragung…";
+        document.getElementById("transfer-chunks").textContent = "—";
+        document.getElementById("transfer-compression").textContent = "—";
+        document.getElementById("transfer-peers").textContent = "—";
+        const localLine = document.getElementById("transfer-local");
+        if(localLine) localLine.textContent = "—";
+        document.getElementById("transfer-detail").textContent = "Nach dem Browser-Upload wird angezeigt, wie die Datei in Chunks zerlegt, komprimiert und im Peer-Netz verteilt wird.";
+        setMiniProgress("client", 0);
+        setMiniProgress("server", 0);
+        setMiniProgress("peer", 0);
+        renderTransferMetrics(["Chunks: —", "Komprimiert: —", "Peer-Schreibvorgänge: —", "Lokal: —"]);
+      }
+      function compressionSummary(progress){
+        const raw = Number(progress.rawBytesProcessed || progress.totalBytes || 0);
+        const stored = Number(progress.storedBytes || 0);
+        if(!raw || !stored) return "—";
+        const saving = (1 - stored / raw) * 100;
+        const relation = saving >= 0 ? `${saving.toFixed(0)}% kleiner` : `${Math.abs(saving).toFixed(0)}% größer`;
+        return `${formatBytes(stored)} gespeichert (${relation})`;
+      }
+      function peerPhasePercent(progress){
+        const targetCount = Number(progress.targetCount || 0);
+        if(progress.active === false && progress.ok) return 100;
+        if(targetCount <= 1 && !progress.remoteSuccesses && !progress.remoteFailures) return 100;
+        return Math.max(0, Math.min(100, Number(progress.serverPercent || 0)));
+      }
+      function applyUploadProgress(progress){
+        if(!progress || progress.known === false) return;
+        const serverPercent = Math.max(0, Math.min(100, Number(progress.serverPercent || 0)));
+        const shownPercent = Math.max(lastTransferPercent, Number(progress.percent || 0));
+        if(shownPercent) updateTransfer(shownPercent, progress.status || progress.message || "Server verarbeitet Upload…");
+        else if(progress.status) document.getElementById("transfer-status").textContent = progress.status;
+        document.getElementById("transfer-subtitle").textContent = progress.active === false
+          ? (progress.ok ? "Fertig verarbeitet" : "Verarbeitung fehlgeschlagen")
+          : "Server verarbeitet: Chunking, Komprimierung und P2P-Verteilung";
+
+        setMiniProgress("server", serverPercent);
+        setMiniProgress("peer", peerPhasePercent(progress));
+
+        const current = Number(progress.currentChunk || 0);
+        const total = Number(progress.totalChunks || 0);
+        document.getElementById("transfer-server").textContent = total
+          ? `${serverPercent.toFixed(0)}% · Chunk ${Math.min(current, total)}/${total}`
+          : `${serverPercent.toFixed(0)}%`;
+        document.getElementById("transfer-chunks").textContent = total ? `${Math.min(current, total)} / ${total}` : "—";
+        document.getElementById("transfer-compression").textContent = compressionSummary(progress);
+
+        const peerParts = [];
+        if(Number(progress.remoteSuccesses || 0)) peerParts.push(`${Number(progress.remoteSuccesses || 0)} Peer ok`);
+        if(Number(progress.localChunks || 0)) peerParts.push(`${Number(progress.localChunks || 0)} lokal`);
+        if(Number(progress.remoteFailures || 0)) peerParts.push(`${Number(progress.remoteFailures || 0)} Fehler`);
+        if(Number(progress.desiredReplicas || 0) > 1) peerParts.push(`${Number(progress.desiredReplicas)} Kopien/Ziel`);
+        document.getElementById("transfer-peers").textContent = peerParts.length ? peerParts.join(" · ") : "noch keine Verteilung";
+        const localLine = document.getElementById("transfer-local");
+        if(localLine) localLine.textContent = `${Number(progress.localChunks || 0)} Kopie(n)`;
+
+        const raw = Number(progress.rawBytesProcessed || 0);
+        const totalBytes = Number(progress.totalBytes || 0);
+        renderTransferMetrics([
+          total ? `Chunks: ${Math.min(current, total)}/${total}` : "Chunks: —",
+          progress.storedBytes ? `Komprimiert: ${formatBytes(progress.storedBytes)}` : "Komprimiert: —",
+          `Peer-Schreibvorgänge: ${Number(progress.remoteSuccesses || 0)}`,
+          `Lokal: ${Number(progress.localChunks || 0)}`,
+          totalBytes ? `Gelesen: ${formatBytes(raw)} / ${formatBytes(totalBytes)}` : "Gelesen: —",
+          progress.remoteFailures ? `Peer-Fehler: ${Number(progress.remoteFailures || 0)}` : `Ziele: ${Number(progress.targetCount || 0)}`
+        ]);
+
+        const lines = [];
+        if(progress.status) lines.push(progress.status);
+        if(progress.currentPeer) lines.push(`Aktuelles Ziel: ${progress.currentPeer}`);
+        if(totalBytes) lines.push(`Verarbeitet: ${formatBytes(raw)} von ${formatBytes(totalBytes)}`);
+        if(progress.desiredReplicas) lines.push(`Gewünschte Replikation: ${progress.desiredReplicas} Kopie(n) pro Chunk`);
+        const details = progress.details || {};
+        if(Array.isArray(details.peerTargets) && details.peerTargets.length) lines.push(`Speicher-Peers: ${details.peerTargets.join(", ")}`);
+        if(details.transferStatus) lines.push(`Abschlussstatus: ${details.transferStatus}`);
+        if(progress.message) lines.push(progress.message);
+        document.getElementById("transfer-detail").textContent = lines.join("\n") || "Serververarbeitung läuft…";
+      }
+      async function pollUploadProgress(uploadId){
+        if(!uploadId) return;
+        try{
+          const response = await fetch(`/api/uploads/${encodeURIComponent(uploadId)}`, { headers:{ "Accept":"application/json" } });
+          if(!response.ok) return;
+          const progress = await response.json();
+          applyUploadProgress(progress);
+          if(progress.known && progress.active === false) stopUploadPolling();
+        }catch(error){
+          // Polling ist nur Zusatzinformation. Der eigentliche Upload-XHR entscheidet über Erfolg/Fehler.
+        }
+      }
+      function startUploadPolling(uploadId){
+        stopUploadPolling();
+        currentUploadPoll = setInterval(() => pollUploadProgress(uploadId), 450);
+        pollUploadProgress(uploadId);
+      }
+      function showTransfer(file, folder){
+        openWindow("transfer");
+        resetTransferDetails(file);
+        document.getElementById("transfer-title").textContent = "Datei wird hochgeladen";
+        document.getElementById("transfer-subtitle").textContent = "Kopieren nach dcloud Datenspeicher";
+        document.getElementById("transfer-name").textContent = file.name;
+        document.getElementById("transfer-target").textContent = folder;
+        document.getElementById("transfer-status").textContent = "Upload wird vorbereitet…";
+        document.getElementById("transfer-percent").textContent = "0%";
+        document.getElementById("transfer-progress").style.width = "0%";
+        const cancel = document.getElementById("transfer-cancel");
+        cancel.textContent = "Abbrechen";
+        cancel.disabled = false;
+      }
+      function updateTransfer(percent, status){
+        const safe = Math.max(0, Math.min(100, Number(percent || 0)));
+        lastTransferPercent = Math.max(lastTransferPercent, safe);
+        document.getElementById("transfer-progress").style.width = `${lastTransferPercent}%`;
+        document.getElementById("transfer-percent").textContent = `${lastTransferPercent.toFixed(0)}%`;
+        if(status) document.getElementById("transfer-status").textContent = status;
+      }
+      function finishTransfer(message, ok=true, progress=null){
+        if(progress) applyUploadProgress(progress);
+        stopUploadPolling();
+        currentUploadXhr = null;
+        currentUploadId = null;
+        if(ok){
+          setMiniProgress("client", 100);
+          setMiniProgress("server", 100);
+          setMiniProgress("peer", 100);
+          updateTransfer(100, message || "Abgeschlossen");
+        }
+        document.getElementById("transfer-title").textContent = ok ? "Upload abgeschlossen" : "Upload fehlgeschlagen";
+        document.getElementById("transfer-status").textContent = message;
+        document.getElementById("transfer-subtitle").textContent = ok ? "Datei steht im Desktop bereit" : "Der Upload wurde nicht abgeschlossen";
+        const cancel = document.getElementById("transfer-cancel");
+        cancel.textContent = "Schließen";
+        cancel.disabled = false;
+      }
+      function uploadFile(file, folder){
+        const targetFolder = normalizeFolderPath(folder || DEFAULT_FOLDER);
+        const uploadId = makeUploadId();
+        currentUploadId = uploadId;
+        showTransfer(file, targetFolder);
+        const data = new FormData();
+        data.append("file", file);
+        data.append("folder", targetFolder);
+        data.append("next", "/");
+        data.append("upload_id", uploadId);
+        const xhr = new XMLHttpRequest();
+        currentUploadXhr = xhr;
+        xhr.open("POST", "/upload");
+        xhr.setRequestHeader("X-Requested-With", "XMLHttpRequest");
+        xhr.setRequestHeader("X-DCloud-Upload-Id", uploadId);
+        startUploadPolling(uploadId);
+        xhr.upload.onprogress = event => {
+          if(event.lengthComputable){
+            const clientPct = event.loaded / event.total * 100;
+            setMiniProgress("client", clientPct);
+            updateTransfer(clientPct * 0.35, `Datei wird übertragen… ${formatBytes(event.loaded)} von ${formatBytes(event.total)}`);
+            document.getElementById("transfer-browser").textContent = `${formatBytes(event.loaded)} / ${formatBytes(event.total)}`;
+          }else{
+            setMiniProgress("client", 18);
+            updateTransfer(18, "Datei wird übertragen…");
+            document.getElementById("transfer-browser").textContent = `${formatBytes(file.size)} ausgewählt`;
+          }
+        };
+        xhr.upload.onload = () => {
+          setMiniProgress("client", 100);
+          updateTransfer(Math.max(lastTransferPercent, 35), "Übertragung abgeschlossen; Server verarbeitet Chunks…");
+          document.getElementById("transfer-browser").textContent = `${formatBytes(file.size)} / ${formatBytes(file.size)}`;
+          document.getElementById("transfer-server").textContent = "startet…";
+          pollUploadProgress(uploadId);
+        };
+        xhr.onload = () => {
+          let payload = null;
+          try{ payload = JSON.parse(xhr.responseText); }catch(error){ payload = null; }
+          const progress = payload && payload.uploadProgress ? payload.uploadProgress : null;
+          if(xhr.status >= 200 && xhr.status < 300 && payload && payload.ok){
+            applyState(payload.state);
+            finishTransfer(payload.message || "Upload abgeschlossen", true, progress);
+            showToast(payload.message || "Upload abgeschlossen", "success");
+            if(targetFolder) openExplorerAt(targetFolder);
+          }else{
+            const message = payload && payload.message ? payload.message : "Upload fehlgeschlagen";
+            finishTransfer(message, false, progress);
+            showToast(message, "error");
+          }
+        };
+        xhr.onerror = () => { finishTransfer("Netzwerkfehler beim Upload", false); showToast("Netzwerkfehler beim Upload", "error"); };
+        xhr.onabort = () => { finishTransfer("Upload abgebrochen", false); showToast("Upload abgebrochen", "warning"); };
+        xhr.send(data);
+      }
+
+      async function ajaxPost(url, values){
+        const response = await fetch(url, {
+          method:"POST",
+          headers:{ "X-Requested-With":"XMLHttpRequest", "Content-Type":"application/x-www-form-urlencoded", "Accept":"application/json" },
+          body:new URLSearchParams(values || { next:"/" })
+        });
+        const data = await response.json();
+        if(!response.ok || !data.ok) throw new Error(data.message || "Aktion fehlgeschlagen");
+        if(data.state) applyState(data.state);
+        showToast(data.message || "Aktion abgeschlossen", "success");
+        return data;
+      }
+      async function deleteFile(file){
+        if(!confirm(`Datei wirklich löschen?\n${file.name}`)) return;
+        await ajaxPost(file.deleteUrl, { next:"/" });
+        selectedTarget = { kind:"desktop" };
+      }
+      async function deleteFolder(path){
+        const folderPath = normalizeFolderPath(path);
+        if(folderPath === DEFAULT_FOLDER){
+          showToast("Der Standardordner kann nicht gelöscht werden", "error");
+          return;
+        }
+        if(!confirm(`Ordner wirklich löschen?\n${folderPath}\n\nAlle eigenen Dateien und Unterordner darin werden gelöscht.`)) return;
+        const parent = parentPath(folderPath);
+        await ajaxPost("/folders/delete", { folder:folderPath, next:"/" });
+        selectedTarget = { kind:"desktop" };
+        openExplorerAt(parent);
+      }
+      function peerDisplayName(peer){
+        return peer.display_name || peer.name || String(peer.node_id || "Peer").slice(0, 12);
+      }
+      function openShareDialog(file){
+        pendingShareFile = file;
+        shareFileLabel.textContent = `${file.name} wird für einen Peer sichtbar gemacht.`;
+        sharePeerSelect.innerHTML = "";
+        const allOption = document.createElement("option");
+        allOption.value = "*";
+        allOption.textContent = "Alle aktiven Peers";
+        sharePeerSelect.appendChild(allOption);
+        (appState.peers || []).forEach(peer => {
+          const option = document.createElement("option");
+          option.value = peer.node_id;
+          const type = peer.client_type === "server" ? "Server" : (peer.client_type === "pc" ? "PC" : "Peer");
+          const route = peer.transport === "relay" ? "PHP-Relay" : `${peer.host}:${peer.udp_port}`;
+          option.textContent = `${peerDisplayName(peer)} (${type}, ${route})`;
+          sharePeerSelect.appendChild(option);
+        });
+        shareDialog.hidden = false;
+        setTimeout(() => sharePeerSelect.focus(), 40);
+      }
+      function closeShareDialog(){ shareDialog.hidden = true; pendingShareFile = null; }
+      async function shareFileWithPeer(file, peerNodeId){
+        await ajaxPost(file.shareUrl, { next:"/", shared:"on", peer_node_id: peerNodeId || "*" });
+      }
+      async function toggleShare(file){
+        if(file.shared){
+          if(!confirm(`Freigabe wirklich deaktivieren?\n${file.name}`)) return;
+          await ajaxPost(file.shareUrl, { next:"/", shared:"off" });
+          return;
+        }
+        openShareDialog(file);
+      }
+
+      desktopArea.addEventListener("click", event => {
+        const item = event.target.closest(".desk-item");
+        document.querySelectorAll(".desk-item.selected").forEach(el => el.classList.remove("selected"));
+        if(item){
+          item.classList.add("selected");
+          selectedTarget = item.dataset.folder ? { kind:"folder", path:item.dataset.folder } : { kind:"app", app:item.dataset.app };
+        }else{
+          selectedTarget = { kind:"desktop" };
+        }
+      });
+      desktopArea.addEventListener("dblclick", event => {
+        const item = event.target.closest(".desk-item");
+        if(!item) return;
+        if(item.dataset.app) openWindow(item.dataset.app);
+        if(item.dataset.folder) openExplorerAt(item.dataset.folder);
+      });
+      desktopArea.addEventListener("keydown", event => {
+        if(event.key !== "Enter") return;
+        const item = document.activeElement.closest(".desk-item");
+        if(!item) return;
+        if(item.dataset.app) openWindow(item.dataset.app);
+        if(item.dataset.folder) openExplorerAt(item.dataset.folder);
+      });
+      desktopArea.addEventListener("contextmenu", event => {
+        event.preventDefault();
+        const item = event.target.closest(".desk-item");
+        document.querySelectorAll(".desk-item.selected").forEach(el => el.classList.remove("selected"));
+        if(item && item.dataset.folder){
+          selectedTarget = { kind:"folder", path:item.dataset.folder };
+          item.classList.add("selected");
+        }else{
+          selectedTarget = { kind:"desktop" };
+        }
+        openCtx(event.clientX, event.clientY);
+      });
+
+      document.querySelectorAll(".window").forEach(win => {
+        win.addEventListener("mousedown", () => focusWindow(win.querySelector(".titlebar")?.dataset.app));
+      });
+      document.querySelectorAll(".window-controls").forEach(group => {
+        group.addEventListener("click", event => {
+          const button = event.target.closest("button");
+          if(!button) return;
+          const app = button.closest(".window").querySelector(".titlebar").dataset.app;
+          const action = button.dataset.action;
+          if(action === "min") minimizeWindow(app);
+          if(action === "max") toggleMaximize(app);
+          if(action === "close") closeWindow(app);
+        });
+      });
+      let drag = null;
+      document.querySelectorAll(".titlebar").forEach(bar => {
+        bar.addEventListener("mousedown", event => {
+          if(event.button !== 0 || event.target.closest("button")) return;
+          const win = bar.closest(".window");
+          if(win.classList.contains("maximized")) return;
+          const rect = win.getBoundingClientRect();
+          drag = { win, startX:event.clientX, startY:event.clientY, left:rect.left, top:rect.top };
+          event.preventDefault();
+        });
+      });
+      window.addEventListener("mousemove", event => {
+        if(!drag) return;
+        const nextLeft = Math.max(4, Math.min(window.innerWidth - 120, drag.left + event.clientX - drag.startX));
+        const nextTop = Math.max(4, Math.min(window.innerHeight - 82, drag.top + event.clientY - drag.startY));
+        drag.win.style.left = `${nextLeft}px`;
+        drag.win.style.top = `${nextTop}px`;
+      });
+      window.addEventListener("mouseup", () => { drag = null; });
+
+      document.getElementById("explorer-back").onclick = () => openExplorerAt(parentPath(explorerPath));
+      document.getElementById("explorer-newfolder").onclick = () => openFolderDialog(explorerPath);
+      document.getElementById("explorer-upload").onclick = () => openUploadPicker(explorerPath || DEFAULT_FOLDER);
+      document.getElementById("startBtn").onclick = () => openWindow("explorer");
+      async function triggerDiscoveryRefresh(){
+        try{
+          const response = await fetch("/api/discovery/announce", {
+            method:"POST",
+            headers:{ "X-Requested-With":"XMLHttpRequest", "Accept":"application/json" }
+          });
+          const payload = await response.json();
+          if(payload.state) applyState(payload.state);
+          if(!response.ok || !payload.ok) throw new Error(payload.message || "Netzwerksuche konnte nicht gestartet werden");
+          showToast(payload.message || "Netzwerksuche gestartet", "success");
+        }catch(error){
+          await refreshState().catch(()=>{});
+          showToast(error.message, "warning");
+        }
+      }
+      document.getElementById("settings-refresh").onclick = () => triggerDiscoveryRefresh();
+      const settingsForm = document.getElementById("settings-form");
+      if(settingsForm){
+        settingsForm.addEventListener("submit", async event => {
+          event.preventDefault();
+          try{
+            const response = await fetch("/settings", {
+              method:"POST",
+              headers:{ "X-Requested-With":"XMLHttpRequest", "Accept":"application/json" },
+              body:new FormData(settingsForm)
+            });
+            const payload = await response.json();
+            if(!response.ok || !payload.ok) throw new Error(payload.message || "Einstellungen konnten nicht gespeichert werden");
+            applyState(payload.state);
+            showToast(payload.message || "Einstellungen gespeichert", "success");
+          }catch(error){
+            showToast(error.message, "error");
+          }
+        });
+      }
+
+      document.getElementById("ctxOpen").onclick = () => {
+        closeCtx();
+        if(selectedTarget.kind === "folder") openExplorerAt(selectedTarget.path);
+        if(selectedTarget.kind === "file") window.location.href = selectedTarget.file.downloadUrl;
+      };
+      document.getElementById("ctxDownload").onclick = () => { closeCtx(); if(selectedTarget.kind === "file") window.location.href = selectedTarget.file.downloadUrl; };
+      document.getElementById("ctxShare").onclick = () => { closeCtx(); if(selectedTarget.kind === "file") toggleShare(selectedTarget.file).catch(error => showToast(error.message, "error")); };
+      document.getElementById("ctxDelete").onclick = () => {
+        closeCtx();
+        if(selectedTarget.kind === "file") deleteFile(selectedTarget.file).catch(error => showToast(error.message, "error"));
+        if(selectedTarget.kind === "folder") deleteFolder(selectedTarget.path).catch(error => showToast(error.message, "error"));
+      };
+      document.getElementById("ctxNewFolder").onclick = () => { closeCtx(); openFolderDialog(selectedTarget.kind === "folder" ? selectedTarget.path : (windows.explorer.hidden ? VROOT : explorerPath)); };
+      document.getElementById("ctxUpload").onclick = () => { closeCtx(); openUploadPicker(chooseUploadTarget()); };
+      document.getElementById("ctxRefresh").onclick = () => { closeCtx(); refreshState().then(()=>showToast("Aktualisiert", "success")).catch(error=>showToast(error.message, "error")); };
+      window.addEventListener("click", event => { if(!event.target.closest("#ctxMenu")) closeCtx(); });
+      window.addEventListener("blur", closeCtx);
+      window.addEventListener("resize", closeCtx);
+
+      document.getElementById("folderDialogCancel").onclick = closeFolderDialog;
+      folderDialog.addEventListener("click", event => { if(event.target === folderDialog) closeFolderDialog(); });
+      document.getElementById("shareDialogCancel").onclick = closeShareDialog;
+      shareDialog.addEventListener("click", event => { if(event.target === shareDialog) closeShareDialog(); });
+      document.getElementById("shareDialogForm").addEventListener("submit", event => {
+        event.preventDefault();
+        if(!pendingShareFile) return;
+        const target = sharePeerSelect.value || "*";
+        shareFileWithPeer(pendingShareFile, target)
+          .then(() => closeShareDialog())
+          .catch(error => showToast(error.message, "error"));
+      });
+      document.getElementById("folderDialogForm").addEventListener("submit", event => {
+        event.preventDefault();
+        createFolder(folderDialogBasePath, folderNameInput.value).catch(error => showToast(error.message, "error"));
+      });
+      uploadInput.addEventListener("change", () => {
+        const file = uploadInput.files && uploadInput.files[0];
+        if(file) uploadFile(file, pendingUploadTarget);
+      });
+      document.getElementById("transfer-cancel").onclick = () => {
+        if(currentUploadXhr){
+          stopUploadPolling();
+          currentUploadXhr.abort();
+          currentUploadXhr = null;
+        }else{
+          closeWindow("transfer");
+        }
+      };
+
+      window.addEventListener("keydown", event => {
+        if(event.key === "Escape"){
+          if(!folderDialog.hidden) closeFolderDialog();
+          closeCtx();
+        }
+        if(event.key === "F5") return;
+        if(event.shiftKey && (event.key === "N" || event.key === "n")){
+          event.preventDefault();
+          openFolderDialog(windows.explorer.hidden ? VROOT : explorerPath);
+        }
+        if(event.ctrlKey && (event.key === "u" || event.key === "U")){
+          event.preventDefault();
+          openUploadPicker(chooseUploadTarget());
+        }
+        if(event.key === "Delete" && selectedTarget.kind === "file" && selectedTarget.file.owner){
+          event.preventDefault();
+          deleteFile(selectedTarget.file).catch(error => showToast(error.message, "error"));
+        }
+        if(event.key === "Delete" && selectedTarget.kind === "folder" && normalizeFolderPath(selectedTarget.path) !== DEFAULT_FOLDER){
+          event.preventDefault();
+          deleteFolder(selectedTarget.path).catch(error => showToast(error.message, "error"));
+        }
+        if(event.key === "Enter"){
+          if(selectedTarget.kind === "folder") openExplorerAt(selectedTarget.path);
+          if(selectedTarget.kind === "file") window.location.href = selectedTarget.file.downloadUrl;
+        }
+        if(event.ctrlKey && (event.key === "s" || event.key === "S") && selectedTarget.kind === "file"){
+          event.preventDefault();
+          window.location.href = selectedTarget.file.downloadUrl;
+        }
+        if(event.ctrlKey && (event.key === "h" || event.key === "H") && selectedTarget.kind === "file" && selectedTarget.file.owner){
+          event.preventDefault();
+          toggleShare(selectedTarget.file).catch(error => showToast(error.message, "error"));
+        }
+      });
+
+      applyState(appState);
+      updateTaskbar();
+      setInterval(() => { refreshState().catch(() => {}); }, 5000);
+    })();
+  </script>
+</body>
+</html>

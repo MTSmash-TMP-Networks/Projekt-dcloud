@@ -1,0 +1,115 @@
+"""Command-line entry point for the dcloud client MVP."""
+
+from __future__ import annotations
+
+import argparse
+import logging
+import socket
+import sys
+from contextlib import closing
+from pathlib import Path
+
+if __package__ in {None, ""}:
+    # Support ``python main.py`` after cd'ing into the package directory.
+    # Relative imports below still run as package imports once the project root
+    # is on sys.path and __package__ identifies the package name.
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+    __package__ = "dcloud_client"
+
+from .config import AppConfig, load_config
+from .identity import IdentityManager
+from .manifests import ManifestStore
+from .network.peers import InMemoryPeerProvider
+from .network.udp_discovery import UdpDiscoveryTransport
+from .storage import ChunkStore
+from .web.app import create_app
+
+LOG = logging.getLogger(__name__)
+
+
+def configure_logging(verbose: bool = False) -> None:
+    logging.basicConfig(
+        level=logging.DEBUG if verbose else logging.INFO,
+        format="%(asctime)s %(levelname)s [%(name)s] %(message)s",
+    )
+
+
+def choose_udp_port(config: AppConfig) -> int:
+    candidates = [config.network.udp_port] + [
+        port for port in range(config.network.udp_port_range.start, config.network.udp_port_range.end + 1) if port != config.network.udp_port
+    ]
+    for port in candidates:
+        with closing(socket.socket(socket.AF_INET, socket.SOCK_DGRAM)) as sock:
+            try:
+                sock.bind((config.network.udp_host, port))
+                return port
+            except OSError:
+                LOG.warning("UDP port %s is unavailable, trying next candidate", port)
+    raise RuntimeError("No UDP port available in configured range")
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description="dcloud decentralized storage client MVP")
+    parser.add_argument("--config", default="config.yml", help="Path to config.yml")
+    parser.add_argument("--verbose", action="store_true", help="Enable debug logging")
+    return parser
+
+
+def main() -> None:
+    args = build_parser().parse_args()
+    configure_logging(args.verbose)
+    config = load_config(args.config)
+
+    chunk_store = ChunkStore(
+        root=config.storage.path,
+        limit_bytes=config.storage.limit_bytes,
+        min_free_bytes=config.storage.min_free_bytes,
+        chunk_size=config.storage.chunk_size_bytes,
+    )
+    chunk_store.initialize()
+
+    identity = IdentityManager(config.node.identity_path).load_or_create()
+    manifest_store = ManifestStore(chunk_store)
+    peer_provider = InMemoryPeerProvider(peer_timeout_seconds=config.network.peer_timeout_seconds)
+
+    udp_port = choose_udp_port(config)
+    discovery = UdpDiscoveryTransport(
+        host=config.network.udp_host,
+        port=udp_port,
+        protocol_magic=config.security.protocol_magic,
+        identity=identity,
+        node_name=config.node.name,
+        peer_provider=peer_provider,
+        bootstrap_nodes=config.network.bootstrap_nodes,
+        tree_parent_nodes=config.network.tree_parent_nodes,
+        relay_children=config.network.relay_children,
+        discovery_interval_seconds=config.network.discovery_interval_seconds,
+        auto_discovery_enabled=config.network.auto_discovery_enabled,
+        auto_discovery_ports=config.network.auto_discovery_ports,
+        auto_discovery_hosts=config.network.auto_discovery_hosts,
+        startup_discovery_seconds=config.network.startup_discovery_seconds,
+        startup_discovery_interval_seconds=config.network.startup_discovery_interval_seconds,
+        peer_timeout_seconds=config.network.peer_timeout_seconds,
+        peer_cleanup_interval_seconds=config.network.peer_cleanup_interval_seconds,
+        client_type=config.node.client_type,
+        shared_storage_bytes=config.storage.limit_bytes,
+        free_storage_bytes=chunk_store.stats().free_limit_bytes,
+        web_port=config.web.port,
+        relay_urls=config.network.relay_urls,
+    )
+    discovery.start()
+
+    config.network.udp_port = udp_port
+    app = create_app(config, identity, chunk_store, manifest_store, peer_provider, discovery)
+    LOG.info("Starting local web UI on http://%s:%s", config.web.host, config.web.port)
+    try:
+        app.run(host=config.web.host, port=config.web.port, threaded=True)
+    finally:
+        stop_relays = app.config.get("DCLOUD_STOP_RELAYS")
+        if callable(stop_relays):
+            stop_relays()
+        discovery.stop()
+
+
+if __name__ == "__main__":
+    main()

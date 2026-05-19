@@ -1,0 +1,895 @@
+<!-- =========================
+     files.html (Datei-Explorer App)
+     - Rechtsklick Kontextmenü
+     - Upload + Upload-Status (UI)
+     - Ordner erstellen (Form)
+     ========================= -->
+<!doctype html>
+<html lang="de">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>dcloud Datei-Explorer</title>
+
+  <style>
+    :root{
+      color-scheme: light;
+      --desktop: radial-gradient(circle at top left, #5aa6ff 0, #1f68c7 38%, #114080 100%);
+      --taskbar: rgba(8, 24, 58, .92);
+
+      --window: #f8fbff;
+      --window-border: #9fb4d7;
+      --titlebar: linear-gradient(90deg, #0b5fc2, #2f86ff);
+
+      --text: #162238;
+      --muted: #5c6b82;
+      --line: #d9e3f3;
+      --accent: #0b65d8;
+      --danger: #b42318;
+      --success: #067647;
+
+      --shadow: 0 18px 50px #001b4f66;
+      --shadow-soft: 0 10px 30px #001b4f3d;
+      --radius: 12px;
+
+      --menu-bg: rgba(255,255,255,.94);
+      --menu-border: rgba(255,255,255,.55);
+      --menu-text: #0b1a33;
+    }
+
+    *{ box-sizing:border-box; }
+    html, body{ height:100%; }
+    body{
+      margin:0;
+      font-family: "Segoe UI", system-ui, sans-serif;
+      color: var(--text);
+      background: var(--desktop);
+      overflow:hidden;
+    }
+    a{ color: var(--accent); text-decoration:none; }
+    a:hover{ text-decoration: underline; }
+    code{ word-break: break-all; font-family: Consolas, "Liberation Mono", monospace; }
+
+    .desktop{
+      position:relative;
+      width:100vw;
+      height:100vh;
+      padding: 14px 14px 52px;
+    }
+
+    .window{
+      position:absolute;
+      inset: 14px 14px 62px 14px;
+      border: 1px solid var(--window-border);
+      border-radius: var(--radius);
+      background: var(--window);
+      box-shadow: var(--shadow);
+      overflow:hidden;
+      display:flex;
+      flex-direction:column;
+      min-height: 0;
+    }
+
+    .titlebar{
+      display:flex;
+      justify-content:space-between;
+      align-items:center;
+      padding: 10px 12px;
+      color:#fff;
+      background: var(--titlebar);
+      font-weight: 650;
+      user-select:none;
+    }
+    .window-controls{ display:flex; gap:7px; }
+    .window-controls span{
+      display:inline-grid;
+      place-items:center;
+      width: 32px;
+      height: 24px;
+      border: 1px solid #ffffff88;
+      border-radius: 8px;
+      background: #ffffff1a;
+    }
+
+    .toolbar{
+      display:flex;
+      align-items:center;
+      gap: .5rem;
+      padding: 10px 12px;
+      border-bottom: 1px solid var(--line);
+      background: #eef5ff;
+    }
+    .button, button{
+      border: 1px solid #96acd0;
+      border-radius: 10px;
+      padding: .42rem .7rem;
+      background: linear-gradient(#fff, #dfeaff);
+      color: var(--text);
+      cursor:pointer;
+      font: inherit;
+    }
+    .button:hover, button:hover{ border-color: var(--accent); }
+
+    .crumbs{
+      flex:1;
+      padding: .48rem .75rem;
+      border: 1px solid #b8c7dc;
+      border-radius: 10px;
+      background: #fff;
+      color: var(--muted);
+      white-space:nowrap;
+      overflow:hidden;
+      text-overflow:ellipsis;
+    }
+
+    .content{
+      display:grid;
+      grid-template-columns: 280px minmax(0, 1fr);
+      min-height:0;
+      flex:1;
+    }
+
+    aside{
+      padding: 12px;
+      border-right: 1px solid var(--line);
+      background: #edf4fd;
+      overflow:auto;
+    }
+    aside h3{ margin: .2rem 0 .75rem; }
+    main{
+      padding: 14px;
+      overflow:auto;
+      min-width:0;
+    }
+
+    .nav-item{
+      display:flex;
+      gap:.55rem;
+      align-items:center;
+      padding: .55rem .55rem;
+      border-radius: 10px;
+      color: var(--text);
+    }
+    .nav-item.active, .nav-item:hover{ background: #dbeaff; text-decoration:none; }
+
+    .flash{
+      margin: 0 0 12px;
+      padding: .7rem .85rem;
+      border-radius: 10px;
+      background: #fff;
+      border-left: 6px solid var(--accent);
+      box-shadow: 0 1px 2px #0001;
+    }
+    .success{ border-left-color: var(--success); color: var(--success); }
+    .error{ border-left-color: var(--danger); color: var(--danger); }
+
+    input[type="text"], input[type="file"], select{
+      width:100%;
+      padding: .5rem .55rem;
+      border: 1px solid #aebbd0;
+      border-radius: 10px;
+      background: #fff;
+    }
+
+    .section-title{
+      display:flex;
+      align-items:baseline;
+      justify-content:space-between;
+      gap: 10px;
+      margin: 10px 0 8px;
+    }
+    .section-title h1, .section-title h2{ margin:0; }
+    .section-title h1{ font-size: 1.25rem; }
+    .section-title h2{ font-size: 1.05rem; }
+
+    .desktop-grid{
+      display:grid;
+      grid-template-columns: repeat(auto-fill, minmax(170px, 1fr));
+      gap: 12px;
+      margin-bottom: 18px;
+    }
+    .file-tile, .folder-tile{
+      min-height: 132px;
+      padding: 12px 10px;
+      border: 1px solid transparent;
+      border-radius: 12px;
+      background: #ffffffd6;
+      text-align:center;
+      box-shadow: 0 1px 2px #0001;
+      position:relative;
+    }
+    .file-tile:hover, .folder-tile:hover{
+      border-color: #8ab8f4;
+      background: #e8f2ff;
+    }
+    .file-tile.selected, .folder-tile.selected{
+      outline: 2px solid rgba(11,101,216,.45);
+      background: #e8f2ff;
+    }
+    .folder-section{
+      border-radius: 12px;
+      padding: 2px;
+      margin-bottom: 8px;
+    }
+    .folder-section.selected > .section-title{
+      outline: 2px solid rgba(11,101,216,.32);
+      background: #e8f2ff;
+      border-radius: 10px;
+      padding: 6px 8px;
+    }
+    .icon{
+      display:block;
+      margin-bottom: .35rem;
+      font-size: 2.6rem;
+      line-height:1;
+      user-select:none;
+    }
+    .tile-name{
+      display:block;
+      font-weight: 650;
+      overflow-wrap:anywhere;
+    }
+    .tile-meta{
+      display:block;
+      margin-top: .2rem;
+      color: var(--muted);
+      font-size: .82rem;
+    }
+    .actions{
+      display:flex;
+      flex-wrap:wrap;
+      justify-content:center;
+      gap: .35rem;
+      margin-top: .55rem;
+    }
+    .delete{ color: var(--danger); }
+
+    .empty{
+      padding: 2rem;
+      border: 1px dashed #9fb4d7;
+      border-radius: 12px;
+      background: white;
+      text-align:center;
+      color: var(--muted);
+    }
+
+    /* Upload status (UI) */
+    .upload-status{
+      margin-top: 10px;
+      padding: 10px;
+      border-radius: 12px;
+      border: 1px solid var(--line);
+      background: #fff;
+    }
+    .progress{
+      height: 10px;
+      border-radius: 999px;
+      background: #e6eefb;
+      overflow:hidden;
+      border: 1px solid #d3def2;
+    }
+    .progress > div{
+      height:100%;
+      width:0%;
+      background: linear-gradient(90deg, #2f86ff, #0b5fc2);
+      transition: width .15s ease;
+    }
+    .upload-row{
+      display:flex;
+      gap:10px;
+      align-items:center;
+      justify-content:space-between;
+      margin-top: 8px;
+      color: var(--muted);
+      font-size: .9rem;
+    }
+    .upload-row span:last-child{ text-align:right; overflow-wrap:anywhere; }
+    .upload-detail{ margin-top:9px; padding:.55rem; border-radius:10px; background:#f2f7ff; color:#24466f; font-size:.84rem; line-height:1.35; white-space:pre-line; }
+
+    /* Context menu */
+    .ctx{
+      position:fixed;
+      z-index:9999;
+      min-width: 260px;
+      padding: 6px;
+      border-radius: 12px;
+      border: 1px solid var(--menu-border);
+      background: var(--menu-bg);
+      color: var(--menu-text);
+      box-shadow: var(--shadow-soft);
+      backdrop-filter: blur(10px);
+      display:none;
+      user-select:none;
+    }
+    .ctx.open{ display:block; }
+    .ctx button{
+      width:100%;
+      display:flex;
+      align-items:center;
+      justify-content:space-between;
+      gap:10px;
+      padding: 9px 10px;
+      border:0;
+      border-radius: 10px;
+      background: transparent;
+      color: inherit;
+      cursor:pointer;
+      font: inherit;
+      text-align:left;
+    }
+    .ctx button:hover{ background: rgba(11,101,216,.10); }
+    .sep{ height:1px; background: rgba(10,30,60,.12); margin: 6px 4px; }
+    .kbd{
+      font-size:.78rem;
+      opacity:.75;
+      border: 1px solid rgba(0,0,0,.12);
+      padding: 1px 6px;
+      border-radius: 8px;
+      background: rgba(255,255,255,.7);
+    }
+
+    /* Taskbar */
+    .taskbar{
+      position:absolute;
+      left:0; right:0; bottom:0;
+      height:48px;
+      display:flex;
+      align-items:center;
+      gap:10px;
+      padding: 8px 12px;
+      background: var(--taskbar);
+      color:#fff;
+      box-shadow: 0 -2px 12px #0005;
+      user-select:none;
+    }
+    .start{
+      padding: .42rem .85rem;
+      border-radius: 10px;
+      background: #1f7ae0;
+      font-weight: 800;
+      cursor:pointer;
+    }
+    .task{
+      padding: .42rem .8rem;
+      border: 1px solid #ffffff44;
+      border-radius: 10px;
+      background: #ffffff1a;
+    }
+    .tray{ margin-left:auto; opacity:.92; }
+
+    @media (max-width: 900px){
+      body{ overflow:auto; }
+      .desktop{ overflow:auto; height:auto; min-height:100vh; padding-bottom: 0; }
+      .window{ position:relative; inset:auto; margin: 10px; height:auto; min-height: 560px; }
+      .taskbar{ position:sticky; bottom:0; }
+    }
+    @media (max-width: 760px){
+      .content{ grid-template-columns: 1fr; }
+      aside{ border-right:0; border-bottom: 1px solid var(--line); }
+    }
+  </style>
+</head>
+
+<body>
+  <div class="desktop" id="explorerRoot">
+    <div class="window" role="application" aria-label="dcloud Datei-Explorer">
+
+      <div class="titlebar">
+        <span>📁 dcloud Datenspeicher – Datei-Explorer</span>
+        <div class="window-controls" aria-hidden="true"><span>–</span><span>□</span><span>×</span></div>
+      </div>
+
+      <div class="toolbar">
+        <a class="button" href="{{ url_for('dashboard') }}">Zum Desktop</a>
+        <div class="crumbs">Arbeitsplatz &gt; dcloud Datenspeicher</div>
+        <button type="button" class="button" id="btnNewFolder">Neuer Ordner</button>
+      </div>
+
+      <div class="content">
+        <aside>
+          <h3>Aktionen</h3>
+
+          <!-- Upload -->
+          <section id="upload">
+            <div class="section-title">
+              <h2>Upload</h2>
+            </div>
+
+            <form method="post" action="{{ url_for('upload') }}" enctype="multipart/form-data" id="uploadForm">
+              <input type="hidden" name="next" value="{{ url_for('files') }}">
+              <p><input type="file" name="file" id="uploadFile" required></p>
+              <p>
+                <label>Ordner<br>
+                  <select name="folder">
+                    {% for folder in folders %}
+                      <option value="{{ folder }}">{{ folder }}</option>
+                    {% endfor %}
+                  </select>
+                </label>
+              </p>
+              <button type="submit">Hochladen</button>
+            </form>
+
+            <div class="upload-status" id="uploadStatus" hidden>
+              <div class="progress" aria-label="Upload Fortschritt"><div id="uploadBar"></div></div>
+              <div class="upload-row">
+                <span id="uploadName">—</span>
+                <span id="uploadPct">0%</span>
+              </div>
+              <div class="upload-row">
+                <span>Status:</span>
+                <span id="uploadState">bereit</span>
+              </div>
+              <div class="upload-row"><span>Browser:</span><span id="uploadBrowser">0 B / 0 B</span></div>
+              <div class="upload-row"><span>Server:</span><span id="uploadServer">wartet…</span></div>
+              <div class="upload-row"><span>Chunks:</span><span id="uploadChunks">—</span></div>
+              <div class="upload-row"><span>Komprimierung:</span><span id="uploadCompression">—</span></div>
+              <div class="upload-row"><span>Peer-Speicher:</span><span id="uploadPeers">—</span></div>
+              <div class="upload-detail" id="uploadDetail">Nach dem Browser-Upload wird die Chunk-, Komprimierungs- und Peer-Verarbeitung angezeigt.</div>
+            </div>
+          </section>
+
+          <hr style="border:0; border-top:1px solid var(--line); margin: 12px 0;">
+
+          <!-- Ordner erstellen -->
+          <section id="folders-new">
+            <div class="section-title">
+              <h2>Ordner</h2>
+            </div>
+
+            <form method="post" action="{{ url_for('create_folder') }}" id="createFolderForm">
+              <input type="hidden" name="next" value="{{ url_for('files') }}">
+              <p><input type="text" name="folder" id="folderInput" placeholder="Neuer Ordner (z.B. Projekte/Kunde A)" required></p>
+              <button type="submit">Ordner erstellen</button>
+            </form>
+          </section>
+
+          <hr style="border:0; border-top:1px solid var(--line); margin: 12px 0;">
+
+          <h3>Navigation</h3>
+          <a class="nav-item active" href="{{ url_for('files') }}">💾 Alle Dateien</a>
+          {% for folder in folder_tree %}
+            <a class="nav-item" href="#folder-{{ loop.index }}">📁 {{ folder.name }} ({{ folder.files|length }})</a>
+          {% endfor %}
+        </aside>
+
+        <main id="mainArea">
+          {% with messages = get_flashed_messages(with_categories=true) %}
+            {% for category, message in messages %}
+              <p class="flash {{ category }}">{{ message }}</p>
+            {% endfor %}
+          {% endwith %}
+
+          <div class="section-title">
+            <h1>Dateien</h1>
+            <div style="color: var(--muted); font-size:.92rem;">Rechtsklick für Kontextmenü</div>
+          </div>
+
+          {% for folder in folder_tree %}
+            <section id="folder-{{ loop.index }}"
+                     class="folder-section"
+                     tabindex="0"
+                     data-kind="folder"
+                     data-folder="{{ folder.name }}"
+                     data-deletable="{% if folder.name != default_folder %}1{% else %}0{% endif %}">
+              <div class="section-title">
+                <h2>📁 {{ folder.name }}</h2>
+                <div style="color: var(--muted); font-size:.84rem;">Rechtsklick für Ordner-Aktionen</div>
+              </div>
+
+              <div class="desktop-grid">
+                {% for manifest in folder.files %}
+                  <article class="file-tile"
+                           tabindex="0"
+                           data-kind="file"
+                           data-manifest-id="{{ manifest.manifest_id }}"
+                           data-owner="{% if manifest.owner_node_id == identity.node_id %}1{% else %}0{% endif %}"
+                           data-download="{{ url_for('download', manifest_id=manifest.manifest_id) }}"
+                           data-delete="{{ url_for('delete_file', manifest_id=manifest.manifest_id) }}"
+                           data-share="{{ url_for('share_file', manifest_id=manifest.manifest_id) }}"
+                           data-shared="{% if manifest.access.visibility == 'shared' %}1{% else %}0{% endif %}">
+                    <span class="icon">📄</span>
+                    <span class="tile-name">{{ manifest.file_name }}</span>
+                    <span class="tile-meta">{{ manifest.file_size|human_bytes }} · {{ manifest.chunks|length }} Chunk(s)</span>
+                    <span class="tile-meta">{% if manifest.access.visibility == 'shared' %}🌐 freigegeben{% else %}🔒 privat{% endif %}</span>
+
+                    <div class="actions">
+                      <a class="button" href="{{ url_for('download', manifest_id=manifest.manifest_id) }}">Öffnen</a>
+
+                      {% if manifest.owner_node_id == identity.node_id %}
+                        <form method="post" action="{{ url_for('share_file', manifest_id=manifest.manifest_id) }}">
+                          <input type="hidden" name="next" value="{{ url_for('files') }}">
+                          <label>
+                            <input type="checkbox" name="shared"
+                                   {% if manifest.access.visibility == 'shared' %}checked{% endif %}
+                                   onchange="this.form.submit()">
+                            Freigabe
+                          </label>
+                        </form>
+
+                        <form method="post" action="{{ url_for('delete_file', manifest_id=manifest.manifest_id) }}"
+                              onsubmit="return confirm('Datei wirklich löschen?');">
+                          <input type="hidden" name="next" value="{{ url_for('files') }}">
+                          <button class="delete" type="submit">Löschen</button>
+                        </form>
+                      {% endif %}
+                    </div>
+                  </article>
+                {% endfor %}
+              </div>
+            </section>
+          {% else %}
+            <div class="empty">📂 Keine Dateien vorhanden. Lege eine Datei über Upload ab.</div>
+          {% endfor %}
+        </main>
+      </div>
+    </div>
+
+    <!-- Explorer Context menu -->
+    <div class="ctx" id="ctxMenu" role="menu" aria-label="Explorer Kontextmenü">
+      <button type="button" id="ctxOpen">
+        <span>Öffnen</span><span class="kbd">Enter</span>
+      </button>
+      <button type="button" id="ctxDownload">
+        <span>Download</span><span class="kbd">Ctrl+S</span>
+      </button>
+      <div class="sep"></div>
+      <button type="button" id="ctxShare">
+        <span>Freigabe umschalten</span><span class="kbd">Ctrl+H</span>
+      </button>
+      <button type="button" id="ctxDelete" style="color:#b42318;">
+        <span>Löschen</span><span class="kbd">Del</span>
+      </button>
+      <div class="sep"></div>
+      <button type="button" id="ctxNewFolder">
+        <span>Neuer Ordner…</span><span class="kbd">Shift+N</span>
+      </button>
+      <button type="button" id="ctxRefresh">
+        <span>Aktualisieren</span><span class="kbd">F5</span>
+      </button>
+    </div>
+
+    <!-- Hidden helper form for POST actions from context menu -->
+    <form id="actionPost" method="post" style="display:none;">
+      <input type="hidden" name="next" value="{{ url_for('files') }}">
+      <input type="hidden" name="shared" id="postShared" value="">
+      <input type="hidden" name="folder" id="postFolder" value="">
+    </form>
+
+    <nav class="taskbar" aria-label="Taskleiste">
+      <span class="start" onclick="window.location.href='{{ url_for('dashboard') }}'">Start</span>
+      <span class="task">📁 Datei-Explorer</span>
+      <span class="tray">{{ manifests|length }} Datei(en)</span>
+    </nav>
+  </div>
+
+  <script>
+    (function(){
+      const mainArea = document.getElementById('mainArea');
+      const ctx = document.getElementById('ctxMenu');
+      const btnNewFolder = document.getElementById('btnNewFolder');
+      const folderInput = document.getElementById('folderInput');
+
+      const uploadForm = document.getElementById('uploadForm');
+      const uploadFile = document.getElementById('uploadFile');
+      const uploadStatus = document.getElementById('uploadStatus');
+      const uploadBar = document.getElementById('uploadBar');
+      const uploadName = document.getElementById('uploadName');
+      const uploadPct = document.getElementById('uploadPct');
+      const uploadState = document.getElementById('uploadState');
+
+      const actionPost = document.getElementById('actionPost');
+      const postShared = document.getElementById('postShared');
+      const postFolder = document.getElementById('postFolder');
+
+      let selectedTile = null;
+
+      function clearSelection(){
+        document.querySelectorAll('.file-tile.selected, .folder-tile.selected, .folder-section.selected').forEach(el => el.classList.remove('selected'));
+        selectedTile = null;
+      }
+      function selectTile(tile){
+        clearSelection();
+        selectedTile = tile;
+        if(selectedTile) selectedTile.classList.add('selected');
+      }
+
+      function closeCtx(){
+        ctx.classList.remove('open');
+        ctx.style.left='-9999px';
+        ctx.style.top='-9999px';
+      }
+      function openCtx(x,y){
+        ctx.classList.add('open');
+        const pad = 8;
+        const rect = ctx.getBoundingClientRect();
+        let nx=x, ny=y;
+        if(nx + rect.width + pad > window.innerWidth) nx = window.innerWidth - rect.width - pad;
+        if(ny + rect.height + pad > window.innerHeight) ny = window.innerHeight - rect.height - pad;
+        ctx.style.left = nx + 'px';
+        ctx.style.top  = ny + 'px';
+      }
+
+      function focusNewFolder(){
+        const el = document.getElementById('folders-new');
+        if(el) el.scrollIntoView({behavior:'smooth', block:'start'});
+        setTimeout(()=> folderInput?.focus(), 250);
+      }
+
+      // Selection + context menu on tiles
+      mainArea.addEventListener('click', (e)=>{
+        closeCtx();
+        const tile = e.target.closest('.file-tile, .folder-tile, .folder-section');
+        if(tile) selectTile(tile);
+        else clearSelection();
+      });
+
+      mainArea.addEventListener('contextmenu', (e)=>{
+        const tile = e.target.closest('.file-tile, .folder-tile, .folder-section');
+        if(tile){
+          e.preventDefault();
+          selectTile(tile);
+          openCtx(e.clientX, e.clientY);
+          updateCtxEnabled();
+        }else{
+          // Right click on empty area: show menu too (like Windows)
+          e.preventDefault();
+          clearSelection();
+          openCtx(e.clientX, e.clientY);
+          updateCtxEnabled();
+        }
+      });
+
+      window.addEventListener('click', (e)=>{
+        if(!e.target.closest('#ctxMenu')) closeCtx();
+      });
+      window.addEventListener('blur', closeCtx);
+      window.addEventListener('resize', closeCtx);
+      window.addEventListener('scroll', closeCtx, true);
+
+      function updateCtxEnabled(){
+        const hasFile = !!selectedTile && selectedTile.dataset.kind === 'file';
+        const hasFolder = !!selectedTile && selectedTile.dataset.kind === 'folder';
+        const isOwner = hasFile && selectedTile.dataset.owner === '1';
+        const canDeleteFolder = hasFolder && selectedTile.dataset.deletable === '1';
+
+        // enable/disable by hiding (simple)
+        document.getElementById('ctxOpen').style.display = (hasFile || hasFolder) ? '' : 'none';
+        document.getElementById('ctxDownload').style.display = hasFile ? '' : 'none';
+        document.getElementById('ctxShare').style.display = isOwner ? '' : 'none';
+        document.getElementById('ctxDelete').style.display = (isOwner || canDeleteFolder) ? '' : 'none';
+        const deleteLabel = document.getElementById('ctxDelete').querySelector('span');
+        if(canDeleteFolder) deleteLabel.textContent = 'Ordner löschen';
+        else if(isOwner) deleteLabel.textContent = 'Datei löschen';
+        else deleteLabel.textContent = 'Löschen';
+      }
+
+      // Context actions
+      document.getElementById('ctxOpen').addEventListener('click', ()=>{
+        closeCtx();
+        if(selectedTile?.dataset.kind === 'folder'){
+          selectedTile.scrollIntoView({behavior:'smooth', block:'start'});
+          return;
+        }
+        if(selectedTile?.dataset.download) window.location.href = selectedTile.dataset.download;
+      });
+
+      document.getElementById('ctxDownload').addEventListener('click', ()=>{
+        closeCtx();
+        if(selectedTile?.dataset.download) window.location.href = selectedTile.dataset.download;
+      });
+
+      document.getElementById('ctxShare').addEventListener('click', ()=>{
+        closeCtx();
+        if(!selectedTile) return;
+        const shareUrl = selectedTile.dataset.share;
+        const isShared = selectedTile.dataset.shared === '1';
+        if(!shareUrl) return;
+
+        // POST via helper form (ohne Fetch/CSRF-Ärger)
+        actionPost.action = shareUrl;
+        postShared.value = isShared ? 'off' : 'on';
+        actionPost.submit();
+      });
+
+      document.getElementById('ctxDelete').addEventListener('click', ()=>{
+        closeCtx();
+        if(!selectedTile) return;
+        if(selectedTile.dataset.kind === 'folder'){
+          const folder = selectedTile.dataset.folder || '';
+          if(selectedTile.dataset.deletable !== '1') return;
+          if(confirm('Ordner wirklich löschen?\n' + folder + '\n\nAlle eigenen Dateien und Unterordner darin werden gelöscht.')){
+            actionPost.action = '{{ url_for('delete_folder') }}';
+            postShared.value = '';
+            postFolder.value = folder;
+            actionPost.submit();
+          }
+          return;
+        }
+        const delUrl = selectedTile.dataset.delete;
+        if(!delUrl) return;
+        if(confirm('Datei wirklich löschen?')){
+          actionPost.action = delUrl;
+          // shared/folder fields not used for file delete; keep empty
+          postShared.value = '';
+          postFolder.value = '';
+          actionPost.submit();
+        }
+      });
+
+      document.getElementById('ctxNewFolder').addEventListener('click', ()=>{
+        closeCtx();
+        focusNewFolder();
+      });
+
+      document.getElementById('ctxRefresh').addEventListener('click', ()=>{
+        closeCtx();
+        window.location.reload();
+      });
+
+      // Toolbar button
+      btnNewFolder.addEventListener('click', focusNewFolder);
+
+      // Keyboard shortcuts
+      window.addEventListener('keydown', (e)=>{
+        if(e.key === 'Escape') closeCtx();
+
+        if(e.key === 'F5'){
+          // normal reload ok
+          return;
+        }
+
+        if(e.shiftKey && (e.key === 'N' || e.key === 'n')){
+          e.preventDefault();
+          focusNewFolder();
+        }
+
+        if(e.key === 'Delete' && selectedTile && (selectedTile.dataset.owner === '1' || selectedTile.dataset.deletable === '1')){
+          e.preventDefault();
+          document.getElementById('ctxDelete').click();
+        }
+
+        if(e.key === 'Enter' && selectedTile && selectedTile.dataset.download){
+          e.preventDefault();
+          window.location.href = selectedTile.dataset.download;
+        }
+
+        if(e.ctrlKey && (e.key === 's' || e.key === 'S')){
+          if(selectedTile?.dataset.download){
+            e.preventDefault();
+            window.location.href = selectedTile.dataset.download;
+          }
+        }
+
+        if(e.ctrlKey && (e.key === 'h' || e.key === 'H')){
+          if(selectedTile && selectedTile.dataset.owner === '1'){
+            e.preventDefault();
+            document.getElementById('ctxShare').click();
+          }
+        }
+      });
+
+      function formatBytes(value){
+        const units = ['B','KiB','MiB','GiB','TiB'];
+        let amount = Number(value || 0);
+        let unit = units[0];
+        for(let i=0; i<units.length; i++){
+          unit = units[i];
+          if(amount < 1024 || i === units.length - 1) break;
+          amount /= 1024;
+        }
+        return `${amount.toFixed(1)} ${unit}`;
+      }
+      function makeUploadId(){
+        if(window.crypto && typeof window.crypto.randomUUID === 'function') return window.crypto.randomUUID();
+        return `upload-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+      }
+      let uploadPoll = null;
+      function stopUploadPoll(){
+        if(uploadPoll){ clearInterval(uploadPoll); uploadPoll = null; }
+      }
+      function setUploadPercent(value){
+        const safe = Math.max(0, Math.min(100, Number(value || 0)));
+        uploadBar.style.width = safe.toFixed(0) + '%';
+        uploadPct.textContent = safe.toFixed(0) + '%';
+      }
+      function applyUploadSnapshot(snapshot){
+        if(!snapshot) return;
+        if(typeof snapshot.percent === 'number') setUploadPercent(snapshot.percent);
+        if(snapshot.status) uploadState.textContent = snapshot.status;
+        document.getElementById('uploadServer').textContent = snapshot.known ? `${Number(snapshot.serverPercent || 0).toFixed(0)}% · ${snapshot.phase || 'Verarbeitung'}` : 'wartet auf Server…';
+        if(snapshot.totalChunks) document.getElementById('uploadChunks').textContent = `${snapshot.currentChunk || 0}/${snapshot.totalChunks}`;
+        if(snapshot.totalBytes || snapshot.rawBytesProcessed || snapshot.storedBytes){
+          document.getElementById('uploadCompression').textContent = `${formatBytes(snapshot.rawBytesProcessed || 0)} gelesen · ${formatBytes(snapshot.storedBytes || 0)} gespeichert`;
+        }
+        const peerParts = [];
+        if(snapshot.remoteSuccesses) peerParts.push(`${snapshot.remoteSuccesses} Peer-Schreibvorgänge`);
+        if(snapshot.localChunks) peerParts.push(`${snapshot.localChunks} lokal`);
+        if(snapshot.remoteFailures) peerParts.push(`${snapshot.remoteFailures} Fehler`);
+        if(snapshot.desiredReplicas && snapshot.desiredReplicas > 1) peerParts.push(`${snapshot.desiredReplicas} Replikate/Ziel`);
+        document.getElementById('uploadPeers').textContent = peerParts.length ? peerParts.join(' · ') : 'noch keine Verteilung';
+        const detail = [];
+        if(snapshot.currentPeer) detail.push(`Aktuelles Ziel: ${snapshot.currentPeer}`);
+        if(snapshot.details?.peerTargets?.length) detail.push(`Geplante Peers: ${snapshot.details.peerTargets.join(', ')}`);
+        if(snapshot.details?.transferStatus) detail.push(`Transferstatus: ${snapshot.details.transferStatus}`);
+        if(snapshot.message) detail.push(snapshot.message);
+        document.getElementById('uploadDetail').textContent = detail.join('\n') || (snapshot.status || 'Verarbeitung läuft…');
+        if(snapshot.known && snapshot.active === false) stopUploadPoll();
+      }
+      async function pollUploadProgress(uploadId){
+        try{
+          const response = await fetch(`/api/uploads/${encodeURIComponent(uploadId)}`, {headers:{'Accept':'application/json'}});
+          if(!response.ok) return;
+          applyUploadSnapshot(await response.json());
+        }catch(error){
+          // Best-effort polling; the XHR response remains authoritative.
+        }
+      }
+
+      // Upload status UI with browser + server-side chunking/P2P progress.
+      uploadForm?.addEventListener('submit', (event)=>{
+        const file = uploadFile?.files?.[0];
+        if(!file) return;
+        event.preventDefault();
+
+        const uploadId = makeUploadId();
+        stopUploadPoll();
+        uploadStatus.hidden = false;
+        uploadName.textContent = file.name;
+        uploadState.textContent = 'wird hochgeladen…';
+        setUploadPercent(0);
+        document.getElementById('uploadBrowser').textContent = `0 B / ${formatBytes(file.size)}`;
+        document.getElementById('uploadServer').textContent = 'wartet auf Upload…';
+        document.getElementById('uploadChunks').textContent = '—';
+        document.getElementById('uploadCompression').textContent = '—';
+        document.getElementById('uploadPeers').textContent = '—';
+        document.getElementById('uploadDetail').textContent = 'Nach dem Browser-Upload wird die Chunk-, Komprimierungs- und Peer-Verarbeitung angezeigt.';
+
+        const formData = new FormData(uploadForm);
+        formData.append('upload_id', uploadId);
+        const xhr = new XMLHttpRequest();
+        xhr.open('POST', uploadForm.action);
+        xhr.setRequestHeader('X-Requested-With', 'XMLHttpRequest');
+        xhr.setRequestHeader('X-DCloud-Upload-Id', uploadId);
+        uploadPoll = setInterval(()=> pollUploadProgress(uploadId), 350);
+        pollUploadProgress(uploadId);
+        xhr.upload.onprogress = (progressEvent)=>{
+          if(!progressEvent.lengthComputable) return;
+          const pct = Math.max(0, Math.min(100, progressEvent.loaded / progressEvent.total * 100));
+          setUploadPercent(Math.min(40, pct * 0.4));
+          uploadState.textContent = 'Datei wird an den lokalen Client übertragen…';
+          document.getElementById('uploadBrowser').textContent = `${formatBytes(progressEvent.loaded)} / ${formatBytes(progressEvent.total)}`;
+        };
+        xhr.upload.onload = ()=>{
+          setUploadPercent(40);
+          uploadState.textContent = 'Browser-Transfer abgeschlossen; Server verarbeitet Chunks…';
+          document.getElementById('uploadBrowser').textContent = `${formatBytes(file.size)} / ${formatBytes(file.size)}`;
+          pollUploadProgress(uploadId);
+        };
+        xhr.onload = ()=>{
+          stopUploadPoll();
+          let payload = null;
+          try{ payload = JSON.parse(xhr.responseText); }catch(error){ payload = null; }
+          if(payload?.uploadProgress) applyUploadSnapshot(payload.uploadProgress);
+          if(xhr.status >= 200 && xhr.status < 300 && payload && payload.ok){
+            setUploadPercent(100);
+            uploadState.textContent = payload.message || 'abgeschlossen';
+            window.location.reload();
+            return;
+          }
+          uploadState.textContent = payload && payload.message ? payload.message : 'Upload fehlgeschlagen';
+        };
+        xhr.onerror = ()=>{ stopUploadPoll(); uploadState.textContent = 'Netzwerkfehler beim Upload'; };
+        xhr.onabort = ()=>{ stopUploadPoll(); uploadState.textContent = 'Upload abgebrochen'; };
+        xhr.send(formData);
+      });
+
+      // If opened with #upload or #folders-new, scroll nicely
+      if(location.hash){
+        const target = document.querySelector(location.hash);
+        if(target) setTimeout(()=> target.scrollIntoView({behavior:'smooth', block:'start'}), 150);
+      }
+    })();
+  </script>
+</body>
+</html>
