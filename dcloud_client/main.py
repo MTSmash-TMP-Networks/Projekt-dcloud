@@ -136,6 +136,7 @@ def main() -> None:
         smb_status["last_error"] = smb_server.last_error
 
         def sync_smb_virtual_view() -> None:
+            previous_expected: set[Path] = set()
             while not smb_sync_stop.is_set():
                 try:
                     manifests = manifest_store.list_visible_for_node(identity.node_id)
@@ -161,6 +162,12 @@ def main() -> None:
                         resolved = existing.resolve()
                         manifest = manifest_by_virtual_path.get(resolved)
                         if manifest is None:
+                            if resolved in previous_expected:
+                                # Diese Datei wurde im vorherigen Sync noch von einem Manifest
+                                # abgedeckt, inzwischen aber gelöscht (z. B. via UI). In diesem
+                                # Fall darf sie nicht als neue SMB-Datei re-importiert werden.
+                                existing.unlink(missing_ok=True)
+                                continue
                             # Neue Datei via SMB angelegt -> als neues Manifest importieren
                             rel = resolved.relative_to(smb_root.resolve())
                             folder_path = sanitize_folder_path(str(rel.parent).replace("\\", "/"))
@@ -195,6 +202,7 @@ def main() -> None:
                             pass
                 except Exception:
                     LOG.debug("SMB-View Sync fehlgeschlagen", exc_info=True)
+                previous_expected = set(expected) if "expected" in locals() else set()
                 smb_sync_stop.wait(5.0)
 
         smb_sync_thread = threading.Thread(target=sync_smb_virtual_view, name="dcloud-smb-sync", daemon=True)
