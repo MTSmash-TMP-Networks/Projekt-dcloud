@@ -157,6 +157,7 @@ def create_app(
         return peer_provider.list_peers()
 
     def stats_payload(stats: StorageStats) -> dict[str, int | str]:
+        smb_root_path = str(app.config.get("DCLOUD_SMB_ROOT") or config.storage.path)
         return {
             "path": str(stats.path),
             "limitBytes": stats.limit_bytes,
@@ -262,7 +263,7 @@ def create_app(
             "smbPasswordSet": bool(config.smb.password),
             "smbRunning": runtime_smb_running,
             "smbLastError": runtime_smb_error,
-            "smbRootPath": str(config.storage.path),
+            "smbRootPath": smb_root_path,
             **capacity,
         }
 
