@@ -75,6 +75,19 @@ class StorageManifestTests(unittest.TestCase):
 
             self.assertGreaterEqual(stats.used_bytes, 0)
 
+    def test_create_folder_persists_parent_paths_without_files(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            identity = IdentityManager(root / "identity").load_or_create()
+            _, manifest_store = self.make_store(root / "storage")
+
+            created = manifest_store.create_folder("Projekte/Kunde A", identity.node_id)
+
+            self.assertEqual(created, "Projekte/Kunde A")
+            folders = manifest_store.list_folders_for_node(identity.node_id)
+            self.assertIn("Projekte", folders)
+            self.assertIn("Projekte/Kunde A", folders)
+
 
 if __name__ == "__main__":
     unittest.main()

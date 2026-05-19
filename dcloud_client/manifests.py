@@ -247,7 +247,11 @@ class ManifestStore:
     def create_folder(self, folder_path: str, owner_node_id: str) -> str:
         folder_path = sanitize_folder_path(folder_path)
         folders = set(self._load_saved_folders(owner_node_id))
-        folders.add(folder_path)
+        parts = [part for part in folder_path.split("/") if part]
+        current = ""
+        for part in parts:
+            current = f"{current}/{part}" if current else part
+            folders.add(current)
         self._save_folders(owner_node_id, sorted(folders, key=str.lower))
         return folder_path
 
