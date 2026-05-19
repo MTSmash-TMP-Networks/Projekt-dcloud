@@ -137,6 +137,7 @@ def main() -> None:
 
         def sync_smb_virtual_view() -> None:
             previous_expected: set[Path] = set()
+            previous_expected_dirs: set[Path] = {smb_root.resolve()}
             while not smb_sync_stop.is_set():
                 try:
                     manifests = manifest_store.list_visible_for_node(identity.node_id)
@@ -161,7 +162,7 @@ def main() -> None:
                     # Datei via SMB gelöscht -> zugehöriges Manifest zuerst löschen.
                     # Wichtig: vor restore(), sonst wird die Datei direkt wiederhergestellt.
                     for virtual_path, manifest in list(manifest_by_virtual_path.items()):
-                        if virtual_path not in existing_file_paths:
+                        if virtual_path not in existing_file_paths and virtual_path in previous_expected:
                             try:
                                 manifest_store.delete(manifest.manifest_id, delete_unreferenced_chunks=True)
                                 expected.discard(virtual_path)
@@ -215,6 +216,8 @@ def main() -> None:
                         folder_path = sanitize_folder_path(str(rel).replace("\\", "/"))
                         if not folder_path or folder_path == DEFAULT_FOLDER:
                             continue
+                        if resolved_dir in previous_expected_dirs:
+                            continue
                         try:
                             manifest_store.create_folder(folder_path, identity.node_id)
                             expected_dirs.add(resolved_dir)
@@ -233,6 +236,7 @@ def main() -> None:
                 except Exception:
                     LOG.debug("SMB-View Sync fehlgeschlagen", exc_info=True)
                 previous_expected = set(expected) if "expected" in locals() else set()
+                previous_expected_dirs = set(expected_dirs) if "expected_dirs" in locals() else {smb_root.resolve()}
                 smb_sync_stop.wait(5.0)
 
         smb_sync_thread = threading.Thread(target=sync_smb_virtual_view, name="dcloud-smb-sync", daemon=True)
