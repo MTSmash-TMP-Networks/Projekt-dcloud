@@ -617,6 +617,7 @@
           <section class="status-card"><h3>P2P-Ablage</h3><div class="status-kpi" id="status-peer-storage">Wartet</div><div class="status-sub" id="status-peer-storage-sub">-</div></section>
           <section class="status-card"><h3>Discovery-Port</h3><div class="status-kpi" id="status-discovery-port">6881</div><div class="status-sub">UDP-Port dieser Instanz</div></section>
           <section class="status-card"><h3>PHP-Relay</h3><div class="status-kpi" id="status-relay-state">Aus</div><div class="status-sub" id="status-relay-sub">Nur LAN-Verbindungen</div></section>
+          <section class="status-card"><h3>SMB-Server</h3><div class="status-kpi" id="status-smb-state">Aus</div><div class="status-sub" id="status-smb-sub">Server ist deaktiviert</div></section>
           <section class="status-card"><h3>Gespeicherte Dateien</h3><div class="status-kpi" id="status-file-count">0</div><div class="status-sub">Sichtbar in deinem Explorer</div></section>
           <section class="status-card"><h3>Verwendeter Speicher</h3><div class="status-kpi" id="status-storage-used">0 B</div><div class="status-sub">Lokale Chunks + Manifeste</div></section>
           <section class="status-card"><h3>Verbund-Kapazität</h3><div class="status-kpi" id="status-network-capacity">0 B</div><div class="status-sub" id="status-network-capacity-sub">0 aktive Speicher-Peers</div></section>
@@ -672,6 +673,18 @@
             <textarea id="settings-relay-urls" name="relay_server_urls" rows="3" placeholder="https://deine-domain.de/dcloud_relay.php">{{ settings_json.additionalRelayUrlsText }}</textarea>
             <p class="settings-note"><strong>Relay-Zugriff:</strong> <span id="settings-relay-token-mode">{{ settings_json.relayTokenLabel }}</span>. Der Tages-Schlüssel wird automatisch vom Relay erzeugt, täglich erneuert und vom Client bei Bedarf direkt abgerufen.</p>
             <p class="settings-note" id="settings-relay-note">Das Standard-Relay ist fest hinterlegt. Zusätzliche Relays werden gespeichert, automatisch genutzt und per LAN-/Relay-Discovery an andere Peers verteilt, damit das Netzwerk auch über Heimnetzgrenzen hinweg erreichbar bleibt.</p>
+          </section>
+
+          <section class="settings-panel">
+            <h3>SMB-Server</h3>
+            <label style="display:flex;align-items:center;gap:.45rem;">
+              <input id="settings-smb-enabled" type="checkbox" name="smb_enabled" {% if settings_json.smbEnabled %}checked{% endif %}> SMB-Server aktivieren
+            </label>
+            <p class="settings-note">Port: <strong>{{ settings_json.smbPort }}</strong> · Host: <strong>{{ settings_json.smbHost }}</strong></p>
+            <label for="settings-smb-username">Benutzername</label>
+            <input id="settings-smb-username" type="text" name="smb_username" value="{{ settings_json.smbUsername }}" placeholder="leer = Gastzugriff">
+            <label for="settings-smb-password">Passwort</label>
+            <input id="settings-smb-password" type="password" name="smb_password" value="" placeholder="{% if settings_json.smbPasswordSet %}Passwort gesetzt (neu eingeben zum Ändern){% else %}Optional{% endif %}">
           </section>
 
           <button type="submit" class="explorer-btn">Einstellungen speichern</button>
@@ -993,6 +1006,10 @@
         document.getElementById("status-storage-used").textContent = formatBytes(appState.stats.usedBytes);
         document.getElementById("status-network-capacity").textContent = formatBytes(capacity.networkLimitBytes || settings.networkLimitBytes || appState.stats.limitBytes);
         document.getElementById("status-network-capacity-sub").textContent = `${capacity.storagePeerCount || settings.storagePeerCount || 0} aktive Speicher-Peer(s)`;
+        const smbEnabled = !!settings.smbEnabled;
+        const smbPort = settings.smbPort || 445;
+        document.getElementById("status-smb-state").textContent = smbEnabled ? "Aktiv" : "Aus";
+        document.getElementById("status-smb-sub").textContent = smbEnabled ? `Port ${smbPort} · Benutzer ${settings.smbUsername || "Gast"}` : `Server deaktiviert · Port ${smbPort}`;
         document.getElementById("tray-files").textContent = `${appState.fileCount || 0} Datei(en)`;
         const policy = document.getElementById("settings-current-policy");
         if(policy) policy.textContent = settings.storagePolicy || "";
@@ -1024,6 +1041,10 @@
         document.querySelectorAll('input[name="client_type"]').forEach(input => {
           if(document.activeElement !== input) input.checked = input.value === selectedType;
         });
+        const smbEnabledInput = document.getElementById("settings-smb-enabled");
+        if(smbEnabledInput && document.activeElement !== smbEnabledInput) smbEnabledInput.checked = !!settings.smbEnabled;
+        const smbUserInput = document.getElementById("settings-smb-username");
+        if(smbUserInput && document.activeElement !== smbUserInput) smbUserInput.value = settings.smbUsername || "";
 
         const peerList = document.getElementById("network-peer-list");
         peerList.innerHTML = "";
