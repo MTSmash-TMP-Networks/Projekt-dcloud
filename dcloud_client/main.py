@@ -161,7 +161,7 @@ def main() -> None:
                     # Datei via SMB gelöscht -> zugehöriges Manifest zuerst löschen.
                     # Wichtig: vor restore(), sonst wird die Datei direkt wiederhergestellt.
                     for virtual_path, manifest in list(manifest_by_virtual_path.items()):
-                        if virtual_path not in existing_file_paths:
+                        if virtual_path not in existing_file_paths and virtual_path in previous_expected:
                             try:
                                 manifest_store.delete(manifest.manifest_id, delete_unreferenced_chunks=True)
                                 expected.discard(virtual_path)

@@ -235,6 +235,19 @@ class WebUiTests(unittest.TestCase):
             self.assertIn("Server-Verarbeitung".encode(), response.data)
             self.assertIn(b"/api/uploads/", response.data)
 
+    def test_api_state_disables_caching(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            app, identity, manifest_store = self.make_app(root)
+
+            with app.test_client() as client:
+                response = client.get("/api/state")
+
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(response.headers.get("Cache-Control"), "no-store")
+            self.assertEqual(response.headers.get("Pragma"), "no-cache")
+            self.assertEqual(response.headers.get("Expires"), "0")
+
     def test_ajax_upload_exposes_server_side_progress_snapshot(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
