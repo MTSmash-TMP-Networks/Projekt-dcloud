@@ -233,6 +233,7 @@ def create_app(
         runtime_smb_running = bool(getattr(smb_server, "running", False)) if smb_server is not None else bool(config.smb.enabled)
         runtime_smb_port = int(getattr(smb_server, "actual_port", config.smb.port)) if smb_server is not None else int(config.smb.port)
         runtime_smb_error = str(getattr(smb_server, "last_error", "") or "")
+        smb_root_path = str(app.config.get("DCLOUD_SMB_ROOT") or config.storage.path)
         if config.smb.enabled and not runtime_smb_running and not runtime_smb_error:
             runtime_smb_error = (
                 "SMB-Server läuft nicht. Prüfe Logausgabe, Port-Freigabe und ob der Speicherpfad verfügbar ist."
