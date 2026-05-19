@@ -103,6 +103,7 @@ def main() -> None:
 
     smb_server = None
     smb_thread = None
+    smb_status: dict[str, object] = {"enabled": bool(config.smb.enabled), "running": False, "port": int(config.smb.port), "last_error": ""}
     if config.smb.enabled:
         smb_server = EmbeddedSmbServer(
             root=config.storage.path,
@@ -112,11 +113,28 @@ def main() -> None:
             username=config.smb.username,
             password=config.smb.password,
         )
-        smb_thread = threading.Thread(target=smb_server.start, name="dcloud-smb", daemon=True)
+        def run_smb_server() -> None:
+            try:
+                smb_server.start()
+            except Exception as exc:
+                smb_status["running"] = False
+                smb_status["last_error"] = str(exc)
+                LOG.exception("Embedded SMB server konnte nicht gestartet werden")
+            else:
+                smb_status["running"] = bool(smb_server.running)
+                smb_status["port"] = int(smb_server.actual_port)
+                smb_status["last_error"] = ""
+
+        smb_thread = threading.Thread(target=run_smb_server, name="dcloud-smb", daemon=True)
         smb_thread.start()
+        smb_status["running"] = bool(smb_server.running)
+        smb_status["port"] = int(smb_server.actual_port)
+        smb_status["last_error"] = smb_server.last_error
 
     config.network.udp_port = udp_port
     app = create_app(config, identity, chunk_store, manifest_store, peer_provider, discovery)
+    app.config["DCLOUD_SMB_STATUS"] = smb_status
+    app.config["DCLOUD_SMB_SERVER"] = smb_server
     LOG.info("Starting local web UI on http://%s:%s", config.web.host, config.web.port)
     try:
         app.run(host=config.web.host, port=config.web.port, threaded=True)
