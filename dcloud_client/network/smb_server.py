@@ -26,7 +26,9 @@ class EmbeddedSmbServer:
         try:
             from impacket import smbserver
         except Exception as exc:  # pragma: no cover - depends on optional dependency
-            raise RuntimeError("impacket ist nicht installiert. Bitte 'pip install impacket' ausführen.") from exc
+            self.running = False
+            self.last_error = "impacket ist nicht installiert. Bitte 'pip install impacket' ausführen."
+            raise RuntimeError(self.last_error) from exc
 
         self.root.mkdir(parents=True, exist_ok=True)
         listen_port = self.port
@@ -39,6 +41,7 @@ class EmbeddedSmbServer:
                 if exc.errno == errno.EACCES and candidate == 445:
                     LOG.warning("SMB-Port 445 benötigt Root-Rechte; weiche auf Port 1445 aus")
                     continue
+                self.running = False
                 self.last_error = str(exc)
                 raise
         server.addShare(self.share_name, str(self.root), comment="dcloud storage")

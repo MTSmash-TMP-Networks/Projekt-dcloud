@@ -1011,7 +1011,9 @@
         const smbPort = settings.smbPort || 445;
         document.getElementById("status-smb-state").textContent = smbEnabled ? (smbRunning ? "Aktiv" : "Fehler") : "Aus";
         document.getElementById("status-smb-sub").textContent = smbEnabled
-          ? (settings.smbLastError ? `Fehler: ${settings.smbLastError}` : `Port ${smbPort} · Benutzer ${settings.smbUsername || "Gast"}`)
+          ? (settings.smbLastError
+              ? `Fehler: ${settings.smbLastError} · Pfad: ${settings.smbRootPath || "-"}`
+              : `Port ${smbPort} · Benutzer ${settings.smbUsername || "Gast"} · Pfad: ${settings.smbRootPath || "-"}`)
           : `Server deaktiviert · Port ${smbPort}`;
         document.getElementById("tray-files").textContent = `${appState.fileCount || 0} Datei(en)`;
         const policy = document.getElementById("settings-current-policy");
