@@ -20,7 +20,7 @@ if __package__ in {None, ""}:
 
 from .config import AppConfig, load_config
 from .identity import IdentityManager
-from .manifests import DEFAULT_FOLDER, ManifestStore
+from .manifests import DEFAULT_FOLDER, ManifestStore, sanitize_folder_path
 from .network.peers import InMemoryPeerProvider
 from .network.smb_server import EmbeddedSmbServer
 from .network.udp_discovery import UdpDiscoveryTransport
@@ -141,12 +141,14 @@ def main() -> None:
                     manifests = manifest_store.list_visible_for_node(identity.node_id)
                     smb_root.mkdir(parents=True, exist_ok=True)
                     expected: set[Path] = set()
+                    manifest_by_virtual_path: dict[Path, object] = {}
                     for manifest in manifests:
                         folder = Path(manifest.folder_path or DEFAULT_FOLDER)
                         target_dir = smb_root / folder
                         target_dir.mkdir(parents=True, exist_ok=True)
                         target_file = target_dir / manifest.file_name
                         expected.add(target_file.resolve())
+                        manifest_by_virtual_path[target_file.resolve()] = manifest
                         if target_file.exists() and target_file.stat().st_size == int(manifest.file_size):
                             continue
                         try:
@@ -154,6 +156,35 @@ def main() -> None:
                         except Exception:
                             LOG.debug("SMB-View Sync: Restore für %s fehlgeschlagen", manifest.manifest_id, exc_info=True)
                             continue
+                    existing_files = [p for p in smb_root.rglob("*") if p.is_file()]
+                    for existing in existing_files:
+                        resolved = existing.resolve()
+                        manifest = manifest_by_virtual_path.get(resolved)
+                        if manifest is None:
+                            # Neue Datei via SMB angelegt -> als neues Manifest importieren
+                            rel = resolved.relative_to(smb_root.resolve())
+                            folder_path = sanitize_folder_path(str(rel.parent).replace("\\", "/"))
+                            try:
+                                manifest_store.create_for_file(existing, identity, folder_path=folder_path or DEFAULT_FOLDER)
+                            except Exception:
+                                LOG.debug("SMB-View Sync: Import fehlgeschlagen für %s", existing, exc_info=True)
+                            continue
+                        if existing.stat().st_size != int(manifest.file_size):
+                            # Datei via SMB geändert -> altes Manifest ersetzen
+                            try:
+                                manifest_store.delete(manifest.manifest_id, delete_unreferenced_chunks=True)
+                                rel = resolved.relative_to(smb_root.resolve())
+                                folder_path = sanitize_folder_path(str(rel.parent).replace("\\", "/"))
+                                manifest_store.create_for_file(existing, identity, folder_path=folder_path or DEFAULT_FOLDER)
+                            except Exception:
+                                LOG.debug("SMB-View Sync: Update fehlgeschlagen für %s", existing, exc_info=True)
+                    # Datei via SMB gelöscht -> zugehöriges Manifest löschen
+                    for virtual_path, manifest in manifest_by_virtual_path.items():
+                        if not virtual_path.exists():
+                            try:
+                                manifest_store.delete(manifest.manifest_id, delete_unreferenced_chunks=True)
+                            except Exception:
+                                LOG.debug("SMB-View Sync: Delete fehlgeschlagen für %s", manifest.manifest_id, exc_info=True)
                     for existing in smb_root.rglob("*"):
                         if existing.is_file() and existing.resolve() not in expected:
                             existing.unlink(missing_ok=True)
