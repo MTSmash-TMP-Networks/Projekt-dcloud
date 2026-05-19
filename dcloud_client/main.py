@@ -150,8 +150,9 @@ def main() -> None:
                         if target_file.exists() and target_file.stat().st_size == int(manifest.file_size):
                             continue
                         try:
-                            manifest_store.restore(manifest, target=target_file)
+                            manifest_store.restore(manifest.manifest_id, target=target_file)
                         except Exception:
+                            LOG.debug("SMB-View Sync: Restore für %s fehlgeschlagen", manifest.manifest_id, exc_info=True)
                             continue
                     for existing in smb_root.rglob("*"):
                         if existing.is_file() and existing.resolve() not in expected:
