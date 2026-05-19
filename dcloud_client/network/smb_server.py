@@ -44,7 +44,11 @@ class EmbeddedSmbServer:
                 self.running = False
                 self.last_error = str(exc)
                 raise
-        server.addShare(self.share_name, str(self.root), comment="dcloud storage")
+        try:
+            server.addShare(self.share_name, str(self.root), comment="dcloud storage")
+        except TypeError:
+            # Older impacket versions do not support the `comment` kwarg.
+            server.addShare(self.share_name, str(self.root))
         if self.username:
             server.addCredential(self.username, 0, "", self.password)
         try:
