@@ -554,6 +554,18 @@ def create_app(
             "queued": max(len(target_node_ids) - delivered, 0),
         }
 
+    def _remove_smb_virtual_file(manifest: FileManifest) -> None:
+        """Remove mirrored SMB file for a manifest if the SMB root is configured."""
+        smb_root_raw = app.config.get("DCLOUD_SMB_ROOT")
+        if not smb_root_raw:
+            return
+        smb_root = Path(str(smb_root_raw))
+        target = smb_root / Path(manifest.folder_path or DEFAULT_FOLDER) / manifest.file_name
+        try:
+            target.unlink(missing_ok=True)
+        except OSError:
+            pass
+
     def manifest_payload(manifest: FileManifest) -> dict[str, Any]:
         locations = list(dict.fromkeys(
             str(location)
@@ -910,6 +922,7 @@ def create_app(
             peer_cleanup = {"target_count": 0, "delivered": 0, "failed": 0, "queued": 0}
             for manifest in owned_manifests:
                 cleanup = _delete_owned_manifest_with_peer_cleanup(manifest)
+                _remove_smb_virtual_file(manifest)
                 for key in peer_cleanup:
                     peer_cleanup[key] += int(cleanup.get(key, 0))
 
@@ -1258,6 +1271,7 @@ def create_app(
             else:
                 manifest_store.delete(manifest.manifest_id, delete_unreferenced_chunks=True)
                 message = f"Freigegebene Datei lokal entfernt: {manifest.file_name}"
+            _remove_smb_virtual_file(manifest)
             if _is_ajax_request():
                 return jsonify({"ok": True, "message": message, "state": state_payload()})
             flash(message, "success")
