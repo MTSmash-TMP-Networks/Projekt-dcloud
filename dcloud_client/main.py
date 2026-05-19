@@ -7,6 +7,7 @@ import logging
 import socket
 import sys
 import threading
+import time
 from contextlib import closing
 from pathlib import Path
 
@@ -19,7 +20,7 @@ if __package__ in {None, ""}:
 
 from .config import AppConfig, load_config
 from .identity import IdentityManager
-from .manifests import ManifestStore
+from .manifests import DEFAULT_FOLDER, ManifestStore
 from .network.peers import InMemoryPeerProvider
 from .network.smb_server import EmbeddedSmbServer
 from .network.udp_discovery import UdpDiscoveryTransport
@@ -103,20 +104,76 @@ def main() -> None:
 
     smb_server = None
     smb_thread = None
+    smb_sync_thread = None
+    smb_sync_stop = threading.Event()
+    smb_root = config.storage.path / "smb_virtual"
+    smb_status: dict[str, object] = {"enabled": bool(config.smb.enabled), "running": False, "port": int(config.smb.port), "last_error": ""}
     if config.smb.enabled:
         smb_server = EmbeddedSmbServer(
-            root=config.storage.path,
+            root=smb_root,
             host=config.smb.host,
             port=config.smb.port,
             share_name=config.smb.share_name,
             username=config.smb.username,
             password=config.smb.password,
         )
-        smb_thread = threading.Thread(target=smb_server.start, name="dcloud-smb", daemon=True)
+        def run_smb_server() -> None:
+            try:
+                smb_server.start()
+            except Exception as exc:
+                smb_status["running"] = False
+                smb_status["last_error"] = str(exc)
+                LOG.exception("Embedded SMB server konnte nicht gestartet werden")
+            else:
+                smb_status["running"] = bool(smb_server.running)
+                smb_status["port"] = int(smb_server.actual_port)
+                smb_status["last_error"] = ""
+
+        smb_thread = threading.Thread(target=run_smb_server, name="dcloud-smb", daemon=True)
         smb_thread.start()
+        smb_status["running"] = bool(smb_server.running)
+        smb_status["port"] = int(smb_server.actual_port)
+        smb_status["last_error"] = smb_server.last_error
+
+        def sync_smb_virtual_view() -> None:
+            while not smb_sync_stop.is_set():
+                try:
+                    manifests = manifest_store.list_visible_for_node(identity.node_id)
+                    smb_root.mkdir(parents=True, exist_ok=True)
+                    expected: set[Path] = set()
+                    for manifest in manifests:
+                        folder = Path(manifest.folder_path or DEFAULT_FOLDER)
+                        target_dir = smb_root / folder
+                        target_dir.mkdir(parents=True, exist_ok=True)
+                        target_file = target_dir / manifest.file_name
+                        expected.add(target_file.resolve())
+                        if target_file.exists() and target_file.stat().st_size == int(manifest.file_size):
+                            continue
+                        try:
+                            manifest_store.restore(manifest.manifest_id, target=target_file)
+                        except Exception:
+                            LOG.debug("SMB-View Sync: Restore für %s fehlgeschlagen", manifest.manifest_id, exc_info=True)
+                            continue
+                    for existing in smb_root.rglob("*"):
+                        if existing.is_file() and existing.resolve() not in expected:
+                            existing.unlink(missing_ok=True)
+                    for existing_dir in sorted([p for p in smb_root.rglob("*") if p.is_dir()], reverse=True):
+                        try:
+                            existing_dir.rmdir()
+                        except OSError:
+                            pass
+                except Exception:
+                    LOG.debug("SMB-View Sync fehlgeschlagen", exc_info=True)
+                smb_sync_stop.wait(5.0)
+
+        smb_sync_thread = threading.Thread(target=sync_smb_virtual_view, name="dcloud-smb-sync", daemon=True)
+        smb_sync_thread.start()
 
     config.network.udp_port = udp_port
     app = create_app(config, identity, chunk_store, manifest_store, peer_provider, discovery)
+    app.config["DCLOUD_SMB_STATUS"] = smb_status
+    app.config["DCLOUD_SMB_SERVER"] = smb_server
+    app.config["DCLOUD_SMB_ROOT"] = str(smb_root)
     LOG.info("Starting local web UI on http://%s:%s", config.web.host, config.web.port)
     try:
         app.run(host=config.web.host, port=config.web.port, threaded=True)
@@ -125,6 +182,7 @@ def main() -> None:
         if callable(stop_relays):
             stop_relays()
         if smb_server is not None:
+            smb_sync_stop.set()
             smb_server.stop()
         discovery.stop()
 
