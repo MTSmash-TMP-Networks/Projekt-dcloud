@@ -23,6 +23,7 @@ const DCLOUD_PEER_TTL_SECONDS = 45;
 const DCLOUD_MESSAGE_TTL_SECONDS = 900;
 const DCLOUD_MAX_REQUESTS_PER_POLL = 16;
 const DCLOUD_MAX_ENCODED_BODY_BYTES = 268435456; // 256 MiB base64 payload
+const DCLOUD_CLEANUP_INTERVAL_SECONDS = 30;
 
 header('Content-Type: application/json; charset=utf-8');
 header('Cache-Control: no-store');
@@ -383,6 +384,24 @@ function dcloud_cleanup(): void {
     }
 }
 
+function dcloud_cleanup_if_due(): void {
+    $marker = dcloud_storage_dir() . DIRECTORY_SEPARATOR . 'cleanup.last';
+    $now = time();
+    $last = 0;
+    if (file_exists($marker)) {
+        $raw = @file_get_contents($marker);
+        if (is_string($raw) && $raw !== '') {
+            $last = (int)trim($raw);
+        }
+    }
+    if ($last > 0 && ($now - $last) < DCLOUD_CLEANUP_INTERVAL_SECONDS) {
+        return;
+    }
+
+    dcloud_cleanup();
+    @file_put_contents($marker, (string)$now, LOCK_EX);
+}
+
 function dcloud_sanitize_relay_urls($value): array {
     if ($value === null) {
         return [];
@@ -591,7 +610,9 @@ function dcloud_poll_requests(array $input): void {
     $waitUntil = microtime(true) + max(0.0, min(5.0, (float)($input['wait_seconds'] ?? 0)));
     do {
         $files = glob(dcloud_queue_dir($nodeId) . DIRECTORY_SEPARATOR . '*.json') ?: [];
-        usort($files, function (string $a, string $b): int { return (filemtime($a) ?: 0) <=> (filemtime($b) ?: 0); });
+        // Queue files are prefixed with unix timestamps, so lexicographic
+        // ordering already matches creation order without costly filemtime().
+        sort($files, SORT_STRING);
         $requests = [];
         foreach (array_slice($files, 0, $max) as $file) {
             $payload = dcloud_read_json_file($file, []);
@@ -683,7 +704,7 @@ function dcloud_normalize_action(string $action): string {
 
 try {
     $input = dcloud_read_input();
-    dcloud_cleanup();
+    dcloud_cleanup_if_due();
     $action = dcloud_normalize_action((string)($input['action'] ?? ''));
     $input['action'] = $action;
 
