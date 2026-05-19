@@ -1007,9 +1007,12 @@
         document.getElementById("status-network-capacity").textContent = formatBytes(capacity.networkLimitBytes || settings.networkLimitBytes || appState.stats.limitBytes);
         document.getElementById("status-network-capacity-sub").textContent = `${capacity.storagePeerCount || settings.storagePeerCount || 0} aktive Speicher-Peer(s)`;
         const smbEnabled = !!settings.smbEnabled;
+        const smbRunning = !!settings.smbRunning;
         const smbPort = settings.smbPort || 445;
-        document.getElementById("status-smb-state").textContent = smbEnabled ? "Aktiv" : "Aus";
-        document.getElementById("status-smb-sub").textContent = smbEnabled ? `Port ${smbPort} · Benutzer ${settings.smbUsername || "Gast"}` : `Server deaktiviert · Port ${smbPort}`;
+        document.getElementById("status-smb-state").textContent = smbEnabled ? (smbRunning ? "Aktiv" : "Fehler") : "Aus";
+        document.getElementById("status-smb-sub").textContent = smbEnabled
+          ? (settings.smbLastError ? `Fehler: ${settings.smbLastError}` : `Port ${smbPort} · Benutzer ${settings.smbUsername || "Gast"}`)
+          : `Server deaktiviert · Port ${smbPort}`;
         document.getElementById("tray-files").textContent = `${appState.fileCount || 0} Datei(en)`;
         const policy = document.getElementById("settings-current-policy");
         if(policy) policy.textContent = settings.storagePolicy || "";

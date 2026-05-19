@@ -228,6 +228,10 @@ def create_app(
         current_stats = stats or chunk_store.stats()
         current_peers = peers if peers is not None else _list_active_peers()
         capacity = _network_storage_capacity(current_stats, current_peers)
+        smb_server = app.config.get("DCLOUD_SMB_SERVER")
+        runtime_smb_running = bool(getattr(smb_server, "running", False)) if smb_server is not None else bool(config.smb.enabled)
+        runtime_smb_port = int(getattr(smb_server, "actual_port", config.smb.port)) if smb_server is not None else int(config.smb.port)
+        runtime_smb_error = str(getattr(smb_server, "last_error", "") or "")
         return {
             "clientType": config.node.client_type,
             "clientTypeLabel": client_type_label(config.node.client_type),
@@ -249,9 +253,11 @@ def create_app(
             "relayTokenLabel": "Automatisch, tägliche Rotation",
             "smbEnabled": bool(config.smb.enabled),
             "smbHost": config.smb.host,
-            "smbPort": int(config.smb.port),
+            "smbPort": runtime_smb_port,
             "smbUsername": config.smb.username,
             "smbPasswordSet": bool(config.smb.password),
+            "smbRunning": runtime_smb_running,
+            "smbLastError": runtime_smb_error,
             **capacity,
         }
 
