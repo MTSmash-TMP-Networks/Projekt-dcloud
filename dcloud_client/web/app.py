@@ -658,7 +658,11 @@ def create_app(
 
     @app.get("/api/state")
     def api_state() -> Response:
-        return jsonify(state_payload())
+        response = jsonify(state_payload())
+        response.headers["Cache-Control"] = "no-store"
+        response.headers["Pragma"] = "no-cache"
+        response.headers["Expires"] = "0"
+        return response
 
     @app.get("/api/uploads/<upload_id>")
     def api_upload_progress(upload_id: str) -> Response:
