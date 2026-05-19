@@ -295,3 +295,26 @@ Bewusst nicht enthalten:
 - keine öffentliche Authentifizierung für die Web-UI
 
 Der MVP ist als saubere, modulare Grundlage gedacht, damit zentrale Komponenten später entfernt und durch dezentrale Provider ersetzt werden können.
+
+## Service-Installer per `curl` (Linux/OpenWrt/Windows-Bootstrap)
+
+Es gibt ein Install-Script unter `scripts/install_dcloud_service.sh`, das den Client als Service einrichtet und dabei Rolle (PC/Server), freigegebenen Speicher und SMB-Konfiguration setzt.
+
+Beispiel:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/<org>/<repo>/<branch>/scripts/install_dcloud_service.sh | sh -s -- \
+  --target linux \
+  --role server \
+  --storage-gb 200 \
+  --enable-smb \
+  --smb-user dcloud \
+  --smb-pass 'starkes-passwort'
+```
+
+Hinweise:
+
+- `--target linux` richtet einen `systemd`-Service ein.
+- `--target openwrt` richtet einen `/etc/init.d`-Service ein.
+- `--target windows` erzeugt ein PowerShell-Bootstrap-Skript für eine geplante Aufgabe beim Systemstart (als Dienst-Ersatz).
+- Mindestwert für `--storage-gb` ist `5`.
