@@ -350,6 +350,9 @@ def update_runtime_settings(
     relay_server_url: str | None = None,
     relay_server_urls: Any | None = None,
     relay_secret: str | None = None,
+    smb_enabled: bool | str | int | None = None,
+    smb_username: str | None = None,
+    smb_password: str | None = None,
 ) -> AppConfig:
     """Persist editable desktop settings and update the live config object."""
     normalized_type = normalize_client_type(client_type)
@@ -369,14 +372,20 @@ def update_runtime_settings(
     raw.setdefault("node", {})
     raw.setdefault("storage", {})
     raw.setdefault("network", {})
+    raw.setdefault("smb", {})
     if not isinstance(raw["node"], dict) or not isinstance(raw["storage"], dict) or not isinstance(raw["network"], dict):
         raise ValueError("Konfigurationsdatei hat kein gültiges node/storage/network Mapping")
+    if not isinstance(raw["smb"], dict):
+        raise ValueError("Konfigurationsdatei hat kein gültiges smb Mapping")
 
     raw["node"]["client_type"] = normalized_type
     raw["storage"]["limit_bytes"] = storage_limit_bytes
     raw["network"]["relay_url"] = DEFAULT_PUBLIC_RELAY_URL
     raw["network"]["relay_urls"] = normalized_relay_urls
     raw["network"]["relay_secret"] = normalized_relay_secret
+    raw["smb"]["enabled"] = bool(smb_enabled) if smb_enabled is not None else config.smb.enabled
+    raw["smb"]["username"] = (smb_username if smb_username is not None else config.smb.username).strip()
+    raw["smb"]["password"] = smb_password if smb_password is not None else config.smb.password
     _write_yaml_atomic(config.config_path, raw)
 
     config.node.client_type = normalized_type
@@ -384,4 +393,7 @@ def update_runtime_settings(
     config.network.relay_url = normalized_relay_urls[0]
     config.network.relay_urls = normalized_relay_urls
     config.network.relay_secret = normalized_relay_secret
+    config.smb.enabled = bool(smb_enabled) if smb_enabled is not None else config.smb.enabled
+    config.smb.username = (smb_username if smb_username is not None else config.smb.username).strip()
+    config.smb.password = smb_password if smb_password is not None else config.smb.password
     return config
