@@ -423,6 +423,37 @@ def _rotated_targets(targets: list[Peer | None], target_ids: list[str], start_in
     return rotated
 
 
+def prioritize_storage_peers(peers: list[Peer]) -> list[Peer]:
+    """Sort storage targets for BitTorrent-like *direct-first* chunk transport.
+
+    Order rules:
+    1) Directly reachable peers first.
+    2) Hybrid peers (direct + relay fallback) before relay-only peers.
+    3) Within each class, prefer peers with more free storage.
+    """
+
+    def _transport_rank(peer: Peer) -> int:
+        host = (peer.host or "").strip()
+        is_relay_only = host in {RELAY_HOST, "__relay__"}
+        # Peers that advertise a direct endpoint and also a relay fallback stay
+        # in the fast lane: direct transfer is always attempted first.
+        has_relay_fallback = bool(peer.relay_url)
+        if not is_relay_only and not has_relay_fallback:
+            return 0
+        if not is_relay_only and has_relay_fallback:
+            return 1
+        return 2
+
+    return sorted(
+        peers,
+        key=lambda peer: (
+            _transport_rank(peer),
+            -(int(peer.free_storage_bytes) if peer.free_storage_bytes is not None else -1),
+            peer.node_id,
+        ),
+    )
+
+
 def distribute_file_chunks(
     *,
     source_path,
@@ -447,12 +478,13 @@ def distribute_file_chunks(
     if effective_chunk_size <= 0:
         effective_chunk_size = chunk_store.chunk_size
 
-    if peers:
+    sorted_peers = prioritize_storage_peers(peers)
+    if sorted_peers:
         # Prefer active remote storage first so even small one-chunk uploads use
         # decentralized capacity. The local node remains in the target ring to
         # provide a second copy when there is only one peer.
-        targets: list[Peer | None] = [*peers, None]
-        target_ids = [*[peer.node_id for peer in peers], local_node_id]
+        targets: list[Peer | None] = [*sorted_peers, None]
+        target_ids = [*[peer.node_id for peer in sorted_peers], local_node_id]
         desired_replicas = min(max(1, int(min_replicas_with_peers)), len(targets))
     else:
         targets = [None]
