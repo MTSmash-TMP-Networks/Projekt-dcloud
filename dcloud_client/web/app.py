@@ -187,6 +187,28 @@ def create_app(
             peer_connector.prune_stale_peers()
         return peer_provider.list_peers()
 
+
+    def _display_peers(peers: list[Any] | None = None) -> list[Any]:
+        """Return a UI-stable peer list without obvious duplicate device entries.
+
+        In unstable NAT/relay setups the same remote device can appear briefly
+        with a secondary node identity, which makes the sharing dialog jump
+        between 2 and 3 entries. For UI rendering we collapse peers that have
+        the same human-facing name and transport endpoint and keep only the
+        freshest one. Internal sync/delivery logic still uses the full list.
+        """
+        source = peers if peers is not None else _list_active_peers()
+        by_key: dict[tuple[str, str, int], Any] = {}
+        for peer in source:
+            name = (getattr(peer, "name", "") or "").strip().lower()
+            host = str(getattr(peer, "host", "") or "")
+            web_port = int(getattr(peer, "web_port", 0) or 0)
+            key = (name, host, web_port)
+            existing = by_key.get(key)
+            if existing is None or getattr(peer, "last_seen", 0) >= getattr(existing, "last_seen", 0):
+                by_key[key] = peer
+        return list(by_key.values())
+
     def stats_payload(stats: StorageStats) -> dict[str, int | str]:
         smb_root_path = str(app.config.get("DCLOUD_SMB_ROOT") or config.storage.path)
         return {
@@ -683,7 +705,7 @@ def create_app(
             "settings": settings_payload(stats, peers),
             "network": network_payload(),
             "networkCapacity": _network_storage_capacity(stats, peers),
-            "peers": [peer.to_dict() for peer in peers],
+            "peers": [peer.to_dict() for peer in _display_peers(peers)],
             "fileCount": len(manifests),
             "folders": folders,
             "folderTree": folder_tree_json(tree),
@@ -701,8 +723,8 @@ def create_app(
             identity=identity,
             stats=stats,
             stats_json=stats_payload(stats),
-            peers=_list_active_peers(),
-            peers_json=[peer.to_dict() for peer in _list_active_peers()],
+            peers=_display_peers(),
+            peers_json=[peer.to_dict() for peer in _display_peers()],
             settings_json=settings_payload(stats),
             network_json=network_payload(),
             manifests=manifests,
