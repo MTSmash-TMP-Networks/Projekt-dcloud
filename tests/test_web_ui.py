@@ -532,6 +532,37 @@ class WebUiTests(unittest.TestCase):
             self.assertEqual(manifest.placement["targets"], [identity.node_id])
             self.assertEqual(manifest.placement["transfer_status"], "local_only")
 
+    def test_upload_ignores_self_localhost_shadow_peer_as_remote_target(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            peer_provider = InMemoryPeerProvider()
+            app, identity, manifest_store = self.make_app(root, peer_provider=peer_provider, client_type="server")
+
+            peer_provider.add_or_update(Peer(
+                node_id="self-shadow-peer",
+                host="127.0.0.1",
+                udp_port=6000,
+                web_port=8787,
+                name="Self Host",
+                client_type="server",
+                accepts_peer_storage=True,
+            ))
+
+            with app.test_client() as client:
+                response = client.post(
+                    "/upload",
+                    data={
+                        "file": (BytesIO(b"self host peer" * 20), "self-host.txt"),
+                    },
+                    content_type="multipart/form-data",
+                    headers={"X-Requested-With": "XMLHttpRequest"},
+                )
+
+            self.assertEqual(response.status_code, 200)
+            manifest = manifest_store.list_visible_for_node(identity.node_id)[0]
+            self.assertEqual(manifest.placement["targets"], [identity.node_id])
+
+
     def test_upload_from_files_ui_redirects_back_to_files_without_ajax(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
