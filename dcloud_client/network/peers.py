@@ -59,6 +59,12 @@ class Peer:
         their node ID in the key so one PHP relay can hold many active nodes
         without collapsing them into a single duplicate endpoint.
         """
+        if self.route_via_node_id:
+            # Multiple remote peers can be reachable through the same relay/tree
+            # parent and therefore share host/port metadata. Include node_id for
+            # relayed peers so automatic discovery does not collapse distinct
+            # nodes into one entry and accidentally hide active shares.
+            return (self.host, self.udp_port, self.node_id)
         if self.relay_url and self.host == "__relay__":
             return (f"relay:{self.relay_url}", 0, self.node_id)
         return (self.host, self.udp_port, self.route_via_node_id)
