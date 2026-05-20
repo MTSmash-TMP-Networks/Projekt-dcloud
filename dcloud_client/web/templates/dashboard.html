@@ -973,9 +973,14 @@
         renderExplorerNav();
         if(!windows.explorer.hidden) renderExplorer();
       }
+      let refreshRequestSeq = 0;
+      let lastAppliedRefreshSeq = 0;
       async function refreshState(){
+        const seq = ++refreshRequestSeq;
         const response = await fetch("/api/state", { cache:"no-store", headers: { "Accept":"application/json" } });
         const data = await response.json();
+        if(seq < lastAppliedRefreshSeq) return;
+        lastAppliedRefreshSeq = seq;
         applyState(data);
       }
 
