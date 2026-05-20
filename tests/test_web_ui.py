@@ -442,6 +442,39 @@ class WebUiTests(unittest.TestCase):
             self.assertEqual(manifest.placement["targets"], ["server-peer", identity.node_id])
             self.assertEqual(manifest.placement["transfer_status"], "local_fallback")
 
+
+    def test_pc_peer_is_not_used_as_upload_storage_target(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            peer_provider = InMemoryPeerProvider()
+            peer_provider.add_or_update(Peer(
+                node_id="pc-peer",
+                host="127.0.0.4",
+                udp_port=6884,
+                name="Buero-PC",
+                client_type="pc",
+                accepts_peer_storage=True,
+            ))
+            app, identity, manifest_store = self.make_app(root, peer_provider=peer_provider, client_type="pc")
+
+            with app.test_client() as client:
+                response = client.post(
+                    "/upload",
+                    data={
+                        "folder": DEFAULT_FOLDER,
+                        "next": "/",
+                        "file": (BytesIO(b"placement" * 20), "placement-pc.txt"),
+                    },
+                    content_type="multipart/form-data",
+                    headers={"X-Requested-With": "XMLHttpRequest"},
+                )
+
+            self.assertEqual(response.status_code, 200)
+            manifest_id = response.json["manifest"]["manifest_id"]
+            manifest = manifest_store.load(manifest_id)
+            self.assertEqual(manifest.placement["targets"], [identity.node_id])
+            self.assertEqual(manifest.placement["transfer_status"], "local_only")
+
     def test_upload_from_files_ui_redirects_back_to_files_without_ajax(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)

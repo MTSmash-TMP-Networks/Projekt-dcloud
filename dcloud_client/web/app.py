@@ -186,10 +186,7 @@ def create_app(
         for peer in peers:
             peer_type = getattr(peer, "client_type", None)
             accepts_peer_storage = bool(getattr(peer, "accepts_peer_storage", False))
-            if peer_type == "server" or accepts_peer_storage:
-                targets.append(peer)
-            elif peer_type is None:
-                # Backwards-compatible fallback for older peers that do not yet advertise a role.
+            if peer_type == "server":
                 targets.append(peer)
         seen: set[str] = set()
         unique: list[Any] = []
