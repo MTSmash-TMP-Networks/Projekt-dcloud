@@ -242,11 +242,11 @@ class UdpDiscoveryTests(unittest.TestCase):
             self.assertIn(("192.168.1.255", 6881), {(node.host, node.port) for node in targets})
             self.assertNotIn(("255.255.255.255", 6881), {(node.host, node.port) for node in targets})
 
-    def test_default_config_enables_lan_auto_discovery_on_port_6881(self) -> None:
+    def test_default_config_disables_lan_auto_discovery_by_default(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             config = load_config(Path(temp_dir) / "config.yml")
 
-        self.assertTrue(config.network.auto_discovery_enabled)
+        self.assertFalse(config.network.auto_discovery_enabled)
         self.assertEqual(config.network.auto_discovery_ports, [6881])
         self.assertIn("255.255.255.255", config.network.auto_discovery_hosts)
         self.assertLessEqual(config.network.startup_discovery_interval_seconds, 2)
