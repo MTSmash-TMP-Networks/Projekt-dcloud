@@ -151,6 +151,7 @@ def main() -> None:
                 peers=storage_peers,
                 p2p_client=p2p_client,
                 chunk_size_bytes=effective_chunk_size,
+                max_in_flight_chunks=getattr(config.network, "relay_max_in_flight_chunks", 4),
             )
             placement = {
                 "strategy": "distributed_round_robin_chunks",

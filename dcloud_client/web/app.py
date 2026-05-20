@@ -685,7 +685,7 @@ def create_app(
         uses_relay_storage = any(getattr(peer, "host", "") == RELAY_HOST for peer in storage_peers)
         relay_safe_chunk_size = int(getattr(config.network, "relay_chunk_size_bytes", 512 * 1024))
         effective_chunk_size = min(chunk_store.chunk_size, relay_safe_chunk_size) if uses_relay_storage else chunk_store.chunk_size
-        upload_result = distribute_file_chunks(source_path=temp_path, chunk_store=chunk_store, local_node_id=identity.node_id, peers=storage_peers, p2p_client=p2p_client, progress_callback=_upload_server_progress(upload_id), chunk_size_bytes=effective_chunk_size)
+        upload_result = distribute_file_chunks(source_path=temp_path, chunk_store=chunk_store, local_node_id=identity.node_id, peers=storage_peers, p2p_client=p2p_client, progress_callback=_upload_server_progress(upload_id), chunk_size_bytes=effective_chunk_size, max_in_flight_chunks=getattr(config.network, "relay_max_in_flight_chunks", 4))
         placement = {"strategy": "distributed_round_robin_chunks", "target_count": len(upload_result.targets), "targets": upload_result.targets, "transfer_status": upload_result.transfer_status, "remote_successes": upload_result.remote_successes, "remote_failures": upload_result.remote_failures, "local_chunks": upload_result.local_chunks, "compressed_chunks": upload_result.compressed_chunks, "desired_replicas": upload_result.desired_replicas, "replicated_chunks": upload_result.replicated_chunks, "under_replicated_chunks": upload_result.under_replicated_chunks, "raw_bytes": upload_result.raw_bytes, "stored_bytes": upload_result.stored_bytes}
         manifest = manifest_store.create_from_chunk_entries(file_name=safe_name, file_size=file_size, chunk_entries=upload_result.chunks, identity=identity, folder_path=folder_path, placement=placement)
         return True, {"manifest": manifest, "upload_result": upload_result}, file_size
@@ -801,6 +801,7 @@ def create_app(
                 p2p_client=p2p_client,
                 progress_callback=_upload_server_progress(upload_id),
                 chunk_size_bytes=effective_chunk_size,
+                max_in_flight_chunks=getattr(config.network, "relay_max_in_flight_chunks", 4),
             )
             placement = {
                 "strategy": "distributed_round_robin_chunks",
