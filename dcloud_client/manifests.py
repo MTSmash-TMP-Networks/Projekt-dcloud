@@ -384,6 +384,10 @@ class ManifestStore:
             self.save(updated)
 
             if new_manifest_id != old_manifest_id:
+                # Replace old manifest entry to avoid duplicate file rows for the
+                # owner after share/private toggles that intentionally re-key IDs.
+                with self._connect() as conn:
+                    conn.execute("DELETE FROM manifests WHERE manifest_id = ?", (old_manifest_id,))
                 self._record_manifest_alias(old_manifest_id, new_manifest_id)
 
             return updated
