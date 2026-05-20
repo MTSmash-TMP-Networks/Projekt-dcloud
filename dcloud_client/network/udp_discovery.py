@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ipaddress
 import json
 import logging
 import socket
@@ -254,12 +255,47 @@ class UdpDiscoveryTransport:
             if removed is not None:
                 self._child_node_ids.discard(node_id)
 
+    def _local_ipv4_address(self) -> str | None:
+        configured = (self.host or "").strip()
+        if configured and configured not in {"0.0.0.0", "::", "127.0.0.1", "localhost"}:
+            try:
+                ipaddress.IPv4Address(configured)
+                return configured
+            except ipaddress.AddressValueError:
+                pass
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as probe:
+                probe.connect(("8.8.8.8", 80))
+                candidate = probe.getsockname()[0]
+        except OSError:
+            return None
+        try:
+            ipaddress.IPv4Address(candidate)
+        except ipaddress.AddressValueError:
+            return None
+        return candidate
+
+    def _expand_auto_discovery_hosts(self) -> list[str]:
+        hosts: list[str] = []
+        local_ipv4 = self._local_ipv4_address()
+        local_broadcast: str | None = None
+        if local_ipv4 is not None:
+            network = ipaddress.ip_network(f"{local_ipv4}/24", strict=False)
+            local_broadcast = str(network.broadcast_address)
+        for host in self.auto_discovery_hosts:
+            candidate = host
+            if host == "255.255.255.255" and local_broadcast is not None:
+                candidate = local_broadcast
+            if candidate not in hosts:
+                hosts.append(candidate)
+        return hosts
+
     def _auto_discovery_targets(self) -> list[BootstrapNode]:
         if not self.auto_discovery_enabled:
             return []
         targets: list[BootstrapNode] = []
         seen: set[tuple[str, int]] = set()
-        for host in self.auto_discovery_hosts:
+        for host in self._expand_auto_discovery_hosts():
             for port in self.auto_discovery_ports:
                 key = (host, port)
                 if key in seen:

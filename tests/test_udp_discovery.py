@@ -212,6 +212,27 @@ class UdpDiscoveryTests(unittest.TestCase):
             )
             self.assertFalse(transport._accepts_peer_storage())
 
+
+    def test_auto_discovery_broadcast_is_limited_to_local_slash24(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            provider = InMemoryPeerProvider()
+            transport, _ = self.make_transport(
+                root,
+                name="pc",
+                port=free_udp_port(),
+                provider=provider,
+                auto_discovery_enabled=True,
+                auto_discovery_ports=[6881],
+            )
+
+            transport.host = "192.168.1.27"
+            transport.auto_discovery_hosts = ["255.255.255.255"]
+            targets = transport._auto_discovery_targets()
+
+            self.assertIn(("192.168.1.255", 6881), {(node.host, node.port) for node in targets})
+            self.assertNotIn(("255.255.255.255", 6881), {(node.host, node.port) for node in targets})
+
     def test_default_config_enables_lan_auto_discovery_on_port_6881(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             config = load_config(Path(temp_dir) / "config.yml")
