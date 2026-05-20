@@ -440,6 +440,19 @@ class ManifestStore:
         manifest = self.load(manifest_id)
         targets = list(dict.fromkeys(str(item) for item in (shared_with or ["*"]) if str(item)))
         access = {"visibility": "shared" if shared else "private", "shared_with": targets if shared else []}
+
+        current_access = manifest.access or {"visibility": "private", "shared_with": []}
+        current_visibility = str(current_access.get("visibility", "private"))
+        current_targets = list(dict.fromkeys(str(item) for item in current_access.get("shared_with", []) if str(item)))
+        normalized_current = {
+            "visibility": "shared" if current_visibility in {"shared", "public"} else "private",
+            "shared_with": current_targets if current_visibility in {"shared", "public"} else [],
+        }
+
+        if normalized_current == access:
+            # No access change: avoid creating a new manifest id/signature revision.
+            return manifest
+
         return self._resign_manifest(manifest, identity, {"access": access}, rekey=True)
 
     def update_placement(
