@@ -66,7 +66,7 @@ class NetworkConfig:
     relay_children: bool = False
     relay_builtin_enabled: bool = True
     discovery_interval_seconds: int = 10
-    auto_discovery_enabled: bool = True
+    auto_discovery_enabled: bool = False
     auto_discovery_ports: list[int] = field(default_factory=lambda: DEFAULT_AUTO_DISCOVERY_PORTS.copy())
     auto_discovery_hosts: list[str] = field(default_factory=lambda: DEFAULT_AUTO_DISCOVERY_HOSTS.copy())
     startup_discovery_seconds: int = 12
@@ -321,7 +321,7 @@ def load_config(config_path: str | Path = "config.yml", *, create_if_missing: bo
             relay_children=bool(network_raw.get("relay_children", False)),
             relay_builtin_enabled=bool(network_raw.get("relay_builtin_enabled", True)),
             discovery_interval_seconds=max(1, int(network_raw.get("discovery_interval_seconds", 10))),
-            auto_discovery_enabled=bool(network_raw.get("auto_discovery_enabled", True)),
+            auto_discovery_enabled=bool(network_raw.get("auto_discovery_enabled", False)),
             auto_discovery_ports=normalize_ports(network_raw.get("auto_discovery_ports"), DEFAULT_AUTO_DISCOVERY_PORTS),
             auto_discovery_hosts=normalize_hosts(network_raw.get("auto_discovery_hosts"), DEFAULT_AUTO_DISCOVERY_HOSTS),
             startup_discovery_seconds=max(0, int(network_raw.get("startup_discovery_seconds", 12))),
@@ -376,6 +376,7 @@ def update_runtime_settings(
     relay_builtin_enabled: bool | str | int | None = None,
     relay_children: bool | str | int | None = None,
     smb_enabled: bool | str | int | None = None,
+    auto_discovery_enabled: bool | str | int | None = None,
     smb_username: str | None = None,
     smb_password: str | None = None,
 ) -> AppConfig:
@@ -411,6 +412,7 @@ def update_runtime_settings(
     raw["network"]["relay_url"] = normalized_relay_urls[0] if normalized_relay_urls else ""
     raw["network"]["relay_urls"] = normalized_relay_urls
     raw["network"]["relay_secret"] = normalized_relay_secret
+    raw["network"]["auto_discovery_enabled"] = bool(auto_discovery_enabled) if auto_discovery_enabled is not None else bool(config.network.auto_discovery_enabled)
     raw["smb"]["enabled"] = bool(smb_enabled) if smb_enabled is not None else config.smb.enabled
     raw["smb"]["username"] = (smb_username if smb_username is not None else config.smb.username).strip()
     raw["smb"]["password"] = smb_password if smb_password is not None else config.smb.password
@@ -423,6 +425,7 @@ def update_runtime_settings(
     config.network.relay_url = normalized_relay_urls[0] if normalized_relay_urls else ""
     config.network.relay_urls = normalized_relay_urls
     config.network.relay_secret = normalized_relay_secret
+    config.network.auto_discovery_enabled = bool(auto_discovery_enabled) if auto_discovery_enabled is not None else bool(config.network.auto_discovery_enabled)
     config.smb.enabled = bool(smb_enabled) if smb_enabled is not None else config.smb.enabled
     config.smb.username = (smb_username if smb_username is not None else config.smb.username).strip()
     config.smb.password = smb_password if smb_password is not None else config.smb.password

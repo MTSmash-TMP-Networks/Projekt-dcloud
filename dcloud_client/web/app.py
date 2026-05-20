@@ -1147,6 +1147,7 @@ def create_app(
                 relay_builtin_enabled=(request.form.get("relay_builtin_enabled") == "on") if "relay_builtin_enabled" in request.form else None,
                 relay_children=request.form.get("relay_children") == "on",
                 smb_enabled=request.form.get("smb_enabled") == "on",
+                auto_discovery_enabled=(request.form.get("auto_discovery_enabled") == "on") if "auto_discovery_enabled" in request.form else None,
                 smb_username=request.form.get("smb_username", config.smb.username),
                 smb_password=request.form.get("smb_password", config.smb.password),
             )
