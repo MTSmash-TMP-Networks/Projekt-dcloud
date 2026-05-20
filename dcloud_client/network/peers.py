@@ -64,6 +64,14 @@ class Peer:
 
     def to_dict(self) -> dict[str, str | int | bool | float | None]:
         age = max(0.0, (datetime.now(timezone.utc) - self.last_seen).total_seconds())
+        if self.host == "__relay__":
+            transport = "relay"
+        elif self.route_via_node_id:
+            transport = "nat-tree"
+        elif self.relay_url:
+            transport = "direct+relay"
+        else:
+            transport = "direct"
         return {
             "node_id": self.node_id,
             "host": self.host,
@@ -76,7 +84,7 @@ class Peer:
             "web_port": self.web_port,
             "free_storage_bytes": self.free_storage_bytes,
             "relay_url": self.relay_url,
-            "transport": "relay" if self.host == "__relay__" else ("direct+relay" if self.relay_url else "direct"),
+            "transport": transport,
             "display_name": display_name_for_peer(self.node_id, self.name),
             "last_seen": self.last_seen.isoformat(),
             "last_seen_age_seconds": round(age, 1),

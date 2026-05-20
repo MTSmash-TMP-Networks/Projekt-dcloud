@@ -11,6 +11,7 @@ from uuid import uuid4
 import atexit
 import base64
 import socket
+from urllib import request as request_module
 
 from flask import Flask, Response, abort, flash, jsonify, redirect, render_template, request, send_file, url_for
 from werkzeug.utils import secure_filename
@@ -87,8 +88,26 @@ def create_app(
     relay_clients: dict[str, HttpRelayClient] = {}
     relay_transports: dict[str, HttpRelayTransport] = {}
     relay_lock = threading.RLock()
-    p2p_client = P2PStorageClient(default_web_port=config.web.port)
+    p2p_client = P2PStorageClient(default_web_port=config.web.port, peer_provider=peer_provider)
     upload_progress = UploadProgressTracker()
+
+    def _is_loopback_request() -> bool:
+        remote = (request.remote_addr or "").strip()
+        if remote in {"127.0.0.1", "::1"}:
+            return True
+        if remote.startswith("::ffff:"):
+            return remote.removeprefix("::ffff:") == "127.0.0.1"
+        return False
+
+    @app.before_request
+    def _block_public_web_ui() -> Response | None:
+        # If users expose the parent node's web port for NAT parent-proxy
+        # forwarding, the full dashboard/settings UI must still stay local-only.
+        if _is_loopback_request():
+            return None
+        if request.path.startswith("/api/p2p/"):
+            return None
+        return jsonify({"ok": False, "message": "Web UI ist nur lokal erreichbar"}), 403
 
     def _is_ajax_request() -> bool:
         return request.headers.get("X-Requested-With") == "XMLHttpRequest" or request.accept_mimetypes.best == "application/json"
@@ -1182,6 +1201,42 @@ def create_app(
             return jsonify({"ok": True, "hash": info.hash, "stored_size": info.stored_size, "state": state_payload()})
         except (ValueError, StorageError) as exc:
             return jsonify({"ok": False, "message": str(exc), "state": state_payload()}), 400
+
+    @app.route("/api/p2p/forward/<target_node_id>/<path:subpath>", methods=["GET", "POST"])
+    def api_p2p_forward(target_node_id: str, subpath: str) -> Response:
+        target = peer_provider.get_peer(str(target_node_id))
+        if target is None or target.route_via_node_id != identity.node_id:
+            abort(404)
+        if not target.host or target.host == "__relay__":
+            abort(400, "Forward target is not directly reachable by parent")
+        target_path = f"/api/p2p/{subpath}"
+        query = request.query_string.decode("utf-8", errors="ignore")
+        if query:
+            target_path = f"{target_path}?{query}"
+        host = target.host
+        if host in {"0.0.0.0", "::", ""}:
+            host = "127.0.0.1"
+        if ":" in host and not host.startswith("["):
+            host = f"[{host}]"
+        port = int(target.web_port or config.web.port)
+        target_url = f"http://{host}:{port}{target_path}"
+        allowed_headers = {
+            "Content-Type": request.headers.get("Content-Type"),
+            "Accept": request.headers.get("Accept", "application/json"),
+            "X-DCloud-Chunk-Original-Size": request.headers.get("X-DCloud-Chunk-Original-Size"),
+            "X-DCloud-Chunk-Stored-Size": request.headers.get("X-DCloud-Chunk-Stored-Size"),
+            "X-DCloud-Chunk-Index": request.headers.get("X-DCloud-Chunk-Index"),
+            "X-DCloud-Chunk-Compression": request.headers.get("X-DCloud-Chunk-Compression"),
+        }
+        clean_headers = {k: v for k, v in allowed_headers.items() if v}
+        req = request_module.Request(target_url, data=request.get_data(), headers=clean_headers, method=request.method)
+        try:
+            with request_module.urlopen(req, timeout=8.0) as upstream:
+                body = upstream.read()
+                response_headers = {"Content-Type": upstream.headers.get("Content-Type", "application/octet-stream")}
+                return Response(body, status=upstream.status, headers=response_headers)
+        except Exception as exc:
+            return jsonify({"ok": False, "message": f"Forwarding failed: {exc}"}), 502
 
     @app.post("/api/p2p/manifests/revoke")
     def api_p2p_revoke_manifest() -> Response:
