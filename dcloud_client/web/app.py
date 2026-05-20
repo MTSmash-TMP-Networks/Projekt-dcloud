@@ -1144,7 +1144,7 @@ def create_app(
                 shared_storage_gb=request.form.get("shared_storage_gb", bytes_to_gib(config.storage.limit_bytes)),
                 relay_server_url=request.form.get("relay_server_url"),
                 relay_server_urls=request.form.get("relay_server_urls", request.form.get("relay_server_url", "\n".join(extra_relay_urls(config.network.relay_urls)))),
-                relay_builtin_enabled=(request.form.get("relay_builtin_enabled") == "on") if "relay_builtin_enabled" in request.form else None,
+                relay_builtin_enabled=request.form.get("relay_builtin_enabled") == "on",
                 relay_children=request.form.get("relay_children") == "on",
                 smb_enabled=request.form.get("smb_enabled") == "on",
                 auto_discovery_enabled=request.form.get("auto_discovery_enabled") == "on",
