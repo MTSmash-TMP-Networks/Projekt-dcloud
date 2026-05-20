@@ -1093,6 +1093,15 @@ def create_app(
             if shared:
                 manifest_store.clear_share_revocation(manifest.manifest_id, identity.node_id)
 
+                old_targets = [
+                    str(item) for item in (old_manifest.access or {}).get("shared_with", []) if str(item)
+                ] or ["*"]
+                if manifest.manifest_id != old_manifest.manifest_id and manifest_store.is_shared(old_manifest):
+                    # Access/target changes rekey manifests. Revoke the old id on previous
+                    # recipients so peers do not oscillate between old/new share entries.
+                    revocation = build_manifest_revocation(old_manifest, identity)
+                    manifest_store.add_share_revocation(revocation, old_targets)
+
             delivered = 0
             failed = 0
             if shared:
@@ -1340,11 +1349,11 @@ def create_app(
                 raise StorageError("Revocation payload must be a JSON object")
             owner_node_id = verify_manifest_revocation(data)
             manifest_id = str(data["manifest_id"])
-            manifest_store.add_share_revocation(data, [])
             removed = False
             try:
                 manifest = manifest_store.load(manifest_id)
             except StorageError:
+                manifest_store.add_share_revocation(data, [])
                 return jsonify({"ok": True, "manifest_id": manifest_id, "removed": False, "state": state_payload()})
             if manifest.owner_node_id != owner_node_id:
                 raise StorageError("Revocation owner does not match manifest owner")
@@ -1354,7 +1363,8 @@ def create_app(
             revoked_signature = str(data.get("revoked_manifest_signature", "") or "")
             if revoked_signature and manifest.signature != revoked_signature:
                 # A delayed relay revocation for an older manifest version arrived after a
-                # newer share was already imported. Keep the current manifest visible.
+                # newer share was already imported. Keep the current manifest visible and
+                # do not persist a tombstone for this stale revocation.
                 return jsonify({
                     "ok": True,
                     "manifest_id": manifest_id,
@@ -1363,6 +1373,7 @@ def create_app(
                     "state": state_payload(),
                 })
 
+            manifest_store.add_share_revocation(data, [])
             manifest_store.delete(manifest.manifest_id, delete_unreferenced_chunks=False)
             removed = True
             return jsonify({"ok": True, "manifest_id": manifest_id, "removed": removed, "state": state_payload()})
@@ -1419,6 +1430,23 @@ def create_app(
                 manifest_store.clear_share_revocation(manifest.manifest_id, manifest.owner_node_id)
             if manifest_store.is_file_deleted(manifest.manifest_id, manifest.owner_node_id):
                 raise StorageError("Manifest has already been deleted by its owner")
+
+            existing_manifest = None
+            try:
+                existing_manifest = manifest_store.load(manifest.manifest_id)
+            except StorageError:
+                existing_manifest = None
+
+            if existing_manifest is not None and existing_manifest.signature == manifest.signature:
+                # Identical share payloads are delivered periodically to keep peers in sync.
+                # Skip redundant SQLite writes so the client list does not flap on no-op updates.
+                return jsonify({
+                    "ok": True,
+                    "manifest_id": manifest.manifest_id,
+                    "unchanged": True,
+                    "state": state_payload(),
+                })
+
             manifest_store.save_imported(manifest)
             return jsonify({"ok": True, "manifest_id": manifest.manifest_id, "state": state_payload()})
         except (ValueError, TypeError, StorageError) as exc:
