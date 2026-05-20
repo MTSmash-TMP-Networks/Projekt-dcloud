@@ -637,7 +637,7 @@
       </div>
       <div class="window-content dummy-app">
         <h2>Einstellungen</h2>
-        <p>Lege fest, ob dieser Client als dauerhafter Server oder als normaler PC arbeitet, und wie viel Speicher du dem dcloud-Netzwerk freigibst.</p>
+        <p>Lege fest, ob dieser Client als dauerhafter Server oder als normaler PC arbeitet, und wie viel Speicher Server-Knoten im dcloud-Netzwerk bereitstellen.</p>
 
         <form method="post" action="/settings" class="settings-form" id="settings-form">
           <input type="hidden" name="next" value="/">
@@ -650,7 +650,7 @@
               </label>
               <label class="radio-card">
                 <input type="radio" name="client_type" value="pc" {% if config.node.client_type == 'pc' %}checked{% endif %}>
-                <span><strong>PC</strong>Daten werden nur als P2P-Ziel genutzt, wenn mindestens ein weiterer PC erreichbar ist. So wird vermieden, dass ein oft ausgeschalteter PC die einzige Kopie hält.</span>
+                <span><strong>PC</strong>Dieser Client stellt keinen Speicher für andere bereit und nutzt vorhandene Server-Knoten als Speicherziele.</span>
               </label>
             </div>
             <p class="settings-note" id="settings-current-policy">{{ settings_json.storagePolicy }}</p>
@@ -670,10 +670,16 @@
             <h3>PHP-Relay / Proxy für Internet-Peers</h3>
             <label for="settings-relay-url">Festes Standard-Relay</label>
             <input id="settings-relay-url" type="url" value="{{ settings_json.fixedRelayUrl }}" readonly>
+            <label style="display:flex;align-items:center;gap:.45rem;">
+              <input id="settings-relay-builtin" type="checkbox" name="relay_builtin_enabled" {% if settings_json.relayBuiltinEnabled %}checked{% endif %}> Öffentliches Standard-Relay nutzen
+            </label>
+            <label style="display:flex;align-items:center;gap:.45rem;">
+              <input id="settings-relay-children" type="checkbox" name="relay_children" {% if settings_json.relayChildren %}checked{% endif %}> Diesen Client als Master-/Relay-Node für NAT-Children verwenden
+            </label>
             <label for="settings-relay-urls">Weitere Relay-URLs hinzufügen</label>
             <textarea id="settings-relay-urls" name="relay_server_urls" rows="3" placeholder="https://deine-domain.de/dcloud_relay.php">{{ settings_json.additionalRelayUrlsText }}</textarea>
             <p class="settings-note"><strong>Relay-Zugriff:</strong> <span id="settings-relay-token-mode">{{ settings_json.relayTokenLabel }}</span>. Der Tages-Schlüssel wird automatisch vom Relay erzeugt, täglich erneuert und vom Client bei Bedarf direkt abgerufen.</p>
-            <p class="settings-note" id="settings-relay-note">Das Standard-Relay ist fest hinterlegt. Zusätzliche Relays werden gespeichert, automatisch genutzt und per LAN-/Relay-Discovery an andere Peers verteilt, damit das Netzwerk auch über Heimnetzgrenzen hinweg erreichbar bleibt.</p>
+            <p class="settings-note" id="settings-relay-note">Das Standard-Relay kann optional deaktiviert werden. Zusätzliche Relays werden gespeichert, automatisch genutzt und per LAN-/Relay-Discovery an andere Peers verteilt.</p>
           </section>
 
           <section class="settings-panel">
@@ -1069,6 +1075,10 @@
         document.querySelectorAll('input[name="client_type"]').forEach(input => {
           if(document.activeElement !== input) input.checked = input.value === selectedType;
         });
+        const relayBuiltinInput = document.getElementById("settings-relay-builtin");
+        if(relayBuiltinInput && document.activeElement !== relayBuiltinInput) relayBuiltinInput.checked = settings.relayBuiltinEnabled !== false;
+        const relayChildrenInput = document.getElementById("settings-relay-children");
+        if(relayChildrenInput && document.activeElement !== relayChildrenInput) relayChildrenInput.checked = !!settings.relayChildren;
         const smbEnabledInput = document.getElementById("settings-smb-enabled");
         if(smbEnabledInput && document.activeElement !== smbEnabledInput) smbEnabledInput.checked = !!settings.smbEnabled;
         const smbUserInput = document.getElementById("settings-smb-username");
