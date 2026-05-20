@@ -165,12 +165,17 @@ class InMemoryPeerProvider:
                 peer.free_storage_bytes = (
                     peer.free_storage_bytes if peer.free_storage_bytes is not None else existing.free_storage_bytes
                 )
-                # Keep the fast LAN endpoint when it exists, but remember the
-                # relay as a fallback for peers behind NAT or outside the LAN.
-                if peer.relay_url and not existing.relay_url:
-                    peer.host = existing.host
-                    peer.udp_port = existing.udp_port
-                    peer.route_via_node_id = existing.route_via_node_id
+                # If a peer is seen via PHP relay, keep that route sticky.
+                # Mixing direct UDP and relay endpoints for the same node makes
+                # transport selection flap between API:6881 and PHP-Relay,
+                # which can break cross-network peers that only work via relay.
+                existing_is_relay = existing.host == "__relay__"
+                incoming_is_relay = peer.host == "__relay__"
+                if existing_is_relay or incoming_is_relay:
+                    peer.host = "__relay__"
+                    peer.udp_port = 0
+                    peer.route_via_node_id = None
+                    peer.relay_url = peer.relay_url or existing.relay_url
                 elif existing.relay_url and not peer.relay_url:
                     peer.relay_url = existing.relay_url
 
