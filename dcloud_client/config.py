@@ -9,6 +9,7 @@ import os
 import re
 import shutil
 import tempfile
+from urllib.parse import urlparse
 
 import yaml
 
@@ -209,6 +210,15 @@ def normalize_relay_url(value: str | None) -> str:
     return url.rstrip("/")
 
 
+def is_localhost_relay_url(value: str) -> bool:
+    """Return True when a relay URL points to localhost/loopback."""
+    try:
+        host = (urlparse(value).hostname or "").strip().lower()
+    except Exception:
+        return False
+    return host in {"localhost", "127.0.0.1", "::1"}
+
+
 def _iter_relay_url_candidates(value: Any) -> list[str]:
     if value is None:
         return []
@@ -229,6 +239,10 @@ def normalize_relay_urls(values: Any, *, include_default: bool = True) -> list[s
         result.append(DEFAULT_PUBLIC_RELAY_URL)
     for raw in _iter_relay_url_candidates(values):
         url = normalize_relay_url(raw)
+        if is_localhost_relay_url(url):
+            # Local loopback relay URLs are not usable by other peers and should
+            # therefore never be saved as additional relay endpoints.
+            continue
         if url and url not in result:
             result.append(url)
     return result
