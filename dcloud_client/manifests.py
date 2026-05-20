@@ -161,16 +161,7 @@ class ManifestStore:
         access: dict[str, Any] | None = None,
     ) -> FileManifest:
         now = datetime.now(timezone.utc).isoformat()
-        normalized_chunks = sorted((dict(chunk) for chunk in chunk_entries), key=lambda item: int(item["index"]))
-        for chunk in normalized_chunks:
-            chunk["index"] = int(chunk["index"])
-            chunk["hash"] = str(chunk["hash"])
-            chunk["size"] = int(chunk["size"])
-            chunk["stored_size"] = int(chunk.get("stored_size", chunk["size"]))
-            locations = [str(node_id) for node_id in chunk.get("locations", []) if str(node_id)]
-            chunk["locations"] = list(dict.fromkeys(locations)) or [identity.node_id]
-            if chunk.get("compression") in {None, ""}:
-                chunk.pop("compression", None)
+        normalized_chunks = self._normalize_chunk_entries(chunk_entries, identity)
 
         unique_targets = list(dict.fromkeys(
             str(location)
@@ -202,6 +193,56 @@ class ManifestStore:
         manifest = FileManifest.from_dict({**base, "manifest_id": manifest_id, "signature": signature})
         self.save(manifest)
         return manifest
+
+    def update_from_chunk_entries(
+        self,
+        manifest_id: str,
+        *,
+        file_name: str,
+        file_size: int,
+        chunk_entries: list[dict[str, Any]],
+        identity: NodeIdentity,
+        folder_path: str = DEFAULT_FOLDER,
+        placement: dict[str, Any] | None = None,
+    ) -> FileManifest:
+        """Update an existing owned manifest in-place while preserving manifest_id."""
+        manifest = self.load(manifest_id)
+        normalized_chunks = self._normalize_chunk_entries(chunk_entries, identity)
+        unique_targets = list(dict.fromkeys(
+            str(location)
+            for chunk in normalized_chunks
+            for location in chunk.get("locations", [])
+            if str(location)
+        ))
+        updates: dict[str, Any] = {
+            "file_name": file_name,
+            "file_size": int(file_size),
+            "chunks": normalized_chunks,
+            "folder_path": sanitize_folder_path(folder_path),
+            "placement": placement or {
+                "strategy": "distributed_direct_first_chunks",
+                "target_count": len(unique_targets),
+                "targets": unique_targets,
+                "transfer_status": "local_only" if unique_targets == [identity.node_id] else "stored_on_peers",
+            },
+        }
+        previous_chunk_hashes = [str(chunk["hash"]) for chunk in manifest.chunks]
+        updated_manifest = self._resign_manifest(manifest, identity, updates, rekey=False)
+        self.delete_chunks_if_unreferenced(previous_chunk_hashes)
+        return updated_manifest
+
+    def _normalize_chunk_entries(self, chunk_entries: list[dict[str, Any]], identity: NodeIdentity) -> list[dict[str, Any]]:
+        normalized_chunks = sorted((dict(chunk) for chunk in chunk_entries), key=lambda item: int(item["index"]))
+        for chunk in normalized_chunks:
+            chunk["index"] = int(chunk["index"])
+            chunk["hash"] = str(chunk["hash"])
+            chunk["size"] = int(chunk["size"])
+            chunk["stored_size"] = int(chunk.get("stored_size", chunk["size"]))
+            locations = [str(node_id) for node_id in chunk.get("locations", []) if str(node_id)]
+            chunk["locations"] = list(dict.fromkeys(locations)) or [identity.node_id]
+            if chunk.get("compression") in {None, ""}:
+                chunk.pop("compression", None)
+        return normalized_chunks
 
     def save(self, manifest: FileManifest) -> Path:
         self.manifests_dir.mkdir(parents=True, exist_ok=True)
