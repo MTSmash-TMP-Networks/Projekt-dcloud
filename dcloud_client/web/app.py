@@ -11,6 +11,7 @@ from uuid import uuid4
 import atexit
 import base64
 import socket
+import time
 from urllib import request as request_module
 
 from flask import Flask, Response, abort, flash, jsonify, redirect, render_template, request, send_file, url_for
@@ -90,6 +91,25 @@ def create_app(
     relay_lock = threading.RLock()
     p2p_client = P2PStorageClient(default_web_port=config.web.port, peer_provider=peer_provider)
     upload_progress = UploadProgressTracker()
+    last_share_sync_at = 0.0
+
+    def _is_loopback_request() -> bool:
+        remote = (request.remote_addr or "").strip()
+        if remote in {"127.0.0.1", "::1"}:
+            return True
+        if remote.startswith("::ffff:"):
+            return remote.removeprefix("::ffff:") == "127.0.0.1"
+        return False
+
+    @app.before_request
+    def _block_public_web_ui() -> Response | None:
+        # If users expose the parent node's web port for NAT parent-proxy
+        # forwarding, the full dashboard/settings UI must still stay local-only.
+        if _is_loopback_request():
+            return None
+        if request.path.startswith("/api/p2p/"):
+            return None
+        return jsonify({"ok": False, "message": "Web UI ist nur lokal erreichbar"}), 403
 
     def _is_loopback_request() -> bool:
         remote = (request.remote_addr or "").strip()
@@ -552,6 +572,26 @@ def create_app(
                     failed += 1
         return delivered, failed
 
+    def _sync_shared_manifests(peers: list[Any] | None = None) -> tuple[int, int]:
+        """Re-send owned shared manifests so reconnecting peers keep visibility."""
+        active_peers = peers if peers is not None else _list_active_peers()
+        peers_by_id = {str(peer.node_id): peer for peer in active_peers if getattr(peer, "node_id", None)}
+        delivered = 0
+        failed = 0
+        for manifest in manifest_store.list_manifests():
+            if manifest.owner_node_id != identity.node_id or not manifest_store.is_shared(manifest):
+                continue
+            access = manifest.access or {}
+            targets = [str(node_id) for node_id in access.get("shared_with", []) if str(node_id)] or ["*"]
+            target_peers = active_peers if "*" in targets else [peers_by_id[node_id] for node_id in targets if node_id in peers_by_id]
+            for peer in target_peers:
+                result = p2p_client.post_manifest(peer, manifest)
+                if result.ok:
+                    delivered += 1
+                else:
+                    failed += 1
+        return delivered, failed
+
     def _delete_owned_manifest_with_peer_cleanup(manifest: FileManifest) -> dict[str, int]:
         """Delete an owned manifest locally and ask peers to remove copies/chunks."""
         if manifest.owner_node_id != identity.node_id:
@@ -618,11 +658,16 @@ def create_app(
         return payload
 
     def state_payload() -> dict[str, Any]:
+        nonlocal last_share_sync_at
         _sync_peer_connector_settings()
         stats = chunk_store.stats()
         peers = _list_active_peers()
         _deliver_pending_share_revocations(peers)
         _deliver_pending_file_deletions(peers)
+        now = time.monotonic()
+        if now - last_share_sync_at >= 20.0:
+            _sync_shared_manifests(peers)
+            last_share_sync_at = now
         manifests = manifest_store.list_visible_for_node(identity.node_id)
         folders = manifest_store.list_folders_for_node(identity.node_id)
         tree = build_folder_tree(manifests, folders)
