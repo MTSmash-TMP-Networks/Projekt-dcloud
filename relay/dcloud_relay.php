@@ -25,6 +25,7 @@ const DCLOUD_MAX_REQUESTS_PER_POLL = 16;
 const DCLOUD_MAX_ENCODED_BODY_BYTES = 268435456; // 256 MiB base64 payload
 const DCLOUD_CLEANUP_INTERVAL_SECONDS = 30;
 const DCLOUD_EXTERNAL_BODY_THRESHOLD_BYTES = 262144; // 256 KiB
+const DCLOUD_EXTERNAL_BODY_COMPRESS_MIN_BYTES = 65536; // 64 KiB
 
 header('Content-Type: application/json; charset=utf-8');
 header('Cache-Control: no-store');
@@ -326,8 +327,17 @@ function dcloud_body_store_dir(): string {
 
 function dcloud_write_external_body(string $base64Body): string {
     $id = bin2hex(random_bytes(12));
-    $path = dcloud_body_store_dir() . DIRECTORY_SEPARATOR . $id . '.b64';
-    if (file_put_contents($path, $base64Body, LOCK_EX) === false) {
+    $payload = $base64Body;
+    $suffix = '.b64';
+    if (strlen($base64Body) >= DCLOUD_EXTERNAL_BODY_COMPRESS_MIN_BYTES && function_exists('gzencode')) {
+        $compressed = @gzencode($base64Body, 4);
+        if (is_string($compressed) && $compressed !== '') {
+            $payload = $compressed;
+            $suffix = '.b64z';
+        }
+    }
+    $path = dcloud_body_store_dir() . DIRECTORY_SEPARATOR . $id . $suffix;
+    if (file_put_contents($path, $payload, LOCK_EX) === false) {
         dcloud_fail('Relay konnte Body-Datei nicht schreiben', 500);
     }
     return basename($path);
@@ -335,16 +345,47 @@ function dcloud_write_external_body(string $base64Body): string {
 
 function dcloud_read_external_body(string $name): string {
     $safe = preg_replace('/[^A-Za-z0-9_.-]/', '', $name);
-    if ($safe === '' || substr($safe, -4) !== '.b64') {
+    if ($safe === '') {
+        return '';
+    }
+    $isCompressed = substr($safe, -5) === '.b64z';
+    $isPlain = substr($safe, -4) === '.b64';
+    if (!$isCompressed && !$isPlain) {
         return '';
     }
     $path = dcloud_body_store_dir() . DIRECTORY_SEPARATOR . $safe;
-    $body = @file_get_contents($path);
-    if ($body === false) {
+    $raw = @file_get_contents($path);
+    if ($raw === false) {
         return '';
     }
     @unlink($path);
-    return $body;
+    if ($isCompressed) {
+        if (!function_exists('gzdecode')) {
+            return '';
+        }
+        $decoded = @gzdecode($raw);
+        if (!is_string($decoded)) {
+            return '';
+        }
+        return $decoded;
+    }
+    return $raw;
+}
+
+function dcloud_try_delete_external_body($name): void {
+    if (!is_string($name) || $name === '') {
+        return;
+    }
+    $safe = preg_replace('/[^A-Za-z0-9_.-]/', '', $name);
+    if ($safe === '') {
+        return;
+    }
+    $isCompressed = substr($safe, -5) === '.b64z';
+    $isPlain = substr($safe, -4) === '.b64';
+    if (!$isCompressed && !$isPlain) {
+        return;
+    }
+    @unlink(dcloud_body_store_dir() . DIRECTORY_SEPARATOR . $safe);
 }
 
 function dcloud_read_json_file(string $path, array $fallback): array {
@@ -407,11 +448,8 @@ function dcloud_cleanup(): void {
     foreach (glob($queueBase . DIRECTORY_SEPARATOR . '*' . DIRECTORY_SEPARATOR . '*.json') ?: [] as $file) {
         $expired = filemtime($file) !== false && $now - filemtime($file) > DCLOUD_MESSAGE_TTL_SECONDS;
         $payload = dcloud_read_json_file($file, []);
-        if (is_array($payload) && isset($payload['body_file']) && is_string($payload['body_file'])) {
-            $safe = preg_replace('/[^A-Za-z0-9_.-]/', '', $payload['body_file']);
-            if ($safe !== '' && substr($safe, -4) === '.b64') {
-                @unlink(dcloud_body_store_dir() . DIRECTORY_SEPARATOR . $safe);
-            }
+        if (is_array($payload) && isset($payload['body_file'])) {
+            dcloud_try_delete_external_body($payload['body_file']);
         }
         if ($expired || !$payload || !dcloud_envelope_is_valid($payload)) {
             @unlink($file);
@@ -429,11 +467,8 @@ function dcloud_cleanup(): void {
     foreach ($responseFiles as $file) {
         $expired = filemtime($file) !== false && $now - filemtime($file) > DCLOUD_MESSAGE_TTL_SECONDS;
         $payload = dcloud_read_json_file($file, []);
-        if (is_array($payload) && isset($payload['body_file']) && is_string($payload['body_file'])) {
-            $safe = preg_replace('/[^A-Za-z0-9_.-]/', '', $payload['body_file']);
-            if ($safe !== '' && substr($safe, -4) === '.b64') {
-                @unlink(dcloud_body_store_dir() . DIRECTORY_SEPARATOR . $safe);
-            }
+        if (is_array($payload) && isset($payload['body_file'])) {
+            dcloud_try_delete_external_body($payload['body_file']);
         }
         if ($expired || !$payload || !dcloud_response_payload_is_valid($payload)) {
             @unlink($file);
