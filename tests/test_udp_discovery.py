@@ -38,10 +38,19 @@ class UdpDiscoveryTests(unittest.TestCase):
         provider.add_or_update(Peer(node_id="peer-a", host="127.0.0.1", udp_port=6881))
         self.assertIsNotNone(provider.get_peer("peer-a"))
 
-        time.sleep(0.22)
+        time.sleep(0.28)
 
         self.assertIsNone(provider.get_peer("peer-a"))
         self.assertEqual(provider.list_peers(), [])
+
+
+    def test_peer_provider_keeps_peer_visible_within_grace_window(self) -> None:
+        provider = InMemoryPeerProvider(peer_timeout_seconds=0.2)
+        provider.add_or_update(Peer(node_id="peer-a", host="127.0.0.1", udp_port=6881))
+
+        time.sleep(0.24)
+
+        self.assertIsNotNone(provider.get_peer("peer-a"))
 
     def test_peer_provider_replaces_duplicate_endpoint_with_latest_node_id(self) -> None:
         provider = InMemoryPeerProvider(peer_timeout_seconds=30)
