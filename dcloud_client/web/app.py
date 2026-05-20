@@ -187,25 +187,28 @@ def create_app(
 
 
     def _display_peers(peers: list[Any] | None = None) -> list[Any]:
-        """Return a UI-stable peer list without obvious duplicate device entries.
+        """Return a UI-stable peer list while preserving distinct devices.
 
-        In unstable NAT/relay setups the same remote device can appear briefly
-        with a secondary node identity, which makes the sharing dialog jump
-        between 2 and 3 entries. For UI rendering we collapse peers that have
-        the same human-facing name and transport endpoint and keep only the
-        freshest one. Internal sync/delivery logic still uses the full list.
+        We only collapse clear duplicates for the *same* node identity.
+        Different nodes are always kept visible even if they share names or
+        transient relay endpoints.
         """
         source = peers if peers is not None else _list_active_peers()
-        by_key: dict[tuple[str, str, int, str], Any] = {}
+        by_key: dict[tuple[str, ...], Any] = {}
         for peer in source:
-            node_id = str(getattr(peer, "node_id", "") or "")
-            name = (getattr(peer, "name", "") or "").strip().lower()
-            host = str(getattr(peer, "host", "") or "")
-            web_port = int(getattr(peer, "web_port", 0) or 0)
-            # Keep different node IDs visible even when they share generic names
-            # and relay endpoints (same host/web_port), otherwise the newest peer
-            # can overwrite all others in the active list.
-            key = (node_id or name, name, host, web_port)
+            node_id = str(getattr(peer, "node_id", "") or "").strip()
+            if node_id:
+                key: tuple[str, ...] = ("node-id", node_id)
+            else:
+                # Fallback for malformed announcements without node_id:
+                # keep endpoint-based dedupe, but avoid collapsing legitimate
+                # nodes that happen to share a display name.
+                host = str(getattr(peer, "host", "") or "")
+                udp_port = str(int(getattr(peer, "udp_port", 0) or 0))
+                web_port = str(int(getattr(peer, "web_port", 0) or 0))
+                client_type = str(getattr(peer, "client_type", "") or "")
+                name = (getattr(peer, "name", "") or "").strip().lower()
+                key = ("endpoint", host, udp_port, web_port, client_type, name)
             existing = by_key.get(key)
             if existing is None or getattr(peer, "last_seen", 0) >= getattr(existing, "last_seen", 0):
                 by_key[key] = peer
