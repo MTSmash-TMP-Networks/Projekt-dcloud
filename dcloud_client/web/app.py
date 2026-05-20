@@ -11,6 +11,7 @@ from uuid import uuid4
 import atexit
 import base64
 import socket
+from urllib import request as request_module
 
 from flask import Flask, Response, abort, flash, jsonify, redirect, render_template, request, send_file, url_for
 from werkzeug.utils import secure_filename
@@ -87,8 +88,27 @@ def create_app(
     relay_clients: dict[str, HttpRelayClient] = {}
     relay_transports: dict[str, HttpRelayTransport] = {}
     relay_lock = threading.RLock()
-    p2p_client = P2PStorageClient(default_web_port=config.web.port)
+    p2p_client = P2PStorageClient(default_web_port=config.web.port, peer_provider=peer_provider)
     upload_progress = UploadProgressTracker()
+    synced_share_peer_ids: set[str] = set()
+
+    def _is_loopback_request() -> bool:
+        remote = (request.remote_addr or "").strip()
+        if remote in {"127.0.0.1", "::1"}:
+            return True
+        if remote.startswith("::ffff:"):
+            return remote.removeprefix("::ffff:") == "127.0.0.1"
+        return False
+
+    @app.before_request
+    def _block_public_web_ui() -> Response | None:
+        # If users expose the parent node's web port for NAT parent-proxy
+        # forwarding, the full dashboard/settings UI must still stay local-only.
+        if _is_loopback_request():
+            return None
+        if request.path.startswith("/api/p2p/"):
+            return None
+        return jsonify({"ok": False, "message": "Web UI ist nur lokal erreichbar"}), 403
 
     def _is_ajax_request() -> bool:
         return request.headers.get("X-Requested-With") == "XMLHttpRequest" or request.accept_mimetypes.best == "application/json"
@@ -533,6 +553,32 @@ def create_app(
                     failed += 1
         return delivered, failed
 
+    def _sync_shared_manifests(peers: list[Any] | None = None, *, only_node_ids: set[str] | None = None) -> tuple[int, int]:
+        """Send owned shared manifests to selected active peers.
+
+        ``only_node_ids`` can be used to only sync newly seen peers once, which
+        avoids repetitive manifest upserts on every dashboard state poll.
+        """
+        active_peers = peers if peers is not None else _list_active_peers()
+        peers_by_id = {str(peer.node_id): peer for peer in active_peers if getattr(peer, "node_id", None)}
+        delivered = 0
+        failed = 0
+        for manifest in manifest_store.list_manifests():
+            if manifest.owner_node_id != identity.node_id or not manifest_store.is_shared(manifest):
+                continue
+            access = manifest.access or {}
+            targets = [str(node_id) for node_id in access.get("shared_with", []) if str(node_id)] or ["*"]
+            target_peers = active_peers if "*" in targets else [peers_by_id[node_id] for node_id in targets if node_id in peers_by_id]
+            if only_node_ids is not None:
+                target_peers = [peer for peer in target_peers if str(peer.node_id) in only_node_ids]
+            for peer in target_peers:
+                result = p2p_client.post_manifest(peer, manifest)
+                if result.ok:
+                    delivered += 1
+                else:
+                    failed += 1
+        return delivered, failed
+
     def _delete_owned_manifest_with_peer_cleanup(manifest: FileManifest) -> dict[str, int]:
         """Delete an owned manifest locally and ask peers to remove copies/chunks."""
         if manifest.owner_node_id != identity.node_id:
@@ -599,11 +645,17 @@ def create_app(
         return payload
 
     def state_payload() -> dict[str, Any]:
+        nonlocal synced_share_peer_ids
         _sync_peer_connector_settings()
         stats = chunk_store.stats()
         peers = _list_active_peers()
         _deliver_pending_share_revocations(peers)
         _deliver_pending_file_deletions(peers)
+        active_peer_ids = {str(peer.node_id) for peer in peers if getattr(peer, "node_id", None)}
+        new_peer_ids = active_peer_ids - synced_share_peer_ids
+        if new_peer_ids:
+            _sync_shared_manifests(peers, only_node_ids=new_peer_ids)
+        synced_share_peer_ids = active_peer_ids
         manifests = manifest_store.list_visible_for_node(identity.node_id)
         folders = manifest_store.list_folders_for_node(identity.node_id)
         tree = build_folder_tree(manifests, folders)
@@ -1182,6 +1234,42 @@ def create_app(
             return jsonify({"ok": True, "hash": info.hash, "stored_size": info.stored_size, "state": state_payload()})
         except (ValueError, StorageError) as exc:
             return jsonify({"ok": False, "message": str(exc), "state": state_payload()}), 400
+
+    @app.route("/api/p2p/forward/<target_node_id>/<path:subpath>", methods=["GET", "POST"])
+    def api_p2p_forward(target_node_id: str, subpath: str) -> Response:
+        target = peer_provider.get_peer(str(target_node_id))
+        if target is None or target.route_via_node_id != identity.node_id:
+            abort(404)
+        if not target.host or target.host == "__relay__":
+            abort(400, "Forward target is not directly reachable by parent")
+        target_path = f"/api/p2p/{subpath}"
+        query = request.query_string.decode("utf-8", errors="ignore")
+        if query:
+            target_path = f"{target_path}?{query}"
+        host = target.host
+        if host in {"0.0.0.0", "::", ""}:
+            host = "127.0.0.1"
+        if ":" in host and not host.startswith("["):
+            host = f"[{host}]"
+        port = int(target.web_port or config.web.port)
+        target_url = f"http://{host}:{port}{target_path}"
+        allowed_headers = {
+            "Content-Type": request.headers.get("Content-Type"),
+            "Accept": request.headers.get("Accept", "application/json"),
+            "X-DCloud-Chunk-Original-Size": request.headers.get("X-DCloud-Chunk-Original-Size"),
+            "X-DCloud-Chunk-Stored-Size": request.headers.get("X-DCloud-Chunk-Stored-Size"),
+            "X-DCloud-Chunk-Index": request.headers.get("X-DCloud-Chunk-Index"),
+            "X-DCloud-Chunk-Compression": request.headers.get("X-DCloud-Chunk-Compression"),
+        }
+        clean_headers = {k: v for k, v in allowed_headers.items() if v}
+        req = request_module.Request(target_url, data=request.get_data(), headers=clean_headers, method=request.method)
+        try:
+            with request_module.urlopen(req, timeout=8.0) as upstream:
+                body = upstream.read()
+                response_headers = {"Content-Type": upstream.headers.get("Content-Type", "application/octet-stream")}
+                return Response(body, status=upstream.status, headers=response_headers)
+        except Exception as exc:
+            return jsonify({"ok": False, "message": f"Forwarding failed: {exc}"}), 502
 
     @app.post("/api/p2p/manifests/revoke")
     def api_p2p_revoke_manifest() -> Response:

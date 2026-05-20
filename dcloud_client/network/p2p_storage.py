@@ -16,7 +16,7 @@ from typing import Any, Callable, Mapping
 from urllib import error, parse, request
 
 from .http_relay import RelayError, RelayHttpResponse, HttpRelayClient, RELAY_HOST
-from .peers import Peer
+from .peers import Peer, PeerProvider
 from ..crypto import b64decode, derive_node_id, sign_bytes, verify_signature
 from ..identity import NodeIdentity
 from ..manifests import FileManifest, canonical_manifest_bytes
@@ -200,6 +200,7 @@ class P2PStorageClient:
         default_web_port: int = 8787,
         relay_client: HttpRelayClient | None = None,
         relay_clients: Mapping[str, HttpRelayClient] | None = None,
+        peer_provider: PeerProvider | None = None,
     ) -> None:
         self.timeout = float(timeout)
         self.default_web_port = int(default_web_port)
@@ -209,6 +210,7 @@ class P2PStorageClient:
             self.set_relay_clients(relay_clients)
         elif relay_client is not None:
             self.set_relay_clients({relay_client.relay_url: relay_client})
+        self.peer_provider = peer_provider
 
     def set_relay_clients(self, relay_clients: Mapping[str, HttpRelayClient] | list[HttpRelayClient]) -> None:
         if isinstance(relay_clients, list):
@@ -231,6 +233,20 @@ class P2PStorageClient:
             host = f"[{host}]"
         port = int(peer.web_port or self.default_web_port)
         return f"http://{host}:{port}"
+
+    def _direct_url(self, peer: Peer, path: str) -> str:
+        return f"{self.api_base(peer)}{path}"
+
+    def _parent_proxy_url(self, peer: Peer, path: str) -> str | None:
+        if not peer.route_via_node_id:
+            return None
+        parent = self.peer_provider.get_peer(peer.route_via_node_id) if hasattr(self, "peer_provider") else None
+        if parent is None:
+            return None
+        if not parent.host or parent.host == RELAY_HOST:
+            return None
+        quoted_target = parse.quote(str(peer.node_id), safe="")
+        return f"{self.api_base(parent)}/api/p2p/forward/{quoted_target}{path}"
 
     def _relay_client_for(self, peer: Peer) -> HttpRelayClient | None:
         if not peer.relay_url:
@@ -280,7 +296,8 @@ class P2PStorageClient:
         compression: str | None,
     ) -> PeerTransferResult:
         path = f"/api/p2p/chunks/{parse.quote(digest)}"
-        url = f"{self.api_base(peer)}{path}"
+        url = self._direct_url(peer, path)
+        proxy_url = self._parent_proxy_url(peer, path)
         headers = {
             "Content-Type": "application/octet-stream",
             "X-DCloud-Chunk-Original-Size": str(int(original_size)),
@@ -290,16 +307,18 @@ class P2PStorageClient:
         if compression:
             headers["X-DCloud-Chunk-Compression"] = compression
         if peer.host != RELAY_HOST:
-            req = request.Request(url, data=stored_data, headers=headers, method="POST")
-            try:
-                with request.urlopen(req, timeout=self.timeout) as response:
-                    if 200 <= response.status < 300:
-                        return PeerTransferResult(peer.node_id, True, "stored")
-                    return PeerTransferResult(peer.node_id, False, f"HTTP {response.status}")
-            except (OSError, error.URLError, error.HTTPError) as exc:
-                LOG.debug("Chunk upload to peer %s failed", peer.node_id, exc_info=True)
-                if not self._relay_available(peer):
-                    return PeerTransferResult(peer.node_id, False, str(exc))
+            for attempt_url, label in ((url, "stored"), (proxy_url, "stored via parent-proxy")):
+                if not attempt_url:
+                    continue
+                req = request.Request(attempt_url, data=stored_data, headers=headers, method="POST")
+                try:
+                    with request.urlopen(req, timeout=self.timeout) as response:
+                        if 200 <= response.status < 300:
+                            return PeerTransferResult(peer.node_id, True, label)
+                except (OSError, error.URLError, error.HTTPError):
+                    LOG.debug("Chunk upload to peer %s failed", peer.node_id, exc_info=True)
+            if not self._relay_available(peer):
+                return PeerTransferResult(peer.node_id, False, "Direkt- und Parent-Proxy-Upload fehlgeschlagen")
         if self._relay_available(peer):
             last_error = ""
             for attempt in range(3):
@@ -324,18 +343,22 @@ class P2PStorageClient:
 
     def get_chunk(self, peer: Peer, *, digest: str) -> bytes:
         path = f"/api/p2p/chunks/{parse.quote(digest)}"
-        url = f"{self.api_base(peer)}{path}"
+        url = self._direct_url(peer, path)
+        proxy_url = self._parent_proxy_url(peer, path)
         direct_error: Exception | None = None
         if peer.host != RELAY_HOST:
-            req = request.Request(url, headers={"Accept": "application/octet-stream"}, method="GET")
-            try:
-                with request.urlopen(req, timeout=self.timeout) as response:
-                    if response.status != 200:
-                        raise StorageError(f"Peer {peer.node_id} returned HTTP {response.status} for chunk {digest}")
-                    return response.read()
-            except (OSError, error.URLError, error.HTTPError, StorageError) as exc:
-                direct_error = exc
-                LOG.debug("Direct chunk download from peer %s failed", peer.node_id, exc_info=True)
+            for attempt_url in (url, proxy_url):
+                if not attempt_url:
+                    continue
+                req = request.Request(attempt_url, headers={"Accept": "application/octet-stream"}, method="GET")
+                try:
+                    with request.urlopen(req, timeout=self.timeout) as response:
+                        if response.status != 200:
+                            raise StorageError(f"Peer {peer.node_id} returned HTTP {response.status} for chunk {digest}")
+                        return response.read()
+                except (OSError, error.URLError, error.HTTPError, StorageError) as exc:
+                    direct_error = exc
+                    LOG.debug("Direct chunk download from peer %s failed", peer.node_id, exc_info=True)
         if self._relay_available(peer):
             last_error: Exception | None = None
             for attempt in range(3):
@@ -358,17 +381,20 @@ class P2PStorageClient:
         data = json.dumps(payload, sort_keys=True).encode("utf-8")
         headers = {"Content-Type": "application/json", "Accept": "application/json"}
         if peer.host != RELAY_HOST:
-            url = f"{self.api_base(peer)}{path}"
-            req = request.Request(url, data=data, headers=headers, method="POST")
-            try:
-                with request.urlopen(req, timeout=self.timeout) as response:
-                    if 200 <= response.status < 300:
-                        return PeerTransferResult(peer.node_id, True, success_message)
-                    return PeerTransferResult(peer.node_id, False, f"HTTP {response.status}")
-            except (OSError, error.URLError, error.HTTPError) as exc:
-                LOG.debug(log_message, peer.node_id, exc_info=True)
-                if not self._relay_available(peer):
-                    return PeerTransferResult(peer.node_id, False, str(exc))
+            urls = [self._direct_url(peer, path), self._parent_proxy_url(peer, path)]
+            for idx, url in enumerate(urls):
+                if not url:
+                    continue
+                req = request.Request(url, data=data, headers=headers, method="POST")
+                try:
+                    with request.urlopen(req, timeout=self.timeout) as response:
+                        if 200 <= response.status < 300:
+                            suffix = "" if idx == 0 else " via parent-proxy"
+                            return PeerTransferResult(peer.node_id, True, f"{success_message}{suffix}")
+                except (OSError, error.URLError, error.HTTPError):
+                    LOG.debug(log_message, peer.node_id, exc_info=True)
+            if not self._relay_available(peer):
+                return PeerTransferResult(peer.node_id, False, "Direkt- und Parent-Proxy-Request fehlgeschlagen")
         if self._relay_available(peer):
             try:
                 response = self._forward_via_relay(peer, method="POST", path=path, headers=headers, body=data)
