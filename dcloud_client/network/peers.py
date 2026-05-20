@@ -67,7 +67,10 @@ class Peer:
             return (self.host, self.udp_port, self.node_id)
         if self.relay_url and self.host == "__relay__":
             return (f"relay:{self.relay_url}", 0, self.node_id)
-        return (self.host, self.udp_port, self.route_via_node_id)
+        # Keep node ids distinct even when multiple peers share one visible
+        # endpoint (e.g. NAT, VPN or relay parent). Removing one because another
+        # heartbeat arrived causes shares to disappear/flap in the UI.
+        return (self.host, self.udp_port, self.node_id)
 
     def to_dict(self) -> dict[str, str | int | bool | float | None]:
         age = max(0.0, (datetime.now(timezone.utc) - self.last_seen).total_seconds())
@@ -121,8 +124,7 @@ class InMemoryPeerProvider:
     A peer becomes active only after we have received a direct discovery/control
     packet from its node ID. Gossiped peers should be probed first and only added
     after they answer. Entries that do not answer again within the configured
-    timeout are removed automatically, and a changed identity at the same
-    host/port replaces the older entry instead of creating duplicates.
+    timeout are removed automatically.
     """
 
     def __init__(
@@ -171,15 +173,6 @@ class InMemoryPeerProvider:
                     peer.route_via_node_id = existing.route_via_node_id
                 elif existing.relay_url and not peer.relay_url:
                     peer.relay_url = existing.relay_url
-
-            endpoint_key = peer.endpoint_key()
-            duplicate_ids = [
-                node_id
-                for node_id, existing_peer in self._peers.items()
-                if node_id != peer.node_id and existing_peer.endpoint_key() == endpoint_key
-            ]
-            for duplicate_id in duplicate_ids:
-                self._peers.pop(duplicate_id, None)
 
             peer.last_seen = now
             self._peers[peer.node_id] = peer
