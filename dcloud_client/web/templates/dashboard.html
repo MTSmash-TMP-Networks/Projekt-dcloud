@@ -637,7 +637,7 @@
       </div>
       <div class="window-content dummy-app">
         <h2>Einstellungen</h2>
-        <p>Lege fest, ob dieser Client als dauerhafter Server oder als normaler PC arbeitet, und wie viel Speicher du dem dcloud-Netzwerk freigibst.</p>
+        <p>Lege fest, ob dieser Client als dauerhafter Server oder als normaler PC arbeitet, und wie viel Speicher Server-Knoten im dcloud-Netzwerk bereitstellen.</p>
 
         <form method="post" action="/settings" class="settings-form" id="settings-form">
           <input type="hidden" name="next" value="/">
@@ -650,7 +650,7 @@
               </label>
               <label class="radio-card">
                 <input type="radio" name="client_type" value="pc" {% if config.node.client_type == 'pc' %}checked{% endif %}>
-                <span><strong>PC</strong>Daten werden nur als P2P-Ziel genutzt, wenn mindestens ein weiterer PC erreichbar ist. So wird vermieden, dass ein oft ausgeschalteter PC die einzige Kopie hält.</span>
+                <span><strong>PC</strong>Dieser Client stellt keinen Speicher für andere bereit und nutzt vorhandene Server-Knoten als Speicherziele.</span>
               </label>
             </div>
             <p class="settings-note" id="settings-current-policy">{{ settings_json.storagePolicy }}</p>

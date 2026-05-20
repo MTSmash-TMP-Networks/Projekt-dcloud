@@ -173,25 +173,20 @@ def create_app(
     def _accepts_peer_storage(peers: list[Any]) -> bool:
         if config.node.client_type == "server":
             return True
-        return _pc_peer_count(peers) >= 1
+        return False
 
     def _storage_policy_message(peers: list[Any]) -> str:
         if config.node.client_type == "server":
             return "Server-Modus: Dieser Client darf als dauerhafter Speicherziel-Knoten für P2P-Daten genutzt werden."
-        if _accepts_peer_storage(peers):
-            return "PC-Modus: P2P-Ablage ist aktiv, weil mindestens ein weiterer PC erreichbar ist."
-        return "PC-Modus: Keine P2P-Ablage auf diesem Client, bis ein weiterer PC erreichbar ist."
+        return "PC-Modus: Dieser Client stellt selbst keinen Speicher für andere bereit und nutzt Server-Knoten als Speicherziele."
 
     def _eligible_storage_peers(peers: list[Any] | None = None) -> list[Any]:
         peers = peers if peers is not None else _list_active_peers()
-        pc_peers = [peer for peer in peers if getattr(peer, "client_type", None) == "pc"]
         targets: list[Any] = []
         for peer in peers:
             peer_type = getattr(peer, "client_type", None)
             accepts_peer_storage = bool(getattr(peer, "accepts_peer_storage", False))
             if peer_type == "server" or accepts_peer_storage:
-                targets.append(peer)
-            elif peer_type == "pc" and (config.node.client_type == "pc" or len(pc_peers) >= 2):
                 targets.append(peer)
             elif peer_type is None:
                 # Backwards-compatible fallback for older peers that do not yet advertise a role.
