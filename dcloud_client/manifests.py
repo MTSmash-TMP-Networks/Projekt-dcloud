@@ -320,8 +320,59 @@ class ManifestStore:
         updated = FileManifest.from_dict({**data, "manifest_id": new_manifest_id, "signature": signature})
         self.save(updated)
         if old_path != self.path_for(updated.manifest_id):
+            self._record_manifest_alias(manifest.manifest_id, updated.manifest_id)
             old_path.unlink(missing_ok=True)
         return updated
+
+    @property
+    def manifest_aliases_path(self) -> Path:
+        return self.manifests_dir / "manifest_aliases.json"
+
+    def _load_manifest_aliases(self) -> dict[str, str]:
+        if not self.manifest_aliases_path.exists():
+            return {}
+        try:
+            data = json.loads(self.manifest_aliases_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            return {}
+        if not isinstance(data, dict):
+            return {}
+        return {
+            str(old_id): str(new_id)
+            for old_id, new_id in data.items()
+            if str(old_id) and str(new_id) and str(old_id) != str(new_id)
+        }
+
+    def _save_manifest_aliases(self, aliases: dict[str, str]) -> None:
+        self.manifests_dir.mkdir(parents=True, exist_ok=True)
+        self.manifest_aliases_path.write_text(
+            json.dumps(aliases, sort_keys=True, indent=2),
+            encoding="utf-8",
+        )
+
+    def _record_manifest_alias(self, old_manifest_id: str, new_manifest_id: str) -> None:
+        old_manifest_id = str(old_manifest_id)
+        new_manifest_id = str(new_manifest_id)
+        if not old_manifest_id or not new_manifest_id or old_manifest_id == new_manifest_id:
+            return
+        aliases = self._load_manifest_aliases()
+        resolved_new = new_manifest_id
+        aliases[old_manifest_id] = resolved_new
+        for alias, current in list(aliases.items()):
+            if current == old_manifest_id:
+                aliases[alias] = resolved_new
+        aliases = {old_id: new_id for old_id, new_id in aliases.items() if old_id != new_id}
+        self._save_manifest_aliases(aliases)
+
+    def resolve_manifest_id(self, manifest_id: str, *, aliases: dict[str, str] | None = None) -> str:
+        manifest_id = str(manifest_id)
+        aliases = aliases if aliases is not None else self._load_manifest_aliases()
+        seen: set[str] = set()
+        current = manifest_id
+        while current in aliases and current not in seen:
+            seen.add(current)
+            current = aliases[current]
+        return current
 
     def set_shared(
         self,
@@ -585,12 +636,13 @@ class ManifestStore:
         return removed
 
     def load(self, manifest_id: str) -> FileManifest:
-        path = self.path_for(manifest_id)
+        resolved_manifest_id = self.resolve_manifest_id(manifest_id)
+        path = self.path_for(resolved_manifest_id)
         if not path.exists():
             raise StorageError(f"Manifest {manifest_id} not found")
         manifest = FileManifest.from_dict(json.loads(path.read_text(encoding="utf-8")))
         if not self.verify(manifest):
-            raise StorageError(f"Manifest signature verification failed for {manifest_id}")
+            raise StorageError(f"Manifest signature verification failed for {resolved_manifest_id}")
         return manifest
 
     def verify(self, manifest: FileManifest) -> bool:

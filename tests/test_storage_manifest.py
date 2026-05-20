@@ -88,6 +88,27 @@ class StorageManifestTests(unittest.TestCase):
             self.assertIn("Projekte", folders)
             self.assertIn("Projekte/Kunde A", folders)
 
+    def test_old_manifest_id_resolves_to_latest_after_share_toggle(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            identity = IdentityManager(root / "identity").load_or_create()
+            chunk_store, manifest_store = self.make_store(root / "storage")
+            source = root / "payload.txt"
+            source.write_bytes(b"shared payload")
+
+            original = manifest_store.create_for_file(source, identity)
+            shared = manifest_store.set_shared(original.manifest_id, True, identity, shared_with=["peer-a"])
+
+            loaded_via_old_id = manifest_store.load(original.manifest_id)
+            self.assertEqual(loaded_via_old_id.manifest_id, shared.manifest_id)
+            self.assertEqual((loaded_via_old_id.access or {}).get("visibility"), "shared")
+
+            private_again = manifest_store.set_shared(original.manifest_id, False, identity)
+            loaded_latest = manifest_store.load(original.manifest_id)
+            self.assertEqual(loaded_latest.manifest_id, private_again.manifest_id)
+            self.assertEqual((loaded_latest.access or {}).get("visibility"), "private")
+            self.assertFalse(manifest_store.path_for(shared.manifest_id).exists())
+
 
 if __name__ == "__main__":
     unittest.main()
