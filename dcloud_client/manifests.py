@@ -307,13 +307,42 @@ class ManifestStore:
         manifest: FileManifest,
         identity: NodeIdentity,
         updates: dict[str, Any],
+        *,
+        rekey: bool = False,
     ) -> FileManifest:
+        """Re-sign an owned manifest after metadata changes.
+
+        By default the existing manifest id is preserved. For access/share changes,
+        pass ``rekey=True`` so the changed manifest receives a fresh id. That keeps
+        old share revocation tombstones from invalidating a newly shared manifest
+        with the same id on remote peers.
+        """
         if manifest.owner_node_id != identity.node_id:
             raise StorageError("Only the owner can change this manifest")
+
+        old_manifest_id = manifest.manifest_id
         data = manifest.to_dict()
         data.update(updates)
-        data["manifest_id"] = manifest.manifest_id
         data.pop("signature", None)
+
+        if rekey:
+            data.pop("manifest_id", None)
+            signature = sign_bytes(identity.private_key, canonical_manifest_bytes(data))
+            new_manifest_id = sha256_hex(canonical_manifest_bytes({**data, "signature": signature}))
+            updated = FileManifest.from_dict({
+                **data,
+                "manifest_id": new_manifest_id,
+                "signature": signature,
+            })
+            self.save(updated)
+
+            if new_manifest_id != old_manifest_id:
+                self._record_manifest_alias(old_manifest_id, new_manifest_id)
+                self.path_for(old_manifest_id).unlink(missing_ok=True)
+
+            return updated
+
+        data["manifest_id"] = old_manifest_id
         signature = sign_bytes(identity.private_key, canonical_manifest_bytes(data))
         updated = FileManifest.from_dict({**data, "signature": signature})
         self.save(updated)
@@ -379,7 +408,7 @@ class ManifestStore:
         manifest = self.load(manifest_id)
         targets = list(dict.fromkeys(str(item) for item in (shared_with or ["*"]) if str(item)))
         access = {"visibility": "shared" if shared else "private", "shared_with": targets if shared else []}
-        return self._resign_manifest(manifest, identity, {"access": access})
+        return self._resign_manifest(manifest, identity, {"access": access}, rekey=True)
 
     def update_placement(
         self,
@@ -679,7 +708,7 @@ class ManifestStore:
 
     def delete(self, manifest_id: str, *, delete_unreferenced_chunks: bool = True) -> None:
         manifest = self.load(manifest_id)
-        manifest_path = self.path_for(manifest_id)
+        manifest_path = self.path_for(manifest.manifest_id)
         manifest_path.unlink(missing_ok=True)
 
         if not delete_unreferenced_chunks:
