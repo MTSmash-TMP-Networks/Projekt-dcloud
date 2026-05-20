@@ -17,7 +17,7 @@ declare(strict_types=1);
  * upload_max_filesize and memory_limit on the webserver.
  */
 
-const DCLOUD_RELAY_VERSION = '1.2.9';
+const DCLOUD_RELAY_VERSION = '1.3.0';
 const DCLOUD_RELAY_TOKEN_ROTATION_SECONDS = 86400;
 const DCLOUD_PEER_TTL_SECONDS = 45;
 const DCLOUD_MESSAGE_TTL_SECONDS = 900;
@@ -660,6 +660,13 @@ function dcloud_register(array $input): void {
     dcloud_json_response(array_merge(['ok' => true, 'version' => DCLOUD_RELAY_VERSION, 'peers' => $peers, 'relay_urls' => $relayUrls], dcloud_current_relay_token()));
 }
 
+function dcloud_is_order_sensitive_request(array $payload): bool {
+    $path = (string)($payload['path'] ?? '');
+    return $path === '/api/p2p/manifests'
+        || $path === '/api/p2p/manifests/revoke'
+        || $path === '/api/p2p/files/delete';
+}
+
 function dcloud_enqueue_request(array $input): void {
     $fromNodeId = dcloud_safe_id(dcloud_first_string_value($input, ['node_id', 'from_node_id', 'sender_node_id']), 'node_id');
     $toNodeIdRaw = dcloud_first_string_value($input, ['to_node_id', 'target_node_id', 'target_node', 'peer_node_id', 'recipient_node_id']);
@@ -700,7 +707,13 @@ function dcloud_enqueue_request(array $input): void {
         $envelope['body_file'] = dcloud_write_external_body($bodyBase64);
         $envelope['body_base64'] = '';
     }
-    $file = dcloud_queue_dir($toNodeId) . DIRECTORY_SEPARATOR . time() . '-' . dcloud_safe_filename($requestId) . '.json';
+
+    // Use a microsecond timestamp prefix instead of time(). With second-level
+    // timestamps, a revoke and a fresh share in the same second can be sorted by
+    // random request_id and arrive in the wrong order.
+    $sequence = sprintf('%016d', (int)floor(microtime(true) * 1000000));
+    $file = dcloud_queue_dir($toNodeId) . DIRECTORY_SEPARATOR . $sequence . '-' . dcloud_safe_filename($requestId) . '.json';
+
     dcloud_write_json_file($file, $envelope);
     dcloud_json_response(['ok' => true, 'request_id' => $requestId, 'to_node_id' => $toNodeId]);
 }
@@ -709,28 +722,60 @@ function dcloud_poll_requests(array $input): void {
     $nodeId = dcloud_safe_id((string)($input['node_id'] ?? ''), 'node_id');
     $max = max(1, min(DCLOUD_MAX_REQUESTS_PER_POLL, (int)($input['max_requests'] ?? DCLOUD_MAX_REQUESTS_PER_POLL)));
     $waitUntil = microtime(true) + max(0.0, min(15.0, (float)($input['wait_seconds'] ?? 0)));
+
     do {
         $files = glob(dcloud_queue_dir($nodeId) . DIRECTORY_SEPARATOR . '*.json') ?: [];
-        // Queue files are prefixed with unix timestamps, so lexicographic
-        // ordering already matches creation order without costly filemtime().
+
+        // Queue files are prefixed with microsecond timestamps. Lexicographic
+        // ordering now matches enqueue order much more reliably than time().
         sort($files, SORT_STRING);
+
         $requests = [];
-        foreach (array_slice($files, 0, $max) as $file) {
+
+        foreach ($files as $file) {
+            if (count($requests) >= $max) {
+                break;
+            }
+
             $payload = dcloud_read_json_file($file, []);
-            @unlink($file);
+
             if (is_array($payload) && isset($payload['body_file']) && is_string($payload['body_file'])) {
                 $payload['body_base64'] = dcloud_read_external_body($payload['body_file']);
                 unset($payload['body_file']);
             }
-            if ($payload && dcloud_envelope_is_valid($payload)) {
-                $requests[] = $payload;
-            } else {
-                dcloud_log_event('warning', ['message' => 'Ungueltiger Queue-Eintrag wurde verworfen', 'file' => basename($file)]);
+
+            if (!$payload || !dcloud_envelope_is_valid($payload)) {
+                @unlink($file);
+                dcloud_log_event('warning', [
+                    'message' => 'Ungueltiger Queue-Eintrag wurde verworfen',
+                    'file' => basename($file),
+                ]);
+                continue;
             }
+
+            $isOrderSensitive = dcloud_is_order_sensitive_request($payload);
+
+            // Critical fix:
+            // Manifest share/revoke/delete requests must not be delivered in the
+            // same batch as other control requests. The Python receiver processes
+            // relay envelopes in worker threads, so batching can reorder revoke
+            // and re-share operations. Chunks may still be batched normally.
+            if ($isOrderSensitive) {
+                if (count($requests) === 0) {
+                    @unlink($file);
+                    $requests[] = $payload;
+                }
+                break;
+            }
+
+            @unlink($file);
+            $requests[] = $payload;
         }
+
         if ($requests || microtime(true) >= $waitUntil) {
             dcloud_json_response(['ok' => true, 'requests' => $requests]);
         }
+
         usleep(200000);
     } while (true);
 }
