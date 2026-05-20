@@ -466,7 +466,7 @@ class HttpRelayTransport:
         # slow PHP/FastCGI hosts a response POST can stall for several seconds;
         # handling envelopes in small worker threads keeps the receiver polling
         # and prevents uploads from freezing mid-file.
-        self.max_request_workers = 4
+        self.max_request_workers = 12
         self._worker_lock = threading.Lock()
         self._worker_slots = threading.BoundedSemaphore(self.max_request_workers)
         self._stop_event = threading.Event()
@@ -582,7 +582,7 @@ class HttpRelayTransport:
                 pass
 
     def _poll_and_process_requests(self) -> None:
-        for envelope in self.relay_client.poll_requests(max_requests=16, wait_seconds=5.0):
+        for envelope in self.relay_client.poll_requests(max_requests=64, wait_seconds=10.0):
             request_id = str(envelope.get("request_id", ""))
             if not request_id:
                 continue
