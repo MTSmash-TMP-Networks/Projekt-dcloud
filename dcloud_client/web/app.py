@@ -11,7 +11,6 @@ from uuid import uuid4
 import atexit
 import base64
 import socket
-import time
 from urllib import request as request_module
 
 from flask import Flask, Response, abort, flash, jsonify, redirect, render_template, request, send_file, url_for
@@ -91,25 +90,7 @@ def create_app(
     relay_lock = threading.RLock()
     p2p_client = P2PStorageClient(default_web_port=config.web.port, peer_provider=peer_provider)
     upload_progress = UploadProgressTracker()
-    last_share_sync_at = 0.0
-
-    def _is_loopback_request() -> bool:
-        remote = (request.remote_addr or "").strip()
-        if remote in {"127.0.0.1", "::1"}:
-            return True
-        if remote.startswith("::ffff:"):
-            return remote.removeprefix("::ffff:") == "127.0.0.1"
-        return False
-
-    @app.before_request
-    def _block_public_web_ui() -> Response | None:
-        # If users expose the parent node's web port for NAT parent-proxy
-        # forwarding, the full dashboard/settings UI must still stay local-only.
-        if _is_loopback_request():
-            return None
-        if request.path.startswith("/api/p2p/"):
-            return None
-        return jsonify({"ok": False, "message": "Web UI ist nur lokal erreichbar"}), 403
+    synced_share_peer_ids: set[str] = set()
 
     def _is_loopback_request() -> bool:
         remote = (request.remote_addr or "").strip()
@@ -572,8 +553,12 @@ def create_app(
                     failed += 1
         return delivered, failed
 
-    def _sync_shared_manifests(peers: list[Any] | None = None) -> tuple[int, int]:
-        """Re-send owned shared manifests so reconnecting peers keep visibility."""
+    def _sync_shared_manifests(peers: list[Any] | None = None, *, only_node_ids: set[str] | None = None) -> tuple[int, int]:
+        """Send owned shared manifests to selected active peers.
+
+        ``only_node_ids`` can be used to only sync newly seen peers once, which
+        avoids repetitive manifest upserts on every dashboard state poll.
+        """
         active_peers = peers if peers is not None else _list_active_peers()
         peers_by_id = {str(peer.node_id): peer for peer in active_peers if getattr(peer, "node_id", None)}
         delivered = 0
@@ -584,6 +569,8 @@ def create_app(
             access = manifest.access or {}
             targets = [str(node_id) for node_id in access.get("shared_with", []) if str(node_id)] or ["*"]
             target_peers = active_peers if "*" in targets else [peers_by_id[node_id] for node_id in targets if node_id in peers_by_id]
+            if only_node_ids is not None:
+                target_peers = [peer for peer in target_peers if str(peer.node_id) in only_node_ids]
             for peer in target_peers:
                 result = p2p_client.post_manifest(peer, manifest)
                 if result.ok:
@@ -658,16 +645,17 @@ def create_app(
         return payload
 
     def state_payload() -> dict[str, Any]:
-        nonlocal last_share_sync_at
+        nonlocal synced_share_peer_ids
         _sync_peer_connector_settings()
         stats = chunk_store.stats()
         peers = _list_active_peers()
         _deliver_pending_share_revocations(peers)
         _deliver_pending_file_deletions(peers)
-        now = time.monotonic()
-        if now - last_share_sync_at >= 20.0:
-            _sync_shared_manifests(peers)
-            last_share_sync_at = now
+        active_peer_ids = {str(peer.node_id) for peer in peers if getattr(peer, "node_id", None)}
+        new_peer_ids = active_peer_ids - synced_share_peer_ids
+        if new_peer_ids:
+            _sync_shared_manifests(peers, only_node_ids=new_peer_ids)
+        synced_share_peer_ids = active_peer_ids
         manifests = manifest_store.list_visible_for_node(identity.node_id)
         folders = manifest_store.list_folders_for_node(identity.node_id)
         tree = build_folder_tree(manifests, folders)
