@@ -500,6 +500,41 @@ class HttpRelayTests(unittest.TestCase):
             self.assertEqual(result.remote_failures, 0)
             self.assertEqual(result.remote_successes, len(result.chunks))
 
+    def test_upload_continues_on_remote_peers_when_local_limit_is_full(self) -> None:
+        from dcloud_client.network.p2p_storage import distribute_file_chunks
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            source = root / "large.bin"
+            source.write_bytes(b"x" * (1024 * 1024 + 123))
+            # Local storage budget intentionally tiny so local writes fail.
+            store = ChunkStore(root / "storage", limit_bytes=128, min_free_bytes=0, chunk_size=256 * 1024)
+            store.initialize()
+
+            class RecordingP2P:
+                def __init__(self) -> None:
+                    self.successes = 0
+
+                def put_chunk(self, peer, *, digest, stored_data, original_size, stored_size, index, compression):
+                    self.successes += 1
+                    return type("Result", (), {"ok": True})()
+
+            p2p = RecordingP2P()
+            peer = Peer(node_id="peer-node", host="10.0.0.2", udp_port=6881, web_port=8787)
+            result = distribute_file_chunks(
+                source_path=source,
+                chunk_store=store,
+                local_node_id="local-node",
+                peers=[peer],
+                p2p_client=p2p,  # type: ignore[arg-type]
+                chunk_size_bytes=128 * 1024,
+            )
+
+            self.assertGreater(len(result.chunks), 1)
+            self.assertEqual(result.remote_failures, 0)
+            self.assertEqual(result.remote_successes, len(result.chunks))
+            self.assertLess(result.local_chunks, len(result.chunks))
+
 
     def test_php_relay_register_does_not_fall_through_to_proxy_validation(self) -> None:
         php = shutil.which("php")

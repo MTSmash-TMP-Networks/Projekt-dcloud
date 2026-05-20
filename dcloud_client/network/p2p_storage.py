@@ -531,9 +531,22 @@ def distribute_file_chunks(
             if node_id in locations:
                 continue
             if target is None:
-                chunk_store.write_stored_chunk(stored_data, original_size=len(raw), index=index, compression=compression, digest=digest, validate=False)
-                local_chunks += 1
-                locations.append(local_node_id)
+                try:
+                    chunk_store.write_stored_chunk(
+                        stored_data,
+                        original_size=len(raw),
+                        index=index,
+                        compression=compression,
+                        digest=digest,
+                        validate=False,
+                    )
+                    local_chunks += 1
+                    locations.append(local_node_id)
+                except StorageError:
+                    # If local quota is full, keep using remote capacity instead
+                    # of aborting the whole upload. This allows small local
+                    # shares (e.g. 5 GB) while still storing the file on peers.
+                    LOG.info("Local chunk fallback skipped due to storage limit for chunk %s", digest)
                 continue
 
             transfer = p2p_client.put_chunk(target, digest=digest, stored_data=stored_data, original_size=len(raw), stored_size=len(stored_data), index=index, compression=compression)
@@ -544,9 +557,24 @@ def distribute_file_chunks(
                 remote_failures += 1
 
         if len(locations) < desired_replicas and local_node_id not in locations:
-            chunk_store.write_stored_chunk(stored_data, original_size=len(raw), index=index, compression=compression, digest=digest, validate=False)
-            local_chunks += 1
-            locations.append(local_node_id)
+            try:
+                chunk_store.write_stored_chunk(
+                    stored_data,
+                    original_size=len(raw),
+                    index=index,
+                    compression=compression,
+                    digest=digest,
+                    validate=False,
+                )
+                local_chunks += 1
+                locations.append(local_node_id)
+            except StorageError:
+                LOG.info("Local safety copy skipped due to storage limit for chunk %s", digest)
+
+        if not locations:
+            raise StorageError(
+                "Chunk konnte weder auf Peers noch lokal gespeichert werden (lokales Limit erreicht oder alle Peers fehlgeschlagen)"
+            )
 
         entry: dict[str, Any] = {"index": index, "hash": digest, "size": len(raw), "stored_size": len(stored_data), "locations": list(dict.fromkeys(locations))}
         if compression:
