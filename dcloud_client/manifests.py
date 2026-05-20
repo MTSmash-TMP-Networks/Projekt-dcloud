@@ -385,7 +385,6 @@ class ManifestStore:
 
             if new_manifest_id != old_manifest_id:
                 self._record_manifest_alias(old_manifest_id, new_manifest_id)
-                self.path_for(old_manifest_id).unlink(missing_ok=True)
 
             return updated
 

@@ -1342,12 +1342,10 @@ def create_app(
             manifest_id = str(data["manifest_id"])
             manifest_store.add_share_revocation(data, [])
             removed = False
-            manifest_path = manifest_store.path_for(manifest_id)
-            if not manifest_path.exists():
+            try:
+                manifest = manifest_store.load(manifest_id)
+            except StorageError:
                 return jsonify({"ok": True, "manifest_id": manifest_id, "removed": False, "state": state_payload()})
-            manifest = FileManifest.from_dict(json.loads(manifest_path.read_text(encoding="utf-8")))
-            if not manifest_store.verify(manifest):
-                raise StorageError(f"Manifest signature verification failed for {manifest_id}")
             if manifest.owner_node_id != owner_node_id:
                 raise StorageError("Revocation owner does not match manifest owner")
             if manifest.owner_node_id == identity.node_id:
@@ -1365,7 +1363,7 @@ def create_app(
                     "state": state_payload(),
                 })
 
-            manifest_path.unlink(missing_ok=True)
+            manifest_store.delete(manifest.manifest_id, delete_unreferenced_chunks=False)
             removed = True
             return jsonify({"ok": True, "manifest_id": manifest_id, "removed": removed, "state": state_payload()})
         except (ValueError, TypeError, StorageError) as exc:

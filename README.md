@@ -251,7 +251,7 @@ storage/
 │   └── ab/
 │       └── abcdef....chunk
 ├── manifests/
-│   └── <manifest_id>.json
+│   └── manifest_store.db  # SQL-Metadaten (Manifeste, Aliases, Ordner, Tombstones)
 ├── tmp/
 ├── downloads/
 └── identity/
