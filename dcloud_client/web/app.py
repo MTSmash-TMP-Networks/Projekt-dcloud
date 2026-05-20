@@ -198,12 +198,16 @@ def create_app(
         freshest one. Internal sync/delivery logic still uses the full list.
         """
         source = peers if peers is not None else _list_active_peers()
-        by_key: dict[tuple[str, str, int], Any] = {}
+        by_key: dict[tuple[str, str, int, str], Any] = {}
         for peer in source:
+            node_id = str(getattr(peer, "node_id", "") or "")
             name = (getattr(peer, "name", "") or "").strip().lower()
             host = str(getattr(peer, "host", "") or "")
             web_port = int(getattr(peer, "web_port", 0) or 0)
-            key = (name, host, web_port)
+            # Keep different node IDs visible even when they share generic names
+            # and relay endpoints (same host/web_port), otherwise the newest peer
+            # can overwrite all others in the active list.
+            key = (node_id or name, name, host, web_port)
             existing = by_key.get(key)
             if existing is None or getattr(peer, "last_seen", 0) >= getattr(existing, "last_seen", 0):
                 by_key[key] = peer

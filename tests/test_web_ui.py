@@ -433,6 +433,36 @@ class WebUiTests(unittest.TestCase):
             self.assertTrue(response.json["settings"]["acceptsPeerStorage"])
             self.assertIn("mindestens ein weiterer PC", response.json["settings"]["storagePolicy"])
 
+
+    def test_state_keeps_multiple_relay_peers_with_same_name_visible(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            peer_provider = InMemoryPeerProvider()
+            peer_provider.add_or_update(Peer(
+                node_id="relay-a",
+                host="__relay__",
+                udp_port=0,
+                name="dcloud-node",
+                web_port=8787,
+                relay_url="https://relay.example/dcloud_relay.php",
+            ))
+            peer_provider.add_or_update(Peer(
+                node_id="relay-b",
+                host="__relay__",
+                udp_port=0,
+                name="dcloud-node",
+                web_port=8787,
+                relay_url="https://relay.example/dcloud_relay.php",
+            ))
+            app, identity, manifest_store = self.make_app(root, peer_provider=peer_provider)
+
+            with app.test_client() as client:
+                response = client.get("/api/state")
+
+            self.assertEqual(response.status_code, 200)
+            peer_ids = {peer["node_id"] for peer in response.json["peers"]}
+            self.assertEqual(peer_ids, {"relay-a", "relay-b"})
+
     def test_server_peer_is_used_as_upload_storage_target(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
