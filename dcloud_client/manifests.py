@@ -384,6 +384,8 @@ class ManifestStore:
             self.save(updated)
 
             if new_manifest_id != old_manifest_id:
+                with self._connect() as conn:
+                    conn.execute("DELETE FROM manifests WHERE manifest_id = ?", (old_manifest_id,))
                 self._record_manifest_alias(old_manifest_id, new_manifest_id)
 
             return updated
