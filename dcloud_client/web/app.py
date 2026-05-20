@@ -10,6 +10,7 @@ import threading
 from uuid import uuid4
 import atexit
 import base64
+import json
 import socket
 from urllib import request as request_module
 
@@ -1290,15 +1291,17 @@ def create_app(
             manifest_id = str(data["manifest_id"])
             manifest_store.add_share_revocation(data, [])
             removed = False
-            try:
-                manifest = manifest_store.load(manifest_id)
-            except StorageError:
+            manifest_path = manifest_store.path_for(manifest_id)
+            if not manifest_path.exists():
                 return jsonify({"ok": True, "manifest_id": manifest_id, "removed": False, "state": state_payload()})
+            manifest = FileManifest.from_dict(json.loads(manifest_path.read_text(encoding="utf-8")))
+            if not manifest_store.verify(manifest):
+                raise StorageError(f"Manifest signature verification failed for {manifest_id}")
             if manifest.owner_node_id != owner_node_id:
                 raise StorageError("Revocation owner does not match manifest owner")
             if manifest.owner_node_id == identity.node_id:
                 raise StorageError("Own manifests cannot be revoked through the peer API")
-            manifest_store.delete(manifest_id, delete_unreferenced_chunks=False)
+            manifest_path.unlink(missing_ok=True)
             removed = True
             return jsonify({"ok": True, "manifest_id": manifest_id, "removed": removed, "state": state_payload()})
         except (ValueError, TypeError, StorageError) as exc:

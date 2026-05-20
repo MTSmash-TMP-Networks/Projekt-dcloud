@@ -9,6 +9,7 @@ from dcloud_client.config import AppConfig, DEFAULT_PUBLIC_RELAY_URL, NetworkCon
 from dcloud_client.identity import IdentityManager
 from dcloud_client.manifests import DEFAULT_FOLDER, ManifestStore
 from dcloud_client.network.peers import InMemoryPeerProvider, Peer
+from dcloud_client.network.p2p_storage import build_manifest_revocation
 from dcloud_client.storage import ChunkStore
 from dcloud_client.web.app import build_folder_tree, create_app
 from werkzeug.serving import make_server
@@ -247,6 +248,29 @@ class WebUiTests(unittest.TestCase):
             self.assertEqual(response.headers.get("Cache-Control"), "no-store")
             self.assertEqual(response.headers.get("Pragma"), "no-cache")
             self.assertEqual(response.headers.get("Expires"), "0")
+
+    def test_revocation_by_old_manifest_id_does_not_delete_newer_manifest(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            app, identity, manifest_store = self.make_app(root)
+            owner_identity = IdentityManager(root / "owner-identity").load_or_create()
+            source = root / "shared.txt"
+            source.write_bytes(b"shared data" * 20)
+
+            original = manifest_store.create_for_file(source, owner_identity)
+            shared = manifest_store.set_shared(original.manifest_id, True, owner_identity, shared_with=[identity.node_id])
+            reshared = manifest_store.set_shared(shared.manifest_id, True, owner_identity, shared_with=[identity.node_id, "peer-b"])
+            self.assertFalse(manifest_store.path_for(shared.manifest_id).exists())
+            self.assertTrue(manifest_store.path_for(reshared.manifest_id).exists())
+
+            revocation = build_manifest_revocation(shared.manifest_id, owner_identity)
+            with app.test_client() as client:
+                response = client.post("/api/p2p/manifests/revoke", json=revocation)
+
+            self.assertEqual(response.status_code, 200)
+            self.assertTrue(response.json["ok"])
+            self.assertFalse(response.json["removed"])
+            self.assertTrue(manifest_store.path_for(reshared.manifest_id).exists())
 
     def test_ajax_upload_exposes_server_side_progress_snapshot(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
