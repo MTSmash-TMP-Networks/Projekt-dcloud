@@ -1047,6 +1047,8 @@ def create_app(
                 manifest_store.add_share_revocation(revocation, previous_targets)
 
             manifest = manifest_store.set_shared(manifest_id, shared, identity, shared_with=shared_with or None)
+            if shared:
+                manifest_store.clear_share_revocation(manifest.manifest_id, identity.node_id)
 
             delivered = 0
             failed = 0

@@ -523,6 +523,30 @@ class ManifestStore:
             for record in self._load_share_revocations()
         )
 
+    def clear_share_revocation(self, manifest_id: str, owner_node_id: str) -> bool:
+        """Remove a previously persisted share revocation tombstone.
+
+        This is needed when an owner intentionally shares the exact same
+        manifest again. Without clearing the old tombstone first, receivers
+        reject the fresh manifest as already revoked and it disappears again
+        after relay delivery.
+        """
+        target_manifest_id = str(manifest_id)
+        target_owner_node_id = str(owner_node_id)
+        records = self._load_share_revocations()
+        filtered = [
+            record
+            for record in records
+            if not (
+                record.get("manifest_id") == target_manifest_id
+                and record.get("owner_node_id") == target_owner_node_id
+            )
+        ]
+        if len(filtered) == len(records):
+            return False
+        self._save_share_revocations(filtered)
+        return True
+
     @property
     def file_deletions_path(self) -> Path:
         return self.manifests_dir / "file_deletions.json"
