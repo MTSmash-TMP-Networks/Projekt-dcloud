@@ -442,10 +442,7 @@ class UdpDiscoveryTransport:
         return payload
 
     def _accepts_peer_storage(self) -> bool:
-        if self.client_type == "server":
-            return True
-        pc_peer_count = sum(1 for peer in self.peer_provider.list_peers() if peer.client_type == "pc")
-        return pc_peer_count >= 1
+        return self.client_type == "server"
 
     def _hello_message(
         self,

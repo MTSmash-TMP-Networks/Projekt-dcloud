@@ -184,9 +184,11 @@ def create_app(
         peers = peers if peers is not None else _list_active_peers()
         targets: list[Any] = []
         for peer in peers:
+            if getattr(peer, "node_id", None) == identity.node_id:
+                continue
             peer_type = getattr(peer, "client_type", None)
             accepts_peer_storage = bool(getattr(peer, "accepts_peer_storage", False))
-            if peer_type == "server":
+            if peer_type == "server" and accepts_peer_storage:
                 targets.append(peer)
         seen: set[str] = set()
         unique: list[Any] = []

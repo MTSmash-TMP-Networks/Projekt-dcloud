@@ -198,6 +198,20 @@ class UdpDiscoveryTests(unittest.TestCase):
             self.assertEqual([peer.node_id for peer in discovered], ["candidate-node"])
             self.assertEqual(provider.list_peers(), [])
 
+    def test_pc_transport_does_not_advertise_accepts_peer_storage(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            provider = InMemoryPeerProvider()
+            transport, _ = self.make_transport(
+                root,
+                name="pc",
+                port=free_udp_port(),
+                provider=provider,
+                auto_discovery_enabled=False,
+                auto_discovery_ports=[6881],
+            )
+            self.assertFalse(transport._accepts_peer_storage())
+
     def test_default_config_enables_lan_auto_discovery_on_port_6881(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             config = load_config(Path(temp_dir) / "config.yml")
