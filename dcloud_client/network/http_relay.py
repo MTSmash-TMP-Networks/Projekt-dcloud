@@ -353,7 +353,9 @@ class HttpRelayClient:
         last_error: Exception | None = None
         while time.monotonic() < deadline:
             try:
-                wait_seconds = min(3.0, max(0.5, deadline - time.monotonic()))
+                # Use longer long-poll windows to reduce tiny poll loops that can
+                # look like request floods on shared hosting access logs.
+                wait_seconds = min(10.0, max(1.0, deadline - time.monotonic()))
                 payload = self._post_json(
                     {"action": "poll_response", "request_id": request_id, "relay_request_id": request_id, "wait_seconds": wait_seconds},
                     timeout=max(self.timeout, wait_seconds + 2.0),
@@ -375,7 +377,9 @@ class HttpRelayClient:
                     )
             except RelayError as exc:
                 last_error = exc
-            time.sleep(0.1)
+            # Backoff only after relay/protocol errors. Successful long-poll
+            # responses already block server-side and should not add client spin.
+            time.sleep(0.4)
         if last_error is not None:
             raise RelayError(f"Relay-Transfer ohne Antwort: {last_error}") from last_error
         raise RelayError("Relay-Transfer ohne Antwort")

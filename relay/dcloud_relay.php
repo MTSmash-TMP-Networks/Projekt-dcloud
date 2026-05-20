@@ -703,7 +703,7 @@ function dcloud_enqueue_request(array $input): void {
 function dcloud_poll_requests(array $input): void {
     $nodeId = dcloud_safe_id((string)($input['node_id'] ?? ''), 'node_id');
     $max = max(1, min(DCLOUD_MAX_REQUESTS_PER_POLL, (int)($input['max_requests'] ?? DCLOUD_MAX_REQUESTS_PER_POLL)));
-    $waitUntil = microtime(true) + max(0.0, min(5.0, (float)($input['wait_seconds'] ?? 0)));
+    $waitUntil = microtime(true) + max(0.0, min(15.0, (float)($input['wait_seconds'] ?? 0)));
     do {
         $files = glob(dcloud_queue_dir($nodeId) . DIRECTORY_SEPARATOR . '*.json') ?: [];
         // Queue files are prefixed with unix timestamps, so lexicographic
@@ -757,7 +757,7 @@ function dcloud_post_response(array $input): void {
 
 function dcloud_poll_response(array $input): void {
     $requestId = dcloud_safe_id(dcloud_first_string_value($input, ['request_id', 'id', 'relay_request_id']), 'request_id');
-    $waitUntil = microtime(true) + max(0.0, min(5.0, (float)($input['wait_seconds'] ?? 0)));
+    $waitUntil = microtime(true) + max(0.0, min(15.0, (float)($input['wait_seconds'] ?? 0)));
     $file = dcloud_response_file($requestId);
     do {
         if (file_exists($file)) {
