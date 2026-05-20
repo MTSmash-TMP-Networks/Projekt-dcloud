@@ -163,6 +163,16 @@ Ab Relay-Version **1.2.9** ist die PHP-Eingabeprüfung zusätzlich gegen leere B
 
 Wichtig für große Dateien: Chunk-Daten werden über JSON/Base64 durch PHP übertragen. Damit typische Webhosting-Limits nicht direkt jeden Remote-Chunk ablehnen, nutzt der Client für reine Relay-Peers automatisch kleinere Relay-Chunks (`network.relay_chunk_size_bytes`, Standard 512 KiB), auch wenn lokale/LAN-Chunks größer konfiguriert sind. Bei sehr restriktiven Webspaces müssen trotzdem `post_max_size`, `memory_limit` und gegebenenfalls Request-Timeouts ausreichend groß sein. Der Relay-Worker registriert sich nicht mehr bei jedem Poll-Zyklus neu, sondern hält per Long-Polling die Mailbox warm. Ab dieser Version verarbeitet der empfangende Client Relay-Requests parallel in kleinen Worker-Threads. Wenn ein Webspace beim Zurückschreiben einer Antwort hängt, blockiert das nicht mehr die komplette Mailbox und der Upload bleibt nicht mitten in der Datei stehen. Chunk-Transfers über Relay haben zusätzlich einen harten 45-Sekunden-Teiltimeout pro Versuch und fallen danach sauber auf lokale Sicherheitskopien zurück, statt die UI minutenlang einzufrieren. Für das LAN bleibt der direkte HTTP-Transfer schneller; das Relay ist als Fallback/Internet-Brücke gedacht.
 
+### Performance-Hinweis für große Relay-Uploads
+
+Wenn große Dateien über ein **PHP-Relay** laufen, entstehen zwangsläufig Overheads durch JSON-Serialisierung, Base64 und die Request/Response-Mailbox. Eine reine „Port-Umleitung“ in PHP ersetzt diesen Overhead nicht, weil PHP auf Shared-Hosting in der Regel keine dauerhafte TCP-Weiterleitung (wie ein Layer-4-Proxy) bereitstellt. Für hohe Durchsätze sind drei Wege praxistauglich:
+
+1. **Direktverbindung bevorzugen** (Portfreigabe/NAT-Parent), damit Chunks ohne Relay über die Peer-API laufen.
+2. **Chunk-Größe für Relay kleiner halten** (`network.relay_chunk_size_bytes`, Standard 512 KiB), damit Timeouts und Host-Limits seltener greifen.
+3. **Python-Relay statt PHP verwenden** (`relay/dcloud_relay_server.py`) oder einen echten Reverse-Proxy/Tunnel (z. B. nginx stream, WireGuard, Tailscale) davor schalten, damit der eigentliche Datenpfad nicht pro Chunk durch PHP-Worker blockiert wird.
+
+Datei erst komplett am Relay anliefern und erst auf dem Ziel in Chunks aufteilen ist für dieses Protokoll **nicht empfehlenswert**: Das erhöht RAM/Temp-Storage auf dem Relay stark, verschlechtert Fehlertoleranz bei Abbrüchen und verzögert die Peer-Replikation bis zum Ende des Uploads.
+
 ### Optionale Python-Relay-Alternative
 
 Wenn dein Webserver Python als dauerhafte App oder kleinen Hintergrundprozess ausführen kann, ist `relay/dcloud_relay_server.py` oft besser als PHP. Die Python-Variante verwendet das gleiche JSON-Protokoll und das gleiche automatische Tages-Token-System, arbeitet aber mit einem `ThreadingHTTPServer` und blockiert bei vielen gleichzeitigen Chunk-Requests deutlich weniger.
