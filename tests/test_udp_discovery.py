@@ -52,14 +52,14 @@ class UdpDiscoveryTests(unittest.TestCase):
 
         self.assertIsNotNone(provider.get_peer("peer-a"))
 
-    def test_peer_provider_replaces_duplicate_endpoint_with_latest_node_id(self) -> None:
+    def test_peer_provider_keeps_distinct_node_ids_on_same_endpoint(self) -> None:
         provider = InMemoryPeerProvider(peer_timeout_seconds=30)
         provider.add_or_update(Peer(node_id="old-node", host="127.0.0.1", udp_port=6881))
         provider.add_or_update(Peer(node_id="new-node", host="127.0.0.1", udp_port=6881))
 
         peers = provider.list_peers()
-        self.assertEqual([peer.node_id for peer in peers], ["new-node"])
-        self.assertIsNone(provider.get_peer("old-node"))
+        self.assertEqual({peer.node_id for peer in peers}, {"old-node", "new-node"})
+        self.assertIsNotNone(provider.get_peer("old-node"))
 
     def make_transport(
         self,
