@@ -311,17 +311,12 @@ class ManifestStore:
         if manifest.owner_node_id != identity.node_id:
             raise StorageError("Only the owner can change this manifest")
         data = manifest.to_dict()
-        old_path = self.path_for(manifest.manifest_id)
         data.update(updates)
+        data["manifest_id"] = manifest.manifest_id
         data.pop("signature", None)
-        data.pop("manifest_id", None)
         signature = sign_bytes(identity.private_key, canonical_manifest_bytes(data))
-        new_manifest_id = sha256_hex(canonical_manifest_bytes({**data, "signature": signature}))
-        updated = FileManifest.from_dict({**data, "manifest_id": new_manifest_id, "signature": signature})
+        updated = FileManifest.from_dict({**data, "signature": signature})
         self.save(updated)
-        if old_path != self.path_for(updated.manifest_id):
-            self._record_manifest_alias(manifest.manifest_id, updated.manifest_id)
-            old_path.unlink(missing_ok=True)
         return updated
 
     @property
