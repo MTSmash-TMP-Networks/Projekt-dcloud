@@ -9,6 +9,7 @@ from typing import Protocol
 
 
 DEFAULT_PEER_TIMEOUT_SECONDS = 35.0
+DEFAULT_PEER_STALE_GRACE_FACTOR = 1.5
 
 _ADJECTIVES = [
     "Blauer", "Roter", "Goldener", "Silberner", "Grüner", "Mutiger",
@@ -128,6 +129,9 @@ class InMemoryPeerProvider:
         if timeout is None:
             timeout = DEFAULT_PEER_TIMEOUT_SECONDS
         self.peer_timeout_seconds = max(0.05, float(timeout))
+        # Add a small grace window so peers do not flap between online/offline
+        # when one discovery round is delayed by network jitter.
+        self.peer_stale_grace_factor = DEFAULT_PEER_STALE_GRACE_FACTOR
         # Backwards-compatible name for code/tests that used the previous term.
         self.stale_after_seconds = self.peer_timeout_seconds
         self._peers: dict[str, Peer] = {}
@@ -197,6 +201,6 @@ class InMemoryPeerProvider:
             return self._purge_stale_locked(now)
 
     def _purge_stale_locked(self, now: datetime) -> list[Peer]:
-        cutoff = now - timedelta(seconds=self.peer_timeout_seconds)
+        cutoff = now - timedelta(seconds=self.peer_timeout_seconds * self.peer_stale_grace_factor)
         stale_ids = [node_id for node_id, peer in self._peers.items() if peer.last_seen < cutoff]
         return [self._peers.pop(node_id) for node_id in stale_ids]
