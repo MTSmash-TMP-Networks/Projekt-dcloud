@@ -453,7 +453,11 @@ class ManifestStore:
             # No access change: avoid creating a new manifest id/signature revision.
             return manifest
 
-        return self._resign_manifest(manifest, identity, {"access": access}, rekey=True)
+        access_with_revision = {
+            **access,
+            "changed_at": datetime.now(timezone.utc).isoformat(),
+        }
+        return self._resign_manifest(manifest, identity, {"access": access_with_revision}, rekey=True)
 
     def update_placement(
         self,
