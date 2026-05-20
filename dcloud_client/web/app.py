@@ -1093,6 +1093,15 @@ def create_app(
             if shared:
                 manifest_store.clear_share_revocation(manifest.manifest_id, identity.node_id)
 
+                old_targets = [
+                    str(item) for item in (old_manifest.access or {}).get("shared_with", []) if str(item)
+                ] or ["*"]
+                if manifest.manifest_id != old_manifest.manifest_id and manifest_store.is_shared(old_manifest):
+                    # Access/target changes rekey manifests. Revoke the old id on previous
+                    # recipients so peers do not oscillate between old/new share entries.
+                    revocation = build_manifest_revocation(old_manifest, identity)
+                    manifest_store.add_share_revocation(revocation, old_targets)
+
             delivered = 0
             failed = 0
             if shared:
