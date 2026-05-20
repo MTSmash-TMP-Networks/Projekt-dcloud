@@ -260,10 +260,24 @@ def main() -> None:
                         if existing.stat().st_size != int(manifest.file_size):
                             # Datei via SMB geändert -> altes Manifest ersetzen
                             try:
-                                manifest_store.delete(manifest.manifest_id, delete_unreferenced_chunks=True)
                                 rel = resolved.relative_to(smb_root.resolve())
                                 folder_path = sanitize_folder_path(str(rel.parent).replace("\\", "/"))
-                                _store_smb_file_with_peer_distribution(existing, file_name=existing.name, folder_path=folder_path or DEFAULT_FOLDER)
+                                upload_result = chunk_store.store_file(existing)
+                                placement = {
+                                    "strategy": "distributed_direct_first_chunks",
+                                    "target_count": 1,
+                                    "targets": [identity.node_id],
+                                    "transfer_status": "local_only",
+                                }
+                                manifest_store.update_from_chunk_entries(
+                                    manifest.manifest_id,
+                                    file_name=existing.name,
+                                    file_size=existing.stat().st_size,
+                                    chunk_entries=upload_result.chunks,
+                                    identity=identity,
+                                    folder_path=folder_path or DEFAULT_FOLDER,
+                                    placement=placement,
+                                )
                             except Exception:
                                 LOG.debug("SMB-View Sync: Update fehlgeschlagen für %s", existing, exc_info=True)
                     # Neue Ordner via SMB angelegt -> als virtuelle Ordner persistieren
