@@ -475,6 +475,39 @@ class WebUiTests(unittest.TestCase):
             self.assertEqual(manifest.placement["targets"], [identity.node_id])
             self.assertEqual(manifest.placement["transfer_status"], "local_only")
 
+    def test_upload_ignores_self_peer_advertisement_as_remote_target(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            peer_provider = InMemoryPeerProvider()
+            app, identity, manifest_store = self.make_app(root, peer_provider=peer_provider, client_type="server")
+            peer_provider.add_or_update(Peer(
+                node_id=identity.node_id,
+                host="127.0.0.1",
+                udp_port=6881,
+                name="Dieser Knoten",
+                client_type="server",
+                accepts_peer_storage=True,
+                web_port=8787,
+            ))
+
+            with app.test_client() as client:
+                response = client.post(
+                    "/upload",
+                    data={
+                        "folder": DEFAULT_FOLDER,
+                        "next": "/",
+                        "file": (BytesIO(b"self peer" * 30), "self-peer.txt"),
+                    },
+                    content_type="multipart/form-data",
+                    headers={"X-Requested-With": "XMLHttpRequest"},
+                )
+
+            self.assertEqual(response.status_code, 200)
+            manifest_id = response.json["manifest"]["manifest_id"]
+            manifest = manifest_store.load(manifest_id)
+            self.assertEqual(manifest.placement["targets"], [identity.node_id])
+            self.assertEqual(manifest.placement["transfer_status"], "local_only")
+
     def test_upload_from_files_ui_redirects_back_to_files_without_ajax(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
