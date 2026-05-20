@@ -243,6 +243,10 @@ def normalize_relay_urls(values: Any, *, include_default: bool = True) -> list[s
             # Local loopback relay URLs are not usable by other peers and should
             # therefore never be saved as additional relay endpoints.
             continue
+        if not include_default and url == DEFAULT_PUBLIC_RELAY_URL:
+            # When the bundled relay is disabled, keep it out even if legacy
+            # configs still contain it explicitly.
+            continue
         if url and url not in result:
             result.append(url)
     return result
