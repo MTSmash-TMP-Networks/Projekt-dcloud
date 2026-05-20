@@ -77,24 +77,54 @@ def _relay_http_message(response: RelayHttpResponse) -> str:
 
 
 def canonical_revocation_bytes(data: dict[str, Any]) -> bytes:
-    """Stable bytes that are signed by the file owner for share revocations."""
+    """Stable bytes that are signed by the file owner for share revocations.
+
+    Newer revocations bind the removal to the exact manifest signature that was
+    visible when the owner disabled sharing. That makes delayed relay delivery
+    safe: an old revoke cannot remove a freshly re-shared manifest version.
+    """
     signable = {
         "action": REVOCATION_ACTION,
         "manifest_id": str(data["manifest_id"]),
         "owner_node_id": str(data["owner_node_id"]),
         "owner_public_key": str(data["owner_public_key"]),
     }
+
+    revoked_signature = str(data.get("revoked_manifest_signature", "") or "")
+    if revoked_signature:
+        signable["revoked_manifest_signature"] = revoked_signature
+
+    revoked_at = str(data.get("revoked_at", "") or "")
+    if revoked_at:
+        signable["revoked_at"] = revoked_at
+
     return json.dumps(signable, sort_keys=True, separators=(",", ":")).encode("utf-8")
 
 
-def build_manifest_revocation(manifest_id: str, identity: NodeIdentity) -> dict[str, Any]:
-    """Create a signed revocation payload for an old shared manifest id."""
+def build_manifest_revocation(manifest: FileManifest | str, identity: NodeIdentity) -> dict[str, Any]:
+    """Create a signed revocation payload for an old shared manifest.
+
+    ``manifest`` may still be a string for compatibility with older call sites,
+    but passing the full FileManifest is preferred because the revocation can
+    then be tied to the exact manifest signature being revoked.
+    """
+    if isinstance(manifest, FileManifest):
+        manifest_id = manifest.manifest_id
+        revoked_manifest_signature = manifest.signature
+    else:
+        manifest_id = str(manifest)
+        revoked_manifest_signature = ""
+
     payload: dict[str, Any] = {
         "action": REVOCATION_ACTION,
         "manifest_id": str(manifest_id),
         "owner_node_id": identity.node_id,
         "owner_public_key": identity.public_key_b64,
+        "revoked_at": str(int(time.time())),
     }
+    if revoked_manifest_signature:
+        payload["revoked_manifest_signature"] = revoked_manifest_signature
+
     payload["signature"] = sign_bytes(identity.private_key, canonical_revocation_bytes(payload))
     return payload
 
