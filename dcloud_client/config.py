@@ -260,6 +260,27 @@ def normalize_relay_secret(value: str | None) -> str:
     return (value or "").strip()
 
 
+def normalize_bool(value: bool | str | int | None, default: bool = False) -> bool:
+    """Parse booleans from config/UI values without treating ``"false"`` as true.
+
+    Python's built-in ``bool("false")`` evaluates to ``True`` because non-empty
+    strings are truthy. Several settings can arrive as form values or YAML text,
+    so keep boolean parsing explicit and predictable.
+    """
+    if value is None:
+        return bool(default)
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, int):
+        return value != 0
+    text = str(value).strip().lower()
+    if text in {"1", "true", "yes", "y", "on", "enabled", "ja"}:
+        return True
+    if text in {"0", "false", "no", "n", "off", "disabled", "nein", ""}:
+        return False
+    return bool(default)
+
+
 def ensure_config(config_path: Path) -> None:
     """Create a starter config file if none exists yet."""
     if config_path.exists():
@@ -384,7 +405,7 @@ def update_runtime_settings(
     normalized_type = normalize_client_type(client_type)
     storage_limit_bytes = validate_shared_storage_bytes(gib_to_bytes(shared_storage_gb))
     relay_values = relay_server_urls if relay_server_urls is not None else relay_server_url
-    builtin_enabled = bool(config.network.relay_builtin_enabled) if relay_builtin_enabled is None else bool(relay_builtin_enabled)
+    builtin_enabled = normalize_bool(relay_builtin_enabled, bool(config.network.relay_builtin_enabled))
     normalized_relay_urls = (
         normalize_relay_urls(relay_values, include_default=builtin_enabled)
         if relay_values is not None
@@ -408,25 +429,28 @@ def update_runtime_settings(
     raw["node"]["client_type"] = normalized_type
     raw["storage"]["limit_bytes"] = storage_limit_bytes
     raw["network"]["relay_builtin_enabled"] = builtin_enabled
-    raw["network"]["relay_children"] = bool(config.network.relay_children) if relay_children is None else bool(relay_children)
+    raw["network"]["relay_children"] = normalize_bool(relay_children, bool(config.network.relay_children))
     raw["network"]["relay_url"] = normalized_relay_urls[0] if normalized_relay_urls else ""
     raw["network"]["relay_urls"] = normalized_relay_urls
     raw["network"]["relay_secret"] = normalized_relay_secret
-    raw["network"]["auto_discovery_enabled"] = bool(auto_discovery_enabled) if auto_discovery_enabled is not None else bool(config.network.auto_discovery_enabled)
-    raw["smb"]["enabled"] = bool(smb_enabled) if smb_enabled is not None else config.smb.enabled
+    raw["network"]["auto_discovery_enabled"] = normalize_bool(auto_discovery_enabled, bool(config.network.auto_discovery_enabled))
+    raw["smb"]["enabled"] = normalize_bool(smb_enabled, bool(config.smb.enabled))
     raw["smb"]["username"] = (smb_username if smb_username is not None else config.smb.username).strip()
-    raw["smb"]["password"] = smb_password if smb_password is not None else config.smb.password
+    # The settings form intentionally leaves the password field empty when a
+    # password is already set (placeholder: "neu eingeben zum Ändern"). Do not
+    # erase the stored password unless a non-empty replacement is submitted.
+    raw["smb"]["password"] = smb_password if smb_password not in {None, ""} else config.smb.password
     _write_yaml_atomic(config.config_path, raw)
 
     config.node.client_type = normalized_type
     config.storage.limit_bytes = storage_limit_bytes
     config.network.relay_builtin_enabled = builtin_enabled
-    config.network.relay_children = bool(config.network.relay_children) if relay_children is None else bool(relay_children)
+    config.network.relay_children = normalize_bool(relay_children, bool(config.network.relay_children))
     config.network.relay_url = normalized_relay_urls[0] if normalized_relay_urls else ""
     config.network.relay_urls = normalized_relay_urls
     config.network.relay_secret = normalized_relay_secret
-    config.network.auto_discovery_enabled = bool(auto_discovery_enabled) if auto_discovery_enabled is not None else bool(config.network.auto_discovery_enabled)
-    config.smb.enabled = bool(smb_enabled) if smb_enabled is not None else config.smb.enabled
+    config.network.auto_discovery_enabled = normalize_bool(auto_discovery_enabled, bool(config.network.auto_discovery_enabled))
+    config.smb.enabled = normalize_bool(smb_enabled, bool(config.smb.enabled))
     config.smb.username = (smb_username if smb_username is not None else config.smb.username).strip()
-    config.smb.password = smb_password if smb_password is not None else config.smb.password
+    config.smb.password = smb_password if smb_password not in {None, ""} else config.smb.password
     return config

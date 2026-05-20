@@ -5,12 +5,10 @@ from __future__ import annotations
 from pathlib import Path
 import tempfile
 from typing import Any, Protocol
-from io import BytesIO
 import threading
 from uuid import uuid4
 import atexit
 import base64
-import json
 import socket
 import time
 from urllib import request as request_module
@@ -214,7 +212,6 @@ def create_app(
         return list(by_key.values())
 
     def stats_payload(stats: StorageStats) -> dict[str, int | str]:
-        smb_root_path = str(app.config.get("DCLOUD_SMB_ROOT") or config.storage.path)
         return {
             "path": str(stats.path),
             "limitBytes": stats.limit_bytes,
