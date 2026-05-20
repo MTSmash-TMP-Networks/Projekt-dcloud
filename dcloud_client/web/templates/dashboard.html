@@ -1097,7 +1097,11 @@
             const type = peer.client_type === "server" ? "Server" : (peer.client_type === "pc" ? "PC" : "unbekannt");
             const storage = peer.accepts_peer_storage ? `P2P-Speicher aktiv · frei ${formatBytes(peer.free_storage_bytes || peer.shared_storage_bytes || 0)}` : "keine P2P-Ablage";
             const api = peer.web_port ? `API :${peer.web_port}` : "API unbekannt";
-            const route = peer.transport === "relay" ? "PHP-Relay" : (peer.transport === "direct+relay" ? `${peer.host}:${peer.udp_port} · Relay-Fallback` : `${peer.host}:${peer.udp_port}`);
+            const route = peer.transport === "relay"
+              ? "PHP-Relay"
+              : (peer.transport === "nat-tree"
+                ? `NAT-Child über Parent ${String(peer.route_via_node_id || "").slice(0, 12)} · ${peer.host}:${peer.udp_port}`
+                : (peer.transport === "direct+relay" ? `${peer.host}:${peer.udp_port} · Relay-Fallback` : `${peer.host}:${peer.udp_port}`));
             const age = Number(peer.last_seen_age_seconds || 0);
             const seen = age < 2 ? "gerade aktiv" : `vor ${Math.round(age)}s gesehen`;
             item.textContent = `${label} · ${type} · ${route} · ${api} · ${storage} · ${seen}`;
@@ -1713,7 +1717,11 @@
           const option = document.createElement("option");
           option.value = peer.node_id;
           const type = peer.client_type === "server" ? "Server" : (peer.client_type === "pc" ? "PC" : "Peer");
-          const route = peer.transport === "relay" ? "PHP-Relay" : `${peer.host}:${peer.udp_port}`;
+          const route = peer.transport === "relay"
+            ? "PHP-Relay"
+            : (peer.transport === "nat-tree"
+              ? `NAT-Child via ${String(peer.route_via_node_id || "").slice(0, 8)}`
+              : `${peer.host}:${peer.udp_port}`);
           option.textContent = `${peerDisplayName(peer)} (${type}, ${route})`;
           sharePeerSelect.appendChild(option);
         });
