@@ -404,7 +404,10 @@ def create_app(
         except Exception:
             # Keep the discovered relays at least for the current runtime if the
             # config file cannot be updated.
-            config.network.relay_urls = normalize_relay_urls([config.network.relay_urls, new_urls], include_default=True)
+            config.network.relay_urls = normalize_relay_urls(
+                [config.network.relay_urls, new_urls],
+                include_default=bool(getattr(config.network, "relay_builtin_enabled", False)),
+            )
             config.network.relay_url = config.network.relay_urls[0]
         _configure_relay_transport()
         _sync_peer_connector_settings()
