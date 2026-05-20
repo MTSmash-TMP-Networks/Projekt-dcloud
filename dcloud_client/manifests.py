@@ -6,8 +6,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 import json
-import os
-import tempfile
+import sqlite3
 from typing import Any
 
 from .crypto import b64decode, sha256_hex, sign_bytes, verify_signature
@@ -91,6 +90,22 @@ class ManifestStore:
     def __init__(self, chunk_store: ChunkStore) -> None:
         self.chunk_store = chunk_store
         self.manifests_dir = chunk_store.manifests_dir
+        self.db_path = self.manifests_dir / "manifest_store.db"
+        self._init_db()
+
+    def _connect(self) -> sqlite3.Connection:
+        self.manifests_dir.mkdir(parents=True, exist_ok=True)
+        conn = sqlite3.connect(self.db_path)
+        conn.row_factory = sqlite3.Row
+        return conn
+
+    def _init_db(self) -> None:
+        with self._connect() as conn:
+            conn.execute("CREATE TABLE IF NOT EXISTS manifests (manifest_id TEXT PRIMARY KEY, data TEXT NOT NULL)")
+            conn.execute("CREATE TABLE IF NOT EXISTS manifest_aliases (old_id TEXT PRIMARY KEY, new_id TEXT NOT NULL)")
+            conn.execute("CREATE TABLE IF NOT EXISTS folders (owner_node_id TEXT NOT NULL, folder_path TEXT NOT NULL, PRIMARY KEY(owner_node_id, folder_path))")
+            conn.execute("CREATE TABLE IF NOT EXISTS share_revocations (manifest_id TEXT NOT NULL, owner_node_id TEXT NOT NULL, data TEXT NOT NULL, PRIMARY KEY(manifest_id, owner_node_id))")
+            conn.execute("CREATE TABLE IF NOT EXISTS file_deletions (manifest_id TEXT NOT NULL, owner_node_id TEXT NOT NULL, data TEXT NOT NULL, PRIMARY KEY(manifest_id, owner_node_id))")
 
     def create_for_file(
         self,
@@ -245,31 +260,22 @@ class ManifestStore:
         return normalized_chunks
 
     def save(self, manifest: FileManifest) -> Path:
-        self.manifests_dir.mkdir(parents=True, exist_ok=True)
-        data = json.dumps(manifest.to_dict(), sort_keys=True, indent=2).encode("utf-8")
-        self.chunk_store.ensure_capacity(len(data))
-        fd, tmp_name = tempfile.mkstemp(prefix="manifest-", suffix=".tmp", dir=self.chunk_store.tmp_dir)
-        try:
-            with os.fdopen(fd, "wb") as handle:
-                handle.write(data)
-                handle.flush()
-            target = self.path_for(manifest.manifest_id)
-            Path(tmp_name).replace(target)
-            return target
-        except Exception:
-            Path(tmp_name).unlink(missing_ok=True)
-            raise
+        data = json.dumps(manifest.to_dict(), sort_keys=True)
+        self.chunk_store.ensure_capacity(len(data.encode("utf-8")))
+        with self._connect() as conn:
+            conn.execute("INSERT OR REPLACE INTO manifests (manifest_id, data) VALUES (?, ?)", (manifest.manifest_id, data))
+        return self.path_for(manifest.manifest_id)
 
     def path_for(self, manifest_id: str) -> Path:
         return self.manifests_dir / f"{manifest_id}.json"
 
     def list_manifests(self) -> list[FileManifest]:
         manifests: list[FileManifest] = []
-        if not self.manifests_dir.exists():
-            return manifests
-        for path in sorted(self.manifests_dir.glob("*.json")):
+        with self._connect() as conn:
+            rows = conn.execute("SELECT manifest_id FROM manifests ORDER BY manifest_id").fetchall()
+        for row in rows:
             try:
-                manifests.append(self.load(path.stem))
+                manifests.append(self.load(str(row["manifest_id"])))
             except Exception:
                 continue
         return manifests
@@ -389,31 +395,15 @@ class ManifestStore:
         self.save(updated)
         return updated
 
-    @property
-    def manifest_aliases_path(self) -> Path:
-        return self.manifests_dir / "manifest_aliases.json"
-
     def _load_manifest_aliases(self) -> dict[str, str]:
-        if not self.manifest_aliases_path.exists():
-            return {}
-        try:
-            data = json.loads(self.manifest_aliases_path.read_text(encoding="utf-8"))
-        except json.JSONDecodeError:
-            return {}
-        if not isinstance(data, dict):
-            return {}
-        return {
-            str(old_id): str(new_id)
-            for old_id, new_id in data.items()
-            if str(old_id) and str(new_id) and str(old_id) != str(new_id)
-        }
+        with self._connect() as conn:
+            rows = conn.execute("SELECT old_id, new_id FROM manifest_aliases").fetchall()
+        return {str(row["old_id"]): str(row["new_id"]) for row in rows if str(row["old_id"]) != str(row["new_id"])}
 
     def _save_manifest_aliases(self, aliases: dict[str, str]) -> None:
-        self.manifests_dir.mkdir(parents=True, exist_ok=True)
-        self.manifest_aliases_path.write_text(
-            json.dumps(aliases, sort_keys=True, indent=2),
-            encoding="utf-8",
-        )
+        with self._connect() as conn:
+            conn.execute("DELETE FROM manifest_aliases")
+            conn.executemany("INSERT INTO manifest_aliases (old_id, new_id) VALUES (?, ?)", aliases.items())
 
     def _record_manifest_alias(self, old_manifest_id: str, new_manifest_id: str) -> None:
         old_manifest_id = str(old_manifest_id)
@@ -472,44 +462,25 @@ class ManifestStore:
             raise StorageError(f"Manifest signature verification failed for {manifest.manifest_id}")
         return self.save(manifest)
 
-    @property
-    def folders_path(self) -> Path:
-        return self.manifests_dir / "folders.json"
-
     def _load_saved_folders(self, owner_node_id: str) -> list[str]:
-        if not self.folders_path.exists():
-            return []
-        try:
-            data = json.loads(self.folders_path.read_text(encoding="utf-8"))
-        except json.JSONDecodeError:
-            return []
-        return [sanitize_folder_path(folder) for folder in data.get(owner_node_id, [])]
+        with self._connect() as conn:
+            rows = conn.execute("SELECT folder_path FROM folders WHERE owner_node_id = ? ORDER BY lower(folder_path)", (owner_node_id,)).fetchall()
+        return [sanitize_folder_path(str(row["folder_path"])) for row in rows]
 
     def _save_folders(self, owner_node_id: str, folders: list[str]) -> None:
-        self.manifests_dir.mkdir(parents=True, exist_ok=True)
-        data: dict[str, list[str]] = {}
-        if self.folders_path.exists():
-            try:
-                loaded = json.loads(self.folders_path.read_text(encoding="utf-8"))
-                data = {str(key): list(value) for key, value in loaded.items()}
-            except (json.JSONDecodeError, TypeError):
-                data = {}
-        data[owner_node_id] = folders
-        self.folders_path.write_text(json.dumps(data, sort_keys=True, indent=2), encoding="utf-8")
-
-    @property
-    def share_revocations_path(self) -> Path:
-        return self.manifests_dir / "share_revocations.json"
+        with self._connect() as conn:
+            conn.execute("DELETE FROM folders WHERE owner_node_id = ?", (owner_node_id,))
+            conn.executemany("INSERT OR IGNORE INTO folders (owner_node_id, folder_path) VALUES (?, ?)", [(owner_node_id, sanitize_folder_path(folder)) for folder in folders])
 
     def _load_share_revocations(self) -> list[dict[str, Any]]:
-        if not self.share_revocations_path.exists():
-            return []
-        try:
-            raw = json.loads(self.share_revocations_path.read_text(encoding="utf-8"))
-        except json.JSONDecodeError:
-            return []
-        if not isinstance(raw, list):
-            return []
+        with self._connect() as conn:
+            rows = conn.execute("SELECT data FROM share_revocations").fetchall()
+        raw = []
+        for row in rows:
+            try:
+                raw.append(json.loads(str(row["data"])))
+            except json.JSONDecodeError:
+                continue
         result: list[dict[str, Any]] = []
         for item in raw:
             if not isinstance(item, dict):
@@ -527,11 +498,9 @@ class ManifestStore:
         return result
 
     def _save_share_revocations(self, revocations: list[dict[str, Any]]) -> None:
-        self.manifests_dir.mkdir(parents=True, exist_ok=True)
-        self.share_revocations_path.write_text(
-            json.dumps(revocations, sort_keys=True, indent=2),
-            encoding="utf-8",
-        )
+        with self._connect() as conn:
+            conn.execute("DELETE FROM share_revocations")
+            conn.executemany("INSERT OR REPLACE INTO share_revocations (manifest_id, owner_node_id, data) VALUES (?, ?, ?)", [(str(item.get("manifest_id", "")), str(item.get("owner_node_id", "")), json.dumps(item, sort_keys=True)) for item in revocations])
 
     def add_share_revocation(self, revocation: dict[str, Any], target_node_ids: list[str] | None = None) -> None:
         """Persist a share revocation/tombstone and optional delivery targets."""
@@ -612,19 +581,15 @@ class ManifestStore:
         self._save_share_revocations(filtered)
         return True
 
-    @property
-    def file_deletions_path(self) -> Path:
-        return self.manifests_dir / "file_deletions.json"
-
     def _load_file_deletions(self) -> list[dict[str, Any]]:
-        if not self.file_deletions_path.exists():
-            return []
-        try:
-            raw = json.loads(self.file_deletions_path.read_text(encoding="utf-8"))
-        except json.JSONDecodeError:
-            return []
-        if not isinstance(raw, list):
-            return []
+        with self._connect() as conn:
+            rows = conn.execute("SELECT data FROM file_deletions").fetchall()
+        raw = []
+        for row in rows:
+            try:
+                raw.append(json.loads(str(row["data"])))
+            except json.JSONDecodeError:
+                continue
         result: list[dict[str, Any]] = []
         for item in raw:
             if not isinstance(item, dict):
@@ -642,11 +607,9 @@ class ManifestStore:
         return result
 
     def _save_file_deletions(self, deletions: list[dict[str, Any]]) -> None:
-        self.manifests_dir.mkdir(parents=True, exist_ok=True)
-        self.file_deletions_path.write_text(
-            json.dumps(deletions, sort_keys=True, indent=2),
-            encoding="utf-8",
-        )
+        with self._connect() as conn:
+            conn.execute("DELETE FROM file_deletions")
+            conn.executemany("INSERT OR REPLACE INTO file_deletions (manifest_id, owner_node_id, data) VALUES (?, ?, ?)", [(str(item.get("manifest_id", "")), str(item.get("owner_node_id", "")), json.dumps(item, sort_keys=True)) for item in deletions])
 
     def add_file_deletion(self, deletion: dict[str, Any], target_node_ids: list[str] | None = None) -> None:
         """Persist a signed file-delete tombstone and optional delivery targets."""
@@ -726,10 +689,11 @@ class ManifestStore:
 
     def load(self, manifest_id: str) -> FileManifest:
         resolved_manifest_id = self.resolve_manifest_id(manifest_id)
-        path = self.path_for(resolved_manifest_id)
-        if not path.exists():
+        with self._connect() as conn:
+            row = conn.execute("SELECT data FROM manifests WHERE manifest_id = ?", (resolved_manifest_id,)).fetchone()
+        if row is None:
             raise StorageError(f"Manifest {manifest_id} not found")
-        manifest = FileManifest.from_dict(json.loads(path.read_text(encoding="utf-8")))
+        manifest = FileManifest.from_dict(json.loads(str(row["data"])))
         if not self.verify(manifest):
             raise StorageError(f"Manifest signature verification failed for {resolved_manifest_id}")
         return manifest
@@ -749,8 +713,8 @@ class ManifestStore:
 
     def delete(self, manifest_id: str, *, delete_unreferenced_chunks: bool = True) -> None:
         manifest = self.load(manifest_id)
-        manifest_path = self.path_for(manifest.manifest_id)
-        manifest_path.unlink(missing_ok=True)
+        with self._connect() as conn:
+            conn.execute("DELETE FROM manifests WHERE manifest_id = ?", (manifest.manifest_id,))
 
         if not delete_unreferenced_chunks:
             return
