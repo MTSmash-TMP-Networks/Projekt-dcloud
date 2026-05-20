@@ -154,7 +154,7 @@ def main() -> None:
                 max_in_flight_chunks=getattr(config.network, "relay_max_in_flight_chunks", 4),
             )
             placement = {
-                "strategy": "distributed_round_robin_chunks",
+                "strategy": "distributed_direct_first_chunks",
                 "target_count": len(upload_result.targets),
                 "targets": upload_result.targets,
                 "transfer_status": upload_result.transfer_status,

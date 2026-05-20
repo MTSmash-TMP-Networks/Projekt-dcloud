@@ -783,7 +783,7 @@ class WebUiTests(unittest.TestCase):
             self.assertTrue(response.json["ok"])
             self.assertEqual(config.network.relay_url, DEFAULT_PUBLIC_RELAY_URL)
             self.assertIn(DEFAULT_PUBLIC_RELAY_URL, config.network.relay_urls)
-            self.assertIn("http://127.0.0.1:9/dcloud_relay.php", config.network.relay_urls)
+            self.assertNotIn("http://127.0.0.1:9/dcloud_relay.php", config.network.relay_urls)
             self.assertEqual(config.network.relay_secret, "")
             self.assertEqual(response.json["settings"]["relayTokenMode"], "automatic-daily")
             self.assertTrue(response.json["state"]["network"]["relayEnabled"])

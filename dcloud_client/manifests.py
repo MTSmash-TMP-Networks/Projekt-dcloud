@@ -191,7 +191,7 @@ class ManifestStore:
             "folder_path": sanitize_folder_path(folder_path),
             "access": access or {"visibility": "private", "shared_with": []},
             "placement": placement or {
-                "strategy": "distributed_round_robin_chunks",
+                "strategy": "distributed_direct_first_chunks",
                 "target_count": len(unique_targets),
                 "targets": unique_targets,
                 "transfer_status": "local_only" if unique_targets == [identity.node_id] else "stored_on_peers",
