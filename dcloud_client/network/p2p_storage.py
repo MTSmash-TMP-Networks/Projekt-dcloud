@@ -7,6 +7,7 @@ larger than one safe UDP datagram.
 
 from __future__ import annotations
 
+from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from dataclasses import dataclass, field
 import json
 import logging
@@ -432,6 +433,7 @@ def distribute_file_chunks(
     min_replicas_with_peers: int = DEFAULT_MIN_REPLICAS_WITH_PEERS,
     progress_callback: Callable[[dict[str, Any]], None] | None = None,
     chunk_size_bytes: int | None = None,
+    max_in_flight_chunks: int = 1,
 ) -> DistributedUploadResult:
     """Read a file once, compress each chunk and place it on local/peer targets.
 
@@ -481,148 +483,91 @@ def distribute_file_chunks(
         compressed_chunks=0,
     )
 
-    with source_path.open("rb") as handle:
-        index = 0
-        while True:
-            raw = handle.read(effective_chunk_size)
-            if not raw:
+    max_in_flight = max(1, int(max_in_flight_chunks))
+
+    def _process_chunk(index: int, raw: bytes) -> dict[str, Any]:
+        stored_data, compression = chunk_store.prepare_chunk_data(raw)
+        digest = chunk_store.digest_for_stored_data(stored_data)
+        locations: list[str] = []
+        remote_successes = 0
+        remote_failures = 0
+        local_chunks = 0
+
+        for target, node_id in _rotated_targets(targets, target_ids, index):
+            if len(locations) >= desired_replicas:
                 break
-            notify(
-                phase="chunk_read",
-                status=f"Chunk {index + 1}/{max(total_chunks, 1)} wird gelesen…",
-                current_chunk=index + 1,
-                total_chunks=total_chunks,
-                raw_bytes_processed=result.raw_bytes,
-            )
-            stored_data, compression = chunk_store.prepare_chunk_data(raw)
-            digest = chunk_store.digest_for_stored_data(stored_data)
-            locations: list[str] = []
-            notify(
-                phase="chunk_compressed",
-                status=f"Chunk {index + 1}/{max(total_chunks, 1)} komprimiert: {len(raw)} -> {len(stored_data)} Bytes",
-                current_chunk=index + 1,
-                total_chunks=total_chunks,
-                raw_bytes_processed=result.raw_bytes + len(raw),
-                stored_bytes=result.stored_bytes + len(stored_data),
-                compressed_chunks=result.compressed_chunks + (1 if compression else 0),
-            )
-
-            for target, node_id in _rotated_targets(targets, target_ids, index):
-                if len(locations) >= desired_replicas:
-                    break
-                if node_id in locations:
-                    continue
-                if target is None:
-                    notify(
-                        phase="local_store",
-                        status=f"Chunk {index + 1}/{max(total_chunks, 1)} wird lokal als Sicherheitskopie gespeichert…",
-                        current_chunk=index + 1,
-                        current_peer=local_node_id,
-                    )
-                    chunk_store.write_stored_chunk(
-                        stored_data,
-                        original_size=len(raw),
-                        index=index,
-                        compression=compression,
-                        digest=digest,
-                        validate=False,
-                    )
-                    result.local_chunks += 1
-                    locations.append(local_node_id)
-                    notify(
-                        phase="local_store_done",
-                        status=f"Chunk {index + 1}/{max(total_chunks, 1)} lokal gespeichert",
-                        local_chunks=result.local_chunks,
-                        current_peer=local_node_id,
-                    )
-                    continue
-
-                peer_name = target.to_dict().get("display_name") or target.name or target.node_id[:12]
-                notify(
-                    phase="peer_upload",
-                    status=f"Chunk {index + 1}/{max(total_chunks, 1)} wird an {peer_name} übertragen…",
-                    current_chunk=index + 1,
-                    current_peer=peer_name,
-                )
-                transfer = p2p_client.put_chunk(
-                    target,
-                    digest=digest,
-                    stored_data=stored_data,
-                    original_size=len(raw),
-                    stored_size=len(stored_data),
-                    index=index,
-                    compression=compression,
-                )
-                if transfer.ok:
-                    result.remote_successes += 1
-                    locations.append(node_id)
-                    notify(
-                        phase="peer_upload_done",
-                        status=f"Chunk {index + 1}/{max(total_chunks, 1)} auf {peer_name} gespeichert",
-                        remote_successes=result.remote_successes,
-                        current_peer=peer_name,
-                    )
-                else:
-                    result.remote_failures += 1
-                    notify(
-                        phase="peer_upload_failed",
-                        status=f"{peer_name} nicht erreichbar: {transfer.message or 'unbekannter Fehler'}; nächstes Ziel wird versucht…",
-                        remote_failures=result.remote_failures,
-                        current_peer=peer_name,
-                        remote_error=transfer.message,
-                    )
-
-            if len(locations) < desired_replicas and local_node_id not in locations:
-                # Last-resort safety copy. This path is important if every
-                # remote peer failed before the local target was reached.
-                notify(
-                    phase="local_fallback",
-                    status=f"Chunk {index + 1}/{max(total_chunks, 1)} bekommt eine lokale Fallback-Kopie…",
-                    current_chunk=index + 1,
-                    current_peer=local_node_id,
-                )
-                chunk_store.write_stored_chunk(
-                    stored_data,
-                    original_size=len(raw),
-                    index=index,
-                    compression=compression,
-                    digest=digest,
-                    validate=False,
-                )
-                result.local_chunks += 1
+            if node_id in locations:
+                continue
+            if target is None:
+                chunk_store.write_stored_chunk(stored_data, original_size=len(raw), index=index, compression=compression, digest=digest, validate=False)
+                local_chunks += 1
                 locations.append(local_node_id)
+                continue
 
-            if len(locations) > 1:
-                result.replicated_chunks += 1
-            if len(locations) < desired_replicas:
-                result.under_replicated_chunks += 1
+            transfer = p2p_client.put_chunk(target, digest=digest, stored_data=stored_data, original_size=len(raw), stored_size=len(stored_data), index=index, compression=compression)
+            if transfer.ok:
+                remote_successes += 1
+                locations.append(node_id)
+            else:
+                remote_failures += 1
 
-            entry: dict[str, Any] = {
-                "index": index,
-                "hash": digest,
-                "size": len(raw),
-                "stored_size": len(stored_data),
-                "locations": list(dict.fromkeys(locations)),
-            }
-            if compression:
-                entry["compression"] = compression
-                result.compressed_chunks += 1
-            result.chunks.append(entry)
-            result.raw_bytes += len(raw)
-            result.stored_bytes += len(stored_data)
-            notify(
-                phase="chunk_done",
-                status=f"Chunk {index + 1}/{max(total_chunks, 1)} abgeschlossen",
-                current_chunk=index + 1,
-                total_chunks=total_chunks,
-                raw_bytes_processed=result.raw_bytes,
-                stored_bytes=result.stored_bytes,
-                compressed_chunks=result.compressed_chunks,
-                local_chunks=result.local_chunks,
-                remote_successes=result.remote_successes,
-                remote_failures=result.remote_failures,
-            )
-            index += 1
+        if len(locations) < desired_replicas and local_node_id not in locations:
+            chunk_store.write_stored_chunk(stored_data, original_size=len(raw), index=index, compression=compression, digest=digest, validate=False)
+            local_chunks += 1
+            locations.append(local_node_id)
+
+        entry: dict[str, Any] = {"index": index, "hash": digest, "size": len(raw), "stored_size": len(stored_data), "locations": list(dict.fromkeys(locations))}
+        if compression:
+            entry["compression"] = compression
+
+        return {
+            "entry": entry,
+            "raw_len": len(raw),
+            "stored_len": len(stored_data),
+            "remote_successes": remote_successes,
+            "remote_failures": remote_failures,
+            "local_chunks": local_chunks,
+            "compressed": bool(compression),
+            "replicated": len(locations) > 1,
+            "under_replicated": len(locations) < desired_replicas,
+        }
+
+    with source_path.open("rb") as handle, ThreadPoolExecutor(max_workers=max_in_flight) as pool:
+        pending: dict[Future[dict[str, Any]], int] = {}
+        index = 0
+
+        while True:
+            while len(pending) < max_in_flight:
+                raw = handle.read(effective_chunk_size)
+                if not raw:
+                    break
+                notify(phase="chunk_read", status=f"Chunk {index + 1}/{max(total_chunks, 1)} wird gelesen…", current_chunk=index + 1, total_chunks=total_chunks, raw_bytes_processed=result.raw_bytes)
+                fut = pool.submit(_process_chunk, index, raw)
+                pending[fut] = index
+                index += 1
+
+            if not pending:
+                break
+
+            done, _ = wait(set(pending.keys()), return_when=FIRST_COMPLETED)
+            for fut in done:
+                pending.pop(fut, None)
+                chunk_result = fut.result()
+                result.chunks.append(chunk_result["entry"])
+                result.raw_bytes += chunk_result["raw_len"]
+                result.stored_bytes += chunk_result["stored_len"]
+                result.remote_successes += chunk_result["remote_successes"]
+                result.remote_failures += chunk_result["remote_failures"]
+                result.local_chunks += chunk_result["local_chunks"]
+                if chunk_result["compressed"]:
+                    result.compressed_chunks += 1
+                if chunk_result["replicated"]:
+                    result.replicated_chunks += 1
+                if chunk_result["under_replicated"]:
+                    result.under_replicated_chunks += 1
+                notify(phase="chunk_done", status="Chunk abgeschlossen", current_chunk=len(result.chunks), total_chunks=total_chunks, raw_bytes_processed=result.raw_bytes, stored_bytes=result.stored_bytes, compressed_chunks=result.compressed_chunks, local_chunks=result.local_chunks, remote_successes=result.remote_successes, remote_failures=result.remote_failures)
+
+    result.chunks.sort(key=lambda item: int(item.get("index", 0)))
 
     notify(
         phase="chunking_done",

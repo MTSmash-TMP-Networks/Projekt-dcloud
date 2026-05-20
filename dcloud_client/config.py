@@ -24,6 +24,7 @@ DEFAULT_PEER_CLEANUP_INTERVAL_SECONDS = 5
 DEFAULT_RELAY_POLL_INTERVAL_SECONDS = 1
 DEFAULT_RELAY_REQUEST_TIMEOUT_SECONDS = 180
 DEFAULT_RELAY_CHUNK_SIZE_BYTES = 512 * 1024
+DEFAULT_RELAY_MAX_IN_FLIGHT_CHUNKS = 4
 DEFAULT_PUBLIC_RELAY_URL = "https://support.tmp-networks.de/dcstorage/dcloud_relay.php"
 
 
@@ -77,6 +78,7 @@ class NetworkConfig:
     relay_poll_interval_seconds: float = DEFAULT_RELAY_POLL_INTERVAL_SECONDS
     relay_request_timeout_seconds: int = DEFAULT_RELAY_REQUEST_TIMEOUT_SECONDS
     relay_chunk_size_bytes: int = DEFAULT_RELAY_CHUNK_SIZE_BYTES
+    relay_max_in_flight_chunks: int = DEFAULT_RELAY_MAX_IN_FLIGHT_CHUNKS
 
 
 @dataclass(slots=True)
@@ -313,6 +315,7 @@ def load_config(config_path: str | Path = "config.yml", *, create_if_missing: bo
             relay_poll_interval_seconds=max(0.2, float(network_raw.get("relay_poll_interval_seconds", DEFAULT_RELAY_POLL_INTERVAL_SECONDS))),
             relay_request_timeout_seconds=max(30, int(network_raw.get("relay_request_timeout_seconds", DEFAULT_RELAY_REQUEST_TIMEOUT_SECONDS))),
             relay_chunk_size_bytes=max(64 * 1024, min(int(network_raw.get("relay_chunk_size_bytes", DEFAULT_RELAY_CHUNK_SIZE_BYTES)), 2 * 1024 * 1024)),
+            relay_max_in_flight_chunks=max(1, min(int(network_raw.get("relay_max_in_flight_chunks", DEFAULT_RELAY_MAX_IN_FLIGHT_CHUNKS)), 16)),
         ),
         security=SecurityConfig(protocol_magic=str(security_raw.get("protocol_magic", "DCLOUD1"))),
         smb=SmbConfig(

@@ -36,6 +36,7 @@ network:
   relay_poll_interval_seconds: 1 # Relay-Mailbox-Long-Polling für entfernte Peers
   relay_request_timeout_seconds: 180 # Timeout für Chunk-/Manifest-Transfers über Relay
   relay_chunk_size_bytes: 524288 # 512 KiB: PHP-Relay-sichere Chunk-Größe gegen post_max_size/JSON-Limits
+  relay_max_in_flight_chunks: 4 # gleichzeitige Chunk-Uploads pro Datei (kleines Parallel-Fenster)
 security:
   protocol_magic: DCLOUD1
 smb:
