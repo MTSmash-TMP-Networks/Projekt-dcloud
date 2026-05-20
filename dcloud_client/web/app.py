@@ -91,6 +91,24 @@ def create_app(
     p2p_client = P2PStorageClient(default_web_port=config.web.port, peer_provider=peer_provider)
     upload_progress = UploadProgressTracker()
 
+    def _is_loopback_request() -> bool:
+        remote = (request.remote_addr or "").strip()
+        if remote in {"127.0.0.1", "::1"}:
+            return True
+        if remote.startswith("::ffff:"):
+            return remote.removeprefix("::ffff:") == "127.0.0.1"
+        return False
+
+    @app.before_request
+    def _block_public_web_ui() -> Response | None:
+        # If users expose the parent node's web port for NAT parent-proxy
+        # forwarding, the full dashboard/settings UI must still stay local-only.
+        if _is_loopback_request():
+            return None
+        if request.path.startswith("/api/p2p/"):
+            return None
+        return jsonify({"ok": False, "message": "Web UI ist nur lokal erreichbar"}), 403
+
     def _is_ajax_request() -> bool:
         return request.headers.get("X-Requested-With") == "XMLHttpRequest" or request.accept_mimetypes.best == "application/json"
 
