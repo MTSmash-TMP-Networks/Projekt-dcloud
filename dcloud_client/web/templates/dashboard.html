@@ -988,6 +988,9 @@
         const response = await fetch("/api/state", { cache:"no-store", headers: { "Accept":"application/json" } });
         const data = await response.json();
         if(seq < lastAppliedRefreshSeq) return;
+        if(!response.ok || !data || !Array.isArray(data.folderTree)){
+          throw new Error((data && data.message) || `Status-Refresh fehlgeschlagen (${response.status})`);
+        }
         lastAppliedRefreshSeq = seq;
         applyState(data);
       }
