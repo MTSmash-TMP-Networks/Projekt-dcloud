@@ -12,6 +12,7 @@ import atexit
 import base64
 import json
 import socket
+import time
 from urllib import request as request_module
 
 from flask import Flask, Response, abort, flash, jsonify, redirect, render_template, request, send_file, url_for
@@ -99,6 +100,8 @@ def create_app(
     p2p_client = P2PStorageClient(default_web_port=config.web.port, peer_provider=peer_provider)
     upload_progress = UploadProgressTracker()
     synced_share_peer_ids: set[str] = set()
+    last_full_share_sync_monotonic: float = 0.0
+    full_share_sync_interval_seconds = 20.0
 
     def _is_loopback_request() -> bool:
         remote = (request.remote_addr or "").strip()
@@ -655,7 +658,7 @@ def create_app(
         return payload
 
     def state_payload() -> dict[str, Any]:
-        nonlocal synced_share_peer_ids
+        nonlocal synced_share_peer_ids, last_full_share_sync_monotonic
         _sync_peer_connector_settings()
         stats = chunk_store.stats()
         peers = _list_active_peers()
@@ -663,7 +666,12 @@ def create_app(
         _deliver_pending_file_deletions(peers)
         active_peer_ids = {str(peer.node_id) for peer in peers if getattr(peer, "node_id", None)}
         new_peer_ids = active_peer_ids - synced_share_peer_ids
-        if new_peer_ids:
+        now = time.monotonic()
+        needs_full_resync = (now - last_full_share_sync_monotonic) >= full_share_sync_interval_seconds
+        if needs_full_resync:
+            _sync_shared_manifests(peers)
+            last_full_share_sync_monotonic = now
+        elif new_peer_ids:
             _sync_shared_manifests(peers, only_node_ids=new_peer_ids)
         synced_share_peer_ids = active_peer_ids
         manifests = manifest_store.list_visible_for_node(identity.node_id)
