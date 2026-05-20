@@ -1352,6 +1352,19 @@ def create_app(
                 raise StorageError("Revocation owner does not match manifest owner")
             if manifest.owner_node_id == identity.node_id:
                 raise StorageError("Own manifests cannot be revoked through the peer API")
+
+            revoked_signature = str(data.get("revoked_manifest_signature", "") or "")
+            if revoked_signature and manifest.signature != revoked_signature:
+                # A delayed relay revocation for an older manifest version arrived after a
+                # newer share was already imported. Keep the current manifest visible.
+                return jsonify({
+                    "ok": True,
+                    "manifest_id": manifest_id,
+                    "removed": False,
+                    "ignored_stale_revocation": True,
+                    "state": state_payload(),
+                })
+
             manifest_path.unlink(missing_ok=True)
             removed = True
             return jsonify({"ok": True, "manifest_id": manifest_id, "removed": removed, "state": state_payload()})
