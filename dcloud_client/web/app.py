@@ -188,7 +188,7 @@ def create_app(
                 continue
             peer_type = getattr(peer, "client_type", None)
             accepts_peer_storage = bool(getattr(peer, "accepts_peer_storage", False))
-            if peer_type == "server":
+            if peer_type == "server" and accepts_peer_storage:
                 targets.append(peer)
         seen: set[str] = set()
         unique: list[Any] = []
