@@ -253,6 +253,8 @@ def create_app(
             "additionalRelayUrls": extra_relay_urls(config.network.relay_urls),
             "additionalRelayUrlsText": "\n".join(extra_relay_urls(config.network.relay_urls)),
             "relayEnabled": bool(config.network.relay_urls),
+            "relayBuiltinEnabled": bool(getattr(config.network, "relay_builtin_enabled", True)),
+            "relayChildren": bool(getattr(config.network, "relay_children", False)),
             "relaySecret": "",
             "relaySecretSet": False,
             "relayTokenMode": "automatic-daily",
@@ -269,7 +271,7 @@ def create_app(
         }
 
     def _relay_url_list() -> list[str]:
-        return normalize_relay_urls(getattr(config.network, "relay_urls", [config.network.relay_url]), include_default=True)
+        return normalize_relay_urls(getattr(config.network, "relay_urls", [config.network.relay_url]), include_default=bool(getattr(config.network, "relay_builtin_enabled", True)))
 
     def _relay_statuses() -> list[dict[str, Any]]:
         statuses: list[dict[str, Any]] = []
@@ -1038,6 +1040,8 @@ def create_app(
                 shared_storage_gb=request.form.get("shared_storage_gb", bytes_to_gib(config.storage.limit_bytes)),
                 relay_server_url=request.form.get("relay_server_url"),
                 relay_server_urls=request.form.get("relay_server_urls", request.form.get("relay_server_url", "\n".join(extra_relay_urls(config.network.relay_urls)))),
+                relay_builtin_enabled=request.form.get("relay_builtin_enabled") == "on",
+                relay_children=request.form.get("relay_children") == "on",
                 smb_enabled=request.form.get("smb_enabled") == "on",
                 smb_username=request.form.get("smb_username", config.smb.username),
                 smb_password=request.form.get("smb_password", config.smb.password),
@@ -1045,7 +1049,7 @@ def create_app(
             chunk_store.limit_bytes = config.storage.limit_bytes
             _configure_relay_transport()
             _sync_peer_connector_settings()
-            relay_note = f", {len(config.network.relay_urls)} PHP-Relay(s) aktiv"
+            relay_note = f", {len(config.network.relay_urls)} Relay(s) aktiv" if config.network.relay_urls else ", Relay deaktiviert"
             message = (
                 f"Einstellungen gespeichert: {client_type_label(config.node.client_type)}, "
                 f"{bytes_to_gib(config.storage.limit_bytes):g} GB freigegeben{relay_note}, "

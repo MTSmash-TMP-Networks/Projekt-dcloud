@@ -19,6 +19,7 @@ network:
   bootstrap_nodes: []
   tree_parent_nodes: [] # upstream peers that can relay for this node behind NAT
   relay_children: false # set true on the one LAN node with port forwarding
+  relay_builtin_enabled: true # use bundled public relay by default; can be disabled in settings
   discovery_interval_seconds: 10
   auto_discovery_enabled: true
   auto_discovery_ports:
