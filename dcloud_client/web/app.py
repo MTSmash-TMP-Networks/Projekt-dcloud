@@ -1086,7 +1086,7 @@ def create_app(
                 previous_targets = [
                     str(item) for item in (old_manifest.access or {}).get("shared_with", []) if str(item)
                 ] or ["*"]
-                revocation = build_manifest_revocation(old_manifest.manifest_id, identity)
+                revocation = build_manifest_revocation(old_manifest, identity)
                 manifest_store.add_share_revocation(revocation, previous_targets)
 
             manifest = manifest_store.set_shared(manifest_id, shared, identity, shared_with=shared_with or None)
