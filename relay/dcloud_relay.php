@@ -815,7 +815,10 @@ try {
     $action = dcloud_normalize_action((string)($input['action'] ?? ''));
     // Polling actions are latency-sensitive and can run very frequently.
     // Avoid a full relay filesystem sweep on every long-poll cycle.
-    if (!in_array($action, ['poll_requests', 'poll_response'], true)) {
+    if ($action === 'health') {
+        dcloud_cleanup();
+        @file_put_contents(dcloud_storage_dir() . DIRECTORY_SEPARATOR . 'cleanup.last', (string)time(), LOCK_EX);
+    } elseif (!in_array($action, ['poll_requests', 'poll_response'], true)) {
         dcloud_cleanup_if_due();
     }
     $input['action'] = $action;

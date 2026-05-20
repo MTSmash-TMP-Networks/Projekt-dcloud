@@ -64,7 +64,7 @@ class NetworkConfig:
     bootstrap_nodes: list[str] = field(default_factory=list)
     tree_parent_nodes: list[str] = field(default_factory=list)
     relay_children: bool = False
-    relay_builtin_enabled: bool = False
+    relay_builtin_enabled: bool = True
     discovery_interval_seconds: int = 10
     auto_discovery_enabled: bool = True
     auto_discovery_ports: list[int] = field(default_factory=lambda: DEFAULT_AUTO_DISCOVERY_PORTS.copy())
@@ -319,7 +319,7 @@ def load_config(config_path: str | Path = "config.yml", *, create_if_missing: bo
             bootstrap_nodes=list(network_raw.get("bootstrap_nodes", [])),
             tree_parent_nodes=list(network_raw.get("tree_parent_nodes", [])),
             relay_children=bool(network_raw.get("relay_children", False)),
-            relay_builtin_enabled=bool(network_raw.get("relay_builtin_enabled", False)),
+            relay_builtin_enabled=bool(network_raw.get("relay_builtin_enabled", True)),
             discovery_interval_seconds=max(1, int(network_raw.get("discovery_interval_seconds", 10))),
             auto_discovery_enabled=bool(network_raw.get("auto_discovery_enabled", True)),
             auto_discovery_ports=normalize_ports(network_raw.get("auto_discovery_ports"), DEFAULT_AUTO_DISCOVERY_PORTS),
@@ -328,8 +328,8 @@ def load_config(config_path: str | Path = "config.yml", *, create_if_missing: bo
             startup_discovery_interval_seconds=max(1, int(network_raw.get("startup_discovery_interval_seconds", 2))),
             peer_timeout_seconds=max(5, int(network_raw.get("peer_timeout_seconds", DEFAULT_PEER_TIMEOUT_SECONDS))),
             peer_cleanup_interval_seconds=max(1, int(network_raw.get("peer_cleanup_interval_seconds", DEFAULT_PEER_CLEANUP_INTERVAL_SECONDS))),
-            relay_url=normalize_relay_urls([network_raw.get("relay_urls", []), network_raw.get("relay_url", "")], include_default=bool(network_raw.get("relay_builtin_enabled", False)))[0] if normalize_relay_urls([network_raw.get("relay_urls", []), network_raw.get("relay_url", "")], include_default=bool(network_raw.get("relay_builtin_enabled", False))) else "",
-            relay_urls=normalize_relay_urls([network_raw.get("relay_urls", []), network_raw.get("relay_url", "")], include_default=bool(network_raw.get("relay_builtin_enabled", False))),
+            relay_url=normalize_relay_urls([network_raw.get("relay_urls", []), network_raw.get("relay_url", "")], include_default=bool(network_raw.get("relay_builtin_enabled", True)))[0] if normalize_relay_urls([network_raw.get("relay_urls", []), network_raw.get("relay_url", "")], include_default=bool(network_raw.get("relay_builtin_enabled", True))) else "",
+            relay_urls=normalize_relay_urls([network_raw.get("relay_urls", []), network_raw.get("relay_url", "")], include_default=bool(network_raw.get("relay_builtin_enabled", True))),
             relay_secret=normalize_relay_secret(str(network_raw.get("relay_secret", ""))),
             relay_poll_interval_seconds=max(0.2, float(network_raw.get("relay_poll_interval_seconds", DEFAULT_RELAY_POLL_INTERVAL_SECONDS))),
             relay_request_timeout_seconds=max(30, int(network_raw.get("relay_request_timeout_seconds", DEFAULT_RELAY_REQUEST_TIMEOUT_SECONDS))),

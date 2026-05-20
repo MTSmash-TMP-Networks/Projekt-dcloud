@@ -67,9 +67,16 @@ def build_folder_tree(manifests: list[FileManifest], folders: list[str] | None =
     grouped: dict[str, list[FileManifest]] = {folder: [] for folder in (folders or [DEFAULT_FOLDER])}
     for manifest in manifests:
         grouped.setdefault(manifest.folder_path, []).append(manifest)
+    folder_names = set(grouped)
+    visible_items: list[tuple[str, list[FileManifest]]] = []
+    for folder, files in grouped.items():
+        has_child_folder = any(other != folder and other.startswith(f"{folder}/") for other in folder_names)
+        if folder != DEFAULT_FOLDER and not files and has_child_folder:
+            continue
+        visible_items.append((folder, files))
     return [
         {"name": folder, "files": sorted(files, key=lambda item: item.file_name.lower())}
-        for folder, files in sorted(grouped.items(), key=lambda item: item[0].lower())
+        for folder, files in sorted(visible_items, key=lambda item: item[0].lower())
     ]
 
 
@@ -193,12 +200,14 @@ def create_app(
     def _accepts_peer_storage(peers: list[Any]) -> bool:
         if config.node.client_type == "server":
             return True
-        return False
+        return _pc_peer_count(peers) > 0
 
     def _storage_policy_message(peers: list[Any]) -> str:
         if config.node.client_type == "server":
             return "Server-Modus: Dieser Client darf als dauerhafter Speicherziel-Knoten für P2P-Daten genutzt werden."
-        return "PC-Modus: Dieser Client stellt selbst keinen Speicher für andere bereit und nutzt Server-Knoten als Speicherziele."
+        if _pc_peer_count(peers) > 0:
+            return "PC-Modus: Speicherfreigabe ist aktiv, weil mindestens ein weiterer PC im Netzwerk sichtbar ist; als Upload-Ziele werden weiterhin Server-Knoten bevorzugt."
+        return "PC-Modus: Speicherfreigabe wird aktiviert, sobald mindestens ein weiterer PC sichtbar ist; Upload-Speicherziele bleiben Server-Knoten."
 
     def _eligible_storage_peers(peers: list[Any] | None = None) -> list[Any]:
         peers = peers if peers is not None else _list_active_peers()
@@ -1089,7 +1098,7 @@ def create_app(
                 shared_storage_gb=request.form.get("shared_storage_gb", bytes_to_gib(config.storage.limit_bytes)),
                 relay_server_url=request.form.get("relay_server_url"),
                 relay_server_urls=request.form.get("relay_server_urls", request.form.get("relay_server_url", "\n".join(extra_relay_urls(config.network.relay_urls)))),
-                relay_builtin_enabled=request.form.get("relay_builtin_enabled") == "on",
+                relay_builtin_enabled=(request.form.get("relay_builtin_enabled") == "on") if "relay_builtin_enabled" in request.form else None,
                 relay_children=request.form.get("relay_children") == "on",
                 smb_enabled=request.form.get("smb_enabled") == "on",
                 smb_username=request.form.get("smb_username", config.smb.username),

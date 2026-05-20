@@ -355,10 +355,10 @@ class HttpRelayClient:
             try:
                 # Use longer long-poll windows to reduce tiny poll loops that can
                 # look like request floods on shared hosting access logs.
-                wait_seconds = min(10.0, max(1.0, deadline - time.monotonic()))
+                wait_seconds = min(0.5, max(0.1, deadline - time.monotonic()))
                 payload = self._post_json(
                     {"action": "poll_response", "request_id": request_id, "relay_request_id": request_id, "wait_seconds": wait_seconds},
-                    timeout=max(self.timeout, wait_seconds + 2.0),
+                    timeout=max(self.timeout, wait_seconds + 1.0),
                 )
                 if payload.get("ready"):
                     response = payload.get("response", {})
