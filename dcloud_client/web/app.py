@@ -1233,6 +1233,11 @@ def create_app(
                     continue
                 tried.add(node_id)
                 peer = peers_by_id.get(node_id)
+                if peer is None and peer_provider is not None:
+                    # Shared manifests can reference peers that are currently not
+                    # listed as "active" yet (e.g. relay timing). Try known peers
+                    # by node id before giving up.
+                    peer = peer_provider.get_peer(node_id)
                 if peer is None:
                     continue
                 try:

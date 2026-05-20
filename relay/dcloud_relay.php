@@ -634,8 +634,13 @@ function dcloud_register(array $input): void {
         // stop treating this peer as a valid storage target.
         foreach (['public_key', 'client_type', 'shared_storage_bytes', 'free_storage_bytes', 'accepts_peer_storage', 'relay_url', 'relay_urls', 'relay_tokens', 'web_port', 'udp_port'] as $key) {
             $newValue = $sanitized[$key] ?? null;
-            $emptyNewValue = $newValue === null || $newValue === '' || $newValue === [] || $newValue === 0 || $newValue === false;
-            if ($emptyNewValue && array_key_exists($key, $existing)) {
+            // Preserve old metadata only when the current register payload did
+            // not provide that key at all (e.g. minimal heartbeat/probe).
+            // Explicit values like 0 or false are valid updates and must not be
+            // overwritten, otherwise PC mode/storage-off toggles get reverted.
+            $providedInRegister = is_array($peer) && array_key_exists($key, $peer);
+            $emptyNewValue = $newValue === null || $newValue === '' || $newValue === [];
+            if (!$providedInRegister && $emptyNewValue && array_key_exists($key, $existing)) {
                 $sanitized[$key] = $existing[$key];
             }
         }

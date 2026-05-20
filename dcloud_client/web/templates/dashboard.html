@@ -983,6 +983,12 @@
       }
       let refreshRequestSeq = 0;
       let lastAppliedRefreshSeq = 0;
+      const stickySharedVisibility = new Map();
+      function fileShareStickyKey(file){
+        if(!file) return "";
+        const folder = normalizeFolderPath(file.folder || DEFAULT_FOLDER);
+        return `${folder}::${file.name || ""}::${Number(file.size || 0)}`;
+      }
       async function refreshState(){
         const seq = ++refreshRequestSeq;
         const response = await fetch("/api/state", { cache:"no-store", headers: { "Accept":"application/json" } });
@@ -1238,6 +1244,10 @@
           grid.appendChild(tile);
         });
         data.files.forEach(file => {
+          const stickyKey = fileShareStickyKey(file);
+          const stickyShared = !!stickySharedVisibility.get(stickyKey);
+          const effectiveShared = file.shared || stickyShared;
+          if(file.shared && stickyKey) stickySharedVisibility.set(stickyKey, true);
           const tile = document.createElement("button");
           tile.type = "button";
           tile.className = "explorer-tile";
@@ -1252,7 +1262,7 @@
           meta.textContent = `${formatBytes(file.size)} · ${file.chunks} Chunk(s)${distribution}`;
           const access = document.createElement("span");
           access.className = "tile-meta";
-          access.textContent = file.shared ? "🌐 freigegeben" : "🔒 privat";
+          access.textContent = effectiveShared ? "🌐 freigegeben" : "🔒 privat";
           tile.append(name, meta, access);
           tile.addEventListener("dblclick", () => { window.location.href = file.downloadUrl; });
           tile.addEventListener("click", () => selectExplorerTile(tile, { kind:"file", file }));
@@ -1747,11 +1757,15 @@
       function closeShareDialog(){ shareDialog.hidden = true; pendingShareFile = null; }
       async function shareFileWithPeer(file, peerNodeId){
         await ajaxPost(file.shareUrl, { next:"/", shared:"on", peer_node_id: peerNodeId || "*" });
+        const stickyKey = fileShareStickyKey(file);
+        if(stickyKey) stickySharedVisibility.set(stickyKey, true);
       }
       async function toggleShare(file){
         if(file.shared){
           if(!confirm(`Freigabe wirklich deaktivieren?\n${file.name}`)) return;
           await ajaxPost(file.shareUrl, { next:"/", shared:"off" });
+          const stickyKey = fileShareStickyKey(file);
+          if(stickyKey) stickySharedVisibility.delete(stickyKey);
           return;
         }
         openShareDialog(file);
