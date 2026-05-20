@@ -565,6 +565,7 @@ def distribute_file_chunks(
                         compression=compression,
                         digest=digest,
                         validate=False,
+                        enforce_capacity=False,
                     )
                     local_chunks += 1
                     locations.append(local_node_id)
@@ -591,6 +592,7 @@ def distribute_file_chunks(
                     compression=compression,
                     digest=digest,
                     validate=False,
+                    enforce_capacity=False,
                 )
                 local_chunks += 1
                 locations.append(local_node_id)
