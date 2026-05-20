@@ -621,6 +621,7 @@
           <section class="status-card"><h3>Gespeicherte Dateien</h3><div class="status-kpi" id="status-file-count">0</div><div class="status-sub">Sichtbar in deinem Explorer</div></section>
           <section class="status-card"><h3>Verwendeter Speicher</h3><div class="status-kpi" id="status-storage-used">0 B</div><div class="status-sub">Lokale Chunks + Manifeste</div></section>
           <section class="status-card"><h3>Verbund-Kapazität</h3><div class="status-kpi" id="status-network-capacity">0 B</div><div class="status-sub" id="status-network-capacity-sub">0 aktive Speicher-Peers</div></section>
+          <section class="status-card"><h3>Datensicherheit</h3><div class="status-kpi" id="status-data-safety">Niedrig</div><div class="status-sub" id="status-data-safety-sub">Keine externe Redundanz erkannt</div></section>
         </div>
       </div>
     </section>
@@ -1006,6 +1007,28 @@
         document.getElementById("status-storage-used").textContent = formatBytes(appState.stats.usedBytes);
         document.getElementById("status-network-capacity").textContent = formatBytes(capacity.networkLimitBytes || settings.networkLimitBytes || appState.stats.limitBytes);
         document.getElementById("status-network-capacity-sub").textContent = `${capacity.storagePeerCount || settings.storagePeerCount || 0} aktive Speicher-Peer(s)`;
+        const storagePeers = Number(capacity.storagePeerCount || settings.storagePeerCount || 0);
+        const reachablePeers = (appState.peers || []).length;
+        const networkFreeBytes = Number(capacity.networkFreeBytes || settings.networkFreeBytes || appState.stats.freeLimitBytes || 0);
+        const safetyEl = document.getElementById("status-data-safety");
+        const safetySubEl = document.getElementById("status-data-safety-sub");
+        let safetyLabel = "Niedrig";
+        let safetySub = "Keine externe Redundanz erkannt";
+        if(storagePeers >= 3){
+          safetyLabel = "Sehr hoch";
+          safetySub = `RAID-ähnlich: bis zu ${storagePeers - 1} Peer-Ausfall/Ausfälle abfederbar · ${reachablePeers} erreichbar`;
+        } else if(storagePeers === 2){
+          safetyLabel = "Hoch";
+          safetySub = `Doppelte externe Ablage aktiv · ein Peer-Ausfall tolerierbar · ${reachablePeers} erreichbar`;
+        } else if(storagePeers === 1){
+          safetyLabel = "Mittel";
+          safetySub = `Eine externe Kopie vorhanden · bei Offline-Status erhöhtes Risiko · frei ${formatBytes(networkFreeBytes)}`;
+        } else if(settings.acceptsPeerStorage){
+          safetyLabel = "Mittel";
+          safetySub = "Peer-Speicher ist aktiv, aber aktuell keine externen Speicher-Peers online";
+        }
+        if(safetyEl) safetyEl.textContent = safetyLabel;
+        if(safetySubEl) safetySubEl.textContent = safetySub;
         const smbEnabled = !!settings.smbEnabled;
         const smbRunning = !!settings.smbRunning;
         const smbPort = settings.smbPort || 445;
