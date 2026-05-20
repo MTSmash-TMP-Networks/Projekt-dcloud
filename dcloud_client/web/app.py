@@ -1404,7 +1404,8 @@ def create_app(
             if not manifest_store.may_access(manifest, identity.node_id):
                 raise StorageError("Manifest is not shared with this node")
             if manifest_store.is_share_revoked(manifest.manifest_id, manifest.owner_node_id):
-                raise StorageError("Manifest share has already been revoked")
+                # A newer share for the same manifest_id re-enables access; remove stale tombstone.
+                manifest_store.clear_share_revocation(manifest.manifest_id, manifest.owner_node_id)
             if manifest_store.is_file_deleted(manifest.manifest_id, manifest.owner_node_id):
                 raise StorageError("Manifest has already been deleted by its owner")
             manifest_store.save_imported(manifest)
