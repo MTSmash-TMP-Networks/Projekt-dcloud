@@ -235,11 +235,20 @@ def create_app(
             return "PC-Modus: Speicherfreigabe ist aktiv, weil mindestens ein weiterer PC im Netzwerk sichtbar ist; als Upload-Ziele werden weiterhin Server-Knoten bevorzugt."
         return "PC-Modus: Speicherfreigabe wird aktiviert, sobald mindestens ein weiterer PC sichtbar ist; Upload-Speicherziele bleiben Server-Knoten."
 
+    def _is_local_peer_endpoint(peer: Any) -> bool:
+        host = str(getattr(peer, "host", "") or "").strip().lower()
+        web_port = int(getattr(peer, "web_port", 0) or 0)
+        if web_port != int(config.web.port):
+            return False
+        return host in {"127.0.0.1", "localhost", "::1"}
+
     def _eligible_storage_peers(peers: list[Any] | None = None) -> list[Any]:
         peers = peers if peers is not None else _list_active_peers()
         targets: list[Any] = []
         for peer in peers:
             if getattr(peer, "node_id", None) == identity.node_id:
+                continue
+            if _is_local_peer_endpoint(peer):
                 continue
             peer_type = getattr(peer, "client_type", None)
             accepts_peer_storage = bool(getattr(peer, "accepts_peer_storage", False))
