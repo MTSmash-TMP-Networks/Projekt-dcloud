@@ -483,6 +483,7 @@ def distribute_file_chunks(
 
     with source_path.open("rb") as handle:
         index = 0
+        local_writable = True
         while True:
             raw = handle.read(effective_chunk_size)
             if not raw:
@@ -497,28 +498,17 @@ def distribute_file_chunks(
             stored_data, compression = chunk_store.prepare_chunk_data(raw)
             digest = chunk_store.digest_for_stored_data(stored_data)
             locations: list[str] = []
-            notify(
-                phase="chunk_compressed",
-                status=f"Chunk {index + 1}/{max(total_chunks, 1)} komprimiert: {len(raw)} -> {len(stored_data)} Bytes",
-                current_chunk=index + 1,
-                total_chunks=total_chunks,
-                raw_bytes_processed=result.raw_bytes + len(raw),
-                stored_bytes=result.stored_bytes + len(stored_data),
-                compressed_chunks=result.compressed_chunks + (1 if compression else 0),
-            )
-
-            for target, node_id in _rotated_targets(targets, target_ids, index):
-                if len(locations) >= desired_replicas:
-                    break
-                if node_id in locations:
-                    continue
-                if target is None:
-                    notify(
-                        phase="local_store",
-                        status=f"Chunk {index + 1}/{max(total_chunks, 1)} wird lokal als Sicherheitskopie gespeichert…",
-                        current_chunk=index + 1,
-                        current_peer=local_node_id,
-                    )
+            # Keep a deterministic local primary copy for every chunk. This makes
+            # uploads immediately available on the local node and avoids relying
+            # on remote peers for initial durability/visibility in the UI.
+            if local_writable:
+                notify(
+                    phase="local_store",
+                    status=f"Chunk {index + 1}/{max(total_chunks, 1)} wird lokal gespeichert…",
+                    current_chunk=index + 1,
+                    current_peer=local_node_id,
+                )
+                try:
                     chunk_store.write_stored_chunk(
                         stored_data,
                         original_size=len(raw),
@@ -535,6 +525,31 @@ def distribute_file_chunks(
                         local_chunks=result.local_chunks,
                         current_peer=local_node_id,
                     )
+                except StorageError as exc:
+                    local_writable = False
+                    notify(
+                        phase="local_fallback",
+                        status=f"Lokaler Speicher voll ({exc}); Upload läuft über Netzwerk-Peers weiter…",
+                        current_chunk=index + 1,
+                        current_peer=local_node_id,
+                        local_error=str(exc),
+                    )
+            notify(
+                phase="chunk_compressed",
+                status=f"Chunk {index + 1}/{max(total_chunks, 1)} komprimiert: {len(raw)} -> {len(stored_data)} Bytes",
+                current_chunk=index + 1,
+                total_chunks=total_chunks,
+                raw_bytes_processed=result.raw_bytes + len(raw),
+                stored_bytes=result.stored_bytes + len(stored_data),
+                compressed_chunks=result.compressed_chunks + (1 if compression else 0),
+            )
+
+            for target, node_id in _rotated_targets(targets, target_ids, index):
+                if len(locations) >= desired_replicas:
+                    break
+                if node_id in locations:
+                    continue
+                if target is None:
                     continue
 
                 peer_name = target.to_dict().get("display_name") or target.name or target.node_id[:12]
@@ -575,22 +590,31 @@ def distribute_file_chunks(
             if len(locations) < desired_replicas and local_node_id not in locations:
                 # Last-resort safety copy. This path is important if every
                 # remote peer failed before the local target was reached.
-                notify(
-                    phase="local_fallback",
-                    status=f"Chunk {index + 1}/{max(total_chunks, 1)} bekommt eine lokale Fallback-Kopie…",
-                    current_chunk=index + 1,
-                    current_peer=local_node_id,
+                if local_writable:
+                    notify(
+                        phase="local_fallback",
+                        status=f"Chunk {index + 1}/{max(total_chunks, 1)} bekommt eine lokale Fallback-Kopie…",
+                        current_chunk=index + 1,
+                        current_peer=local_node_id,
+                    )
+                    try:
+                        chunk_store.write_stored_chunk(
+                            stored_data,
+                            original_size=len(raw),
+                            index=index,
+                            compression=compression,
+                            digest=digest,
+                            validate=False,
+                        )
+                        result.local_chunks += 1
+                        locations.append(local_node_id)
+                    except StorageError:
+                        local_writable = False
+
+            if not locations:
+                raise StorageError(
+                    "Kein Speicherziel verfügbar: Lokaler Speicher voll und kein erreichbarer Peer konnte den Chunk speichern"
                 )
-                chunk_store.write_stored_chunk(
-                    stored_data,
-                    original_size=len(raw),
-                    index=index,
-                    compression=compression,
-                    digest=digest,
-                    validate=False,
-                )
-                result.local_chunks += 1
-                locations.append(local_node_id)
 
             if len(locations) > 1:
                 result.replicated_chunks += 1
