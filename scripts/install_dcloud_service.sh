@@ -309,6 +309,25 @@ INIT
   if ! "$INIT_FILE" status >/dev/null 2>&1; then
     echo "⚠️ Dienst $SERVICE_NAME wurde gestartet, meldet aber keinen laufenden Status." >&2
     echo "   Bitte pruefe: logread | tail -n 120" >&2
+    return 0
+  fi
+
+  WEB_PORT="$(awk '/^[[:space:]]*port:[[:space:]]*[0-9]+[[:space:]]*$/ {print $2; exit}' "$INSTALL_DIR/config.yml" 2>/dev/null || true)"
+  [ -n "${WEB_PORT:-}" ] || WEB_PORT="8787"
+  ATTEMPTS=10
+  while [ "$ATTEMPTS" -gt 0 ]; do
+    if command -v ss >/dev/null 2>&1 && ss -ltn 2>/dev/null | grep -q "[\.\:]$WEB_PORT[[:space:]]"; then
+      return 0
+    fi
+    sleep 1
+    ATTEMPTS=$((ATTEMPTS - 1))
+  done
+
+  echo "⚠️ Dienst $SERVICE_NAME laeuft, aber Port $WEB_PORT lauscht noch nicht." >&2
+  echo "   Bitte pruefe: /etc/init.d/$SERVICE_NAME status" >&2
+  echo "   und: logread | tail -n 120" >&2
+  if [ -f "$INSTALL_DIR/config.yml" ]; then
+    echo "   Konfig-Port laut $INSTALL_DIR/config.yml: $WEB_PORT" >&2
   fi
 }
 
