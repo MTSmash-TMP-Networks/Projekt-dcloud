@@ -623,6 +623,8 @@
           <section class="status-card"><h3>Auto-Verbindung</h3><div class="status-kpi" id="network-auto-discovery">Aktiv</div><div class="status-sub" id="network-auto-discovery-sub">Port 6881 wird automatisch gesucht</div></section>
         </div>
         <h3>Aktive Peer-Liste</h3>
+        <p class="settings-note">Speicherziele für neue Uploads auswählen (Standard: alle aktiven Peers).</p>
+        <div class="status-list" id="network-storage-peer-selection"></div>
         <ul class="status-list" id="network-peer-list"><li>Keine aktiven Peers online.</li></ul>
       </div>
     </section>
@@ -774,6 +776,7 @@
       <button type="button" id="ctxDownload"><span>Download</span><span class="kbd">Ctrl+S</span></button>
       <button type="button" id="ctxShare"><span>Freigabe…</span><span class="kbd">Ctrl+H</span></button>
       <button type="button" id="ctxOffload"><span>Auf Peers auslagern</span><span class="kbd">Ctrl+O</span></button>
+      <button type="button" id="ctxMovePeer"><span>Zusätzlichen Knoten erstellen…</span><span class="kbd">Ctrl+M</span></button>
       <button type="button" id="ctxDelete" style="color:#b42318;"><span>Löschen</span><span class="kbd">Del</span></button>
       <div class="sep"></div>
       <button type="button" id="ctxUpload"><span>Upload hier…</span><span class="kbd">Ctrl+U</span></button>
@@ -808,6 +811,21 @@
           <div class="dialog-actions">
             <button type="button" class="explorer-btn" id="shareDialogCancel">Abbrechen</button>
             <button type="submit" class="explorer-btn">Freigeben</button>
+          </div>
+        </main>
+      </form>
+    </div>
+    <div class="dialog-backdrop" id="movePeerDialog" hidden>
+      <form class="folder-dialog" id="movePeerDialogForm">
+        <header>Zusätzlichen Knoten erstellen</header>
+        <main>
+          <p class="settings-note" id="movePeerFileLabel">Datei auswählen…</p>
+          <label for="movePeerSelect">Ziel-Peer auswählen</label>
+          <select id="movePeerSelect" name="target_peer_node_id"></select>
+          <p class="settings-note">Es wird eine zusätzliche Kopie auf dem Ziel-Peer erstellt. Die lokale Sicherheitskopie bleibt erhalten.</p>
+          <div class="dialog-actions">
+            <button type="button" class="explorer-btn" id="movePeerDialogCancel">Abbrechen</button>
+            <button type="submit" class="explorer-btn">Knoten erstellen</button>
           </div>
         </main>
       </form>
@@ -848,6 +866,7 @@
       let currentUploadXhr = null;
       let currentUploadPoll = null;
       let currentUploadId = null;
+      let selectedStoragePeerIds = new Set();
       const uploadQueue = [];
       let uploadWorkerRunning = false;
       let lastTransferPercent = 0;
@@ -866,11 +885,15 @@
       const shareDialog = document.getElementById("shareDialog");
       const sharePeerSelect = document.getElementById("sharePeerSelect");
       const shareFileLabel = document.getElementById("shareFileLabel");
+      const movePeerDialog = document.getElementById("movePeerDialog");
+      const movePeerSelect = document.getElementById("movePeerSelect");
+      const movePeerFileLabel = document.getElementById("movePeerFileLabel");
       const transferPanel = document.getElementById("transfer-panel");
       const transferBody = document.getElementById("transfer-body");
       const transferToggle = document.getElementById("transfer-toggle");
       const transferToggleLabel = document.getElementById("transfer-toggle-label");
       let pendingShareFile = null;
+      let pendingMovePeerFile = null;
       let refreshRequestSeq = 0;
       let latestAppliedRefreshSeq = 0;
       let lastSuccessfulUploadAt = 0;
@@ -1088,14 +1111,47 @@
         const smbUserInput = document.getElementById("settings-smb-username");
         if(smbUserInput && document.activeElement !== smbUserInput) smbUserInput.value = settings.smbUsername || "";
 
+        const peers = appState.peers || [];
+        const activeIds = new Set(peers.map(peer => String(peer.node_id || "")));
+        if(selectedStoragePeerIds.size === 0){
+          activeIds.forEach(id => selectedStoragePeerIds.add(id));
+        }else{
+          selectedStoragePeerIds.forEach(id => { if(!activeIds.has(id)) selectedStoragePeerIds.delete(id); });
+          if(selectedStoragePeerIds.size === 0) activeIds.forEach(id => selectedStoragePeerIds.add(id));
+        }
+        const peerSelector = document.getElementById("network-storage-peer-selection");
+        if(peerSelector){
+          peerSelector.innerHTML = "";
+          if(!peers.length){
+            peerSelector.textContent = "Keine auswählbaren Peers online.";
+          }else{
+            peers.forEach(peer => {
+              const row = document.createElement("label");
+              row.style.display = "flex";
+              row.style.alignItems = "center";
+              row.style.gap = ".45rem";
+              const checkbox = document.createElement("input");
+              checkbox.type = "checkbox";
+              checkbox.checked = selectedStoragePeerIds.has(peer.node_id);
+              checkbox.addEventListener("change", () => {
+                if(checkbox.checked) selectedStoragePeerIds.add(peer.node_id);
+                else selectedStoragePeerIds.delete(peer.node_id);
+              });
+              const text = document.createElement("span");
+              text.textContent = `${peer.display_name || peer.name || String(peer.node_id || "Peer").slice(0, 12)}`;
+              row.append(checkbox, text);
+              peerSelector.appendChild(row);
+            });
+          }
+        }
         const peerList = document.getElementById("network-peer-list");
         peerList.innerHTML = "";
-        if(!(appState.peers || []).length){
+        if(!peers.length){
           const item = document.createElement("li");
           item.textContent = "Keine aktiven Peers online.";
           peerList.appendChild(item);
         }else{
-          appState.peers.forEach(peer => {
+          peers.forEach(peer => {
             const item = document.createElement("li");
             const label = peer.display_name || peer.name || String(peer.node_id || "Peer").slice(0, 10);
             const type = "Server";
@@ -1367,6 +1423,7 @@
         document.getElementById("ctxDownload").hidden = !isFile;
         document.getElementById("ctxShare").hidden = !isOwnerFile;
         document.getElementById("ctxOffload").hidden = !isOwnerFile;
+        document.getElementById("ctxMovePeer").hidden = !isOwnerFile;
         document.getElementById("ctxDelete").hidden = !(isOwnerFile || isDeletableFolder);
         document.getElementById("ctxUpload").hidden = false;
         const share = document.getElementById("ctxShare").querySelector("span");
@@ -1636,6 +1693,7 @@
         data.append("folder", targetFolder);
         data.append("next", "/");
         data.append("upload_id", uploadId);
+        Array.from(selectedStoragePeerIds).forEach(peerId => data.append("storage_peer_node_ids", peerId));
         const xhr = new XMLHttpRequest();
         currentUploadXhr = xhr;
         xhr.open("POST", "/upload");
@@ -1708,6 +1766,7 @@
         data.append("smb_path", smbPath);
         data.append("smb_username", smbUsername);
         data.append("smb_password", smbPassword);
+        Array.from(selectedStoragePeerIds).forEach(peerId => data.append("storage_peer_node_ids", peerId));
         try{
           const response = await fetch('/upload/smb', { method:'POST', headers:{ 'X-Requested-With':'XMLHttpRequest', 'Accept':'application/json' }, body:data });
           const payload = await response.json();
@@ -1791,6 +1850,29 @@
         if(!confirm(`Lokale Chunk-Kopien auslagern und auf Peers verteilen?
 ${file.name}`)) return;
         await ajaxPost(file.offloadUrl, { next:"/" });
+      }
+      function openMovePeerDialog(file){
+        pendingMovePeerFile = file;
+        movePeerFileLabel.textContent = `${file.name} erhält einen zusätzlichen Knoten auf dem ausgewählten Peer.`;
+        movePeerSelect.innerHTML = "";
+        (appState.peers || []).forEach(peer => {
+          const option = document.createElement("option");
+          option.value = peer.node_id;
+          option.textContent = `${peerDisplayName(peer)} (${peer.host}:${peer.udp_port})`;
+          movePeerSelect.appendChild(option);
+        });
+        if(!movePeerSelect.options.length){
+          showToast("Keine aktiven Ziel-Peers verfügbar", "warning");
+          pendingMovePeerFile = null;
+          return;
+        }
+        movePeerDialog.hidden = false;
+        setTimeout(() => movePeerSelect.focus(), 40);
+      }
+      function closeMovePeerDialog(){ movePeerDialog.hidden = true; pendingMovePeerFile = null; }
+      async function moveFileToPeer(file, targetPeerNodeId){
+        if(!targetPeerNodeId) throw new Error("Bitte ein Ziel-Peer auswählen");
+        await ajaxPost(file.offloadUrl, { next:"/", target_peer_node_id: targetPeerNodeId, add_only:"1" });
       }
 
       desktopArea.addEventListener("click", event => {
@@ -1912,6 +1994,7 @@ ${file.name}`)) return;
       document.getElementById("ctxDownload").onclick = () => { closeCtx(); if(selectedTarget.kind === "file") window.location.href = selectedTarget.file.downloadUrl; };
       document.getElementById("ctxShare").onclick = () => { closeCtx(); if(selectedTarget.kind === "file") toggleShare(selectedTarget.file).catch(error => showToast(error.message, "error")); };
       document.getElementById("ctxOffload").onclick = () => { closeCtx(); if(selectedTarget.kind === "file") offloadFile(selectedTarget.file).catch(error => showToast(error.message, "error")); };
+      document.getElementById("ctxMovePeer").onclick = () => { closeCtx(); if(selectedTarget.kind === "file") openMovePeerDialog(selectedTarget.file); };
       document.getElementById("ctxDelete").onclick = () => {
         closeCtx();
         if(selectedTarget.kind === "file") deleteFile(selectedTarget.file).catch(error => showToast(error.message, "error"));
@@ -1928,12 +2011,21 @@ ${file.name}`)) return;
       folderDialog.addEventListener("click", event => { if(event.target === folderDialog) closeFolderDialog(); });
       document.getElementById("shareDialogCancel").onclick = closeShareDialog;
       shareDialog.addEventListener("click", event => { if(event.target === shareDialog) closeShareDialog(); });
+      document.getElementById("movePeerDialogCancel").onclick = closeMovePeerDialog;
+      movePeerDialog.addEventListener("click", event => { if(event.target === movePeerDialog) closeMovePeerDialog(); });
       document.getElementById("shareDialogForm").addEventListener("submit", event => {
         event.preventDefault();
         if(!pendingShareFile) return;
         const target = sharePeerSelect.value || "*";
         shareFileWithPeer(pendingShareFile, target)
           .then(() => closeShareDialog())
+          .catch(error => showToast(error.message, "error"));
+      });
+      document.getElementById("movePeerDialogForm").addEventListener("submit", event => {
+        event.preventDefault();
+        if(!pendingMovePeerFile) return;
+        moveFileToPeer(pendingMovePeerFile, movePeerSelect.value || "")
+          .then(() => closeMovePeerDialog())
           .catch(error => showToast(error.message, "error"));
       });
       document.getElementById("folderDialogForm").addEventListener("submit", event => {

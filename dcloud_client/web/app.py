@@ -710,10 +710,19 @@ def create_app(
     def api_upload_progress(upload_id: str) -> Response:
         return jsonify(upload_progress.get(_safe_upload_id(upload_id)))
 
-    def _store_uploaded_temp_file(temp_path: Path, safe_name: str, folder_path: str, upload_id: str) -> tuple[bool, dict[str, Any], int]:
+    def _requested_storage_peers() -> list[Any]:
+        available_peers = _eligible_storage_peers()
+        requested_peer_ids = [str(peer_id).strip() for peer_id in request.form.getlist("storage_peer_node_ids") if str(peer_id).strip()]
+        if not requested_peer_ids:
+            return available_peers
+        requested_set = set(requested_peer_ids)
+        selected = [peer for peer in available_peers if peer.node_id in requested_set]
+        return selected or available_peers
+
+    def _store_uploaded_temp_file(temp_path: Path, safe_name: str, folder_path: str, upload_id: str, storage_peers: list[Any] | None = None) -> tuple[bool, dict[str, Any], int]:
         file_size = temp_path.stat().st_size
         _sync_peer_connector_settings()
-        storage_peers = _eligible_storage_peers()
+        storage_peers = storage_peers if storage_peers is not None else _requested_storage_peers()
         upload_progress.update(
             upload_id,
             phase="select_targets",
@@ -746,6 +755,7 @@ def create_app(
             return jsonify({"ok": False, "message": "SMB Host, Freigabe und Dateipfad sind erforderlich."}), 400
         safe_name = secure_filename(Path(remote_path).name) or "smb_upload.bin"
         upload_progress.start(upload_id, file_name=safe_name, folder_path=folder_path)
+        storage_peers = _requested_storage_peers()
         with tempfile.NamedTemporaryFile(prefix="upload-smb-", suffix=".tmp", dir=chunk_store.tmp_dir, delete=False) as tmp:
             temp_path = Path(tmp.name)
         try:
@@ -758,7 +768,7 @@ def create_app(
                 conn.retrieveFile(share, remote_path, out)
             conn.close()
             upload_progress.update(upload_id, phase="smb_downloaded", status="Datei vom SMB-Share geladen, verarbeite Upload…", percent=35, server_percent=2)
-            ok, payload, _ = _store_uploaded_temp_file(temp_path, safe_name, folder_path, upload_id)
+            ok, payload, _ = _store_uploaded_temp_file(temp_path, safe_name, folder_path, upload_id, storage_peers=storage_peers)
             manifest = payload["manifest"]
             return jsonify({"ok": ok, "message": f"SMB-Datei importiert: {safe_name}", "manifest": manifest_payload(manifest), "state": state_payload(), "uploadId": upload_id, "uploadProgress": upload_progress.get(upload_id)})
         except Exception as exc:
@@ -804,7 +814,7 @@ def create_app(
             uploaded.save(temp_path)
             file_size = temp_path.stat().st_size
             _sync_peer_connector_settings()
-            storage_peers = _eligible_storage_peers()
+            storage_peers = _requested_storage_peers()
             upload_progress.update(
                 upload_id,
                 phase="select_targets",
@@ -1009,6 +1019,16 @@ def create_app(
             raise StorageError("Ausgewählter Peer ist nicht mehr aktiv")
         return selected, [target_value]
 
+    def _single_target_peer(target_value: str) -> Any:
+        target_value = (target_value or "").strip()
+        if not target_value:
+            raise StorageError("Bitte ein Ziel-Peer auswählen")
+        peers = _list_active_peers()
+        for peer in peers:
+            if peer.node_id == target_value:
+                return peer
+        raise StorageError("Ausgewählter Ziel-Peer ist nicht mehr aktiv")
+
     @app.post("/files/<manifest_id>/offload")
     def offload_file_chunks(manifest_id: str) -> Response | str:
         redirect_target = _safe_next(request.form.get("next"), url_for("files"))
@@ -1016,7 +1036,12 @@ def create_app(
             manifest = manifest_store.load(manifest_id)
             if manifest.owner_node_id != identity.node_id:
                 raise StorageError("Nur der Eigentümer kann Chunk-Daten auslagern")
-            peers = _eligible_storage_peers()
+            target_peer_id = (request.form.get("target_peer_node_id") or "").strip()
+            add_only = request.form.get("add_only", "0") in {"1", "true", "on", "yes"}
+            if target_peer_id:
+                peers = [_single_target_peer(target_peer_id)]
+            else:
+                peers = _eligible_storage_peers()
             if not peers:
                 raise StorageError("Keine aktiven Speicher-Peers verfügbar")
 
@@ -1061,9 +1086,12 @@ def create_app(
                     remote_failures += 1
 
                 if written:
-                    chunk_store.chunk_path(digest).unlink(missing_ok=True)
-                    local_removed += 1
-                    entry["locations"] = list(dict.fromkeys(locations))
+                    if add_only:
+                        entry["locations"] = list(dict.fromkeys([*locations, identity.node_id])) or [identity.node_id]
+                    else:
+                        chunk_store.chunk_path(digest).unlink(missing_ok=True)
+                        local_removed += 1
+                        entry["locations"] = list(dict.fromkeys(locations))
                 else:
                     # Sicherheit: lokale Kopie bleibt erhalten, falls kein Peer erreichbar war.
                     entry["locations"] = list(dict.fromkeys([*locations, identity.node_id])) or [identity.node_id]
@@ -1072,10 +1100,10 @@ def create_app(
             new_targets = list(dict.fromkeys(location for chunk in updated_chunks for location in chunk.get("locations", [])))
             placement = dict(manifest.placement or {})
             placement.update({
-                "strategy": "peer_offload",
+                "strategy": "peer_additional_replica" if add_only else "peer_offload",
                 "targets": new_targets,
                 "target_count": len(new_targets),
-                "transfer_status": "stored_on_peers" if local_removed else "local_only",
+                "transfer_status": "replicated_with_local_copy" if add_only else ("stored_on_peers" if local_removed else "local_only"),
                 "offloaded_local_chunks": local_removed,
                 "offload_remote_successes": remote_successes,
                 "offload_remote_failures": remote_failures,
@@ -1087,7 +1115,11 @@ def create_app(
                 placement=placement,
             )
 
-            if local_removed:
+            if add_only and remote_successes:
+                message = f"Zusätzlicher Knoten erstellt: {remote_successes} Chunk-Kopie(n) auf Ziel-Peer übertragen (lokale Sicherheitskopie bleibt erhalten)"
+            elif add_only:
+                message = "Keine zusätzliche Kopie erstellt; lokale Daten bleiben unverändert erhalten"
+            elif local_removed:
                 message = f"Auslagerung abgeschlossen: {local_removed} lokale Chunk(s) auf Peers verteilt"
             else:
                 message = "Keine Chunks ausgelagert; lokale Daten bleiben erhalten"
