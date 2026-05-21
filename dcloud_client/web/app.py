@@ -967,7 +967,13 @@ def create_app(
             elif manifest_store.is_shared(old_manifest):
                 previous_targets = [
                     str(item) for item in (old_manifest.access or {}).get("shared_with", []) if str(item)
-                ] or ["*"]
+                ]
+                # Important: Never queue wildcard revocations.
+                # Otherwise peers that were never shared with (e.g. after relay->LAN path
+                # changes, reconnects, or newly discovered peers) can receive stale
+                # revocation messages and delete freshly synced manifests.
+                if not previous_targets:
+                    previous_targets = [peer.node_id for peer in _list_active_peers() if peer.node_id != identity.node_id]
                 revocation = build_manifest_revocation(old_manifest.manifest_id, identity)
                 manifest_store.add_share_revocation(revocation, previous_targets)
 
