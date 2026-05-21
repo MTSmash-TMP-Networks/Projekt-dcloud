@@ -242,6 +242,8 @@ class ManifestStore:
         if not self.manifests_dir.exists():
             return manifests
         for path in sorted(self.manifests_dir.glob("*.json")):
+            if path.name in MANIFEST_META_FILES:
+                continue
             try:
                 manifests.append(self.load(path.stem))
             except Exception:
