@@ -188,6 +188,27 @@ class UploadProgressTracker:
                 }
             return item.to_dict()
 
+    def list_recent(self, *, include_finished: bool = True, limit: int = 12) -> list[dict[str, Any]]:
+        self.cleanup()
+        with self._lock:
+            if self._persist_dir is not None:
+                for path in sorted(self._persist_dir.glob("*.json")):
+                    upload_id = path.stem
+                    if upload_id not in self._items:
+                        loaded = self._load_item(upload_id)
+                        if loaded is not None:
+                            self._items[upload_id] = loaded
+            items = list(self._items.values())
+            items.sort(key=lambda item: float(item.updated_at or item.started_at or 0), reverse=True)
+            rows: list[dict[str, Any]] = []
+            for item in items:
+                if not include_finished and not item.active:
+                    continue
+                rows.append(item.to_dict())
+                if len(rows) >= max(1, int(limit)):
+                    break
+            return rows
+
     def start(self, upload_id: str, *, file_name: str = "", folder_path: str = "", total_bytes: int = 0) -> None:
         now = time.time()
         with self._lock:

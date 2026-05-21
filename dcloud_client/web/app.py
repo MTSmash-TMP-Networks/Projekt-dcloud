@@ -769,6 +769,16 @@ def create_app(
     def api_upload_progress(upload_id: str) -> Response:
         return jsonify(upload_progress.get(_safe_upload_id(upload_id)))
 
+    @app.get("/api/uploads")
+    def api_upload_progress_list() -> Response:
+        include_finished = request.args.get("include_finished", "1").strip() != "0"
+        limit_raw = request.args.get("limit", "12").strip()
+        try:
+            limit = max(1, min(50, int(limit_raw or "12")))
+        except ValueError:
+            limit = 12
+        return jsonify({"uploads": upload_progress.list_recent(include_finished=include_finished, limit=limit)})
+
     def _requested_storage_peers() -> list[Any]:
         available_peers = _eligible_storage_peers()
         requested_peer_ids = [str(peer_id).strip() for peer_id in request.form.getlist("storage_peer_node_ids") if str(peer_id).strip()]
