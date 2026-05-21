@@ -954,6 +954,98 @@ def create_app(
             raise StorageError("Ausgewählter Peer ist nicht mehr aktiv")
         return selected, [target_value]
 
+    @app.post("/files/<manifest_id>/offload")
+    def offload_file_chunks(manifest_id: str) -> Response | str:
+        redirect_target = _safe_next(request.form.get("next"), url_for("files"))
+        try:
+            manifest = manifest_store.load(manifest_id)
+            if manifest.owner_node_id != identity.node_id:
+                raise StorageError("Nur der Eigentümer kann Chunk-Daten auslagern")
+            peers = _eligible_storage_peers()
+            if not peers:
+                raise StorageError("Keine aktiven Speicher-Peers verfügbar")
+
+            updated_chunks: list[dict[str, Any]] = []
+            remote_successes = 0
+            local_removed = 0
+            remote_failures = 0
+
+            for chunk in manifest.chunks:
+                entry = dict(chunk)
+                digest = str(entry.get("hash") or "")
+                if not digest:
+                    updated_chunks.append(entry)
+                    continue
+                try:
+                    stored_data = chunk_store.read_stored_chunk(digest)
+                except StorageError:
+                    # Chunk liegt bereits nur extern vor.
+                    updated_chunks.append(entry)
+                    continue
+
+                locations = [str(value) for value in entry.get("locations", []) if str(value) and str(value) != identity.node_id]
+                written = False
+                for peer in peers:
+                    if peer.node_id in locations:
+                        written = True
+                        continue
+                    transfer = p2p_client.put_chunk(
+                        peer,
+                        digest=digest,
+                        stored_data=stored_data,
+                        original_size=int(entry.get("size") or 0),
+                        stored_size=int(entry.get("stored_size") or len(stored_data)),
+                        index=int(entry.get("index") or 0),
+                        compression=str(entry.get("compression") or "") or None,
+                    )
+                    if transfer.ok:
+                        locations.append(peer.node_id)
+                        remote_successes += 1
+                        written = True
+                        break
+                    remote_failures += 1
+
+                if written:
+                    chunk_store.chunk_path(digest).unlink(missing_ok=True)
+                    local_removed += 1
+                    entry["locations"] = list(dict.fromkeys(locations))
+                else:
+                    # Sicherheit: lokale Kopie bleibt erhalten, falls kein Peer erreichbar war.
+                    entry["locations"] = list(dict.fromkeys([*locations, identity.node_id])) or [identity.node_id]
+                updated_chunks.append(entry)
+
+            new_targets = list(dict.fromkeys(location for chunk in updated_chunks for location in chunk.get("locations", [])))
+            placement = dict(manifest.placement or {})
+            placement.update({
+                "strategy": "peer_offload",
+                "targets": new_targets,
+                "target_count": len(new_targets),
+                "transfer_status": "stored_on_peers" if local_removed else "local_only",
+                "offloaded_local_chunks": local_removed,
+                "offload_remote_successes": remote_successes,
+                "offload_remote_failures": remote_failures,
+            })
+            updated_manifest = manifest_store.update_placement(
+                manifest.manifest_id,
+                identity,
+                chunks=updated_chunks,
+                placement=placement,
+            )
+
+            if local_removed:
+                message = f"Auslagerung abgeschlossen: {local_removed} lokale Chunk(s) auf Peers verteilt"
+            else:
+                message = "Keine Chunks ausgelagert; lokale Daten bleiben erhalten"
+            if _is_ajax_request():
+                return jsonify({"ok": True, "message": message, "manifest": manifest_payload(updated_manifest), "state": state_payload()})
+            flash(message, "success")
+        except StorageError as exc:
+            message = str(exc)
+            if _is_ajax_request():
+                return jsonify({"ok": False, "message": message, "state": state_payload()}), 400
+            flash(message, "error")
+        return redirect(redirect_target)
+
     @app.post("/files/<manifest_id>/share")
     def share_file(manifest_id: str) -> Response | str:
         redirect_target = _safe_next(request.form.get("next"), url_for("dashboard"))
