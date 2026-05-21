@@ -153,10 +153,16 @@ setup_python_venv() {
   if ! python3 -m venv .venv; then
     echo "⚠️ python3 -m venv fehlgeschlagen, versuche virtualenv-Fallback..."
     rm -rf .venv
+
     if ! python3 -m virtualenv .venv 2>/dev/null && ! virtualenv .venv 2>/dev/null; then
-      echo "❌ Weder venv noch virtualenv konnten eine Umgebung erstellen." >&2
-      echo "   Installiere bitte python3-venv oder python3-virtualenv/py3-virtualenv." >&2
-      exit 1
+      echo "⚠️ virtualenv nicht vorhanden, versuche Installation via pip..."
+      python3 -m pip install --upgrade pip virtualenv >/dev/null 2>&1 || true
+
+      if ! python3 -m virtualenv .venv 2>/dev/null; then
+        echo "❌ Weder venv noch virtualenv konnten eine Umgebung erstellen." >&2
+        echo "   Installiere bitte python3-pip und pruefe freien Speicherplatz (z.B. /opt oder USB)." >&2
+        exit 1
+      fi
     fi
   fi
 
