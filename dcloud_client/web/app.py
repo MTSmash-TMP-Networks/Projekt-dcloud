@@ -101,7 +101,7 @@ def create_app(
     relay_transports: dict[str, HttpRelayTransport] = {}
     relay_lock = threading.RLock()
     p2p_client = P2PStorageClient(default_web_port=config.web.port)
-    upload_progress = UploadProgressTracker()
+    upload_progress = UploadProgressTracker(persist_dir=chunk_store.tmp_dir / "upload_progress")
     replication_repair_lock = threading.Lock()
     last_replication_repair_at = 0.0
 
