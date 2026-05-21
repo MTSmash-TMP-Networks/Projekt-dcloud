@@ -25,9 +25,6 @@ const DCLOUD_MAX_REQUESTS_PER_POLL = 16;
 const DCLOUD_MAX_ENCODED_BODY_BYTES = 268435456; // 256 MiB base64 payload
 const DCLOUD_CLEANUP_INTERVAL_SECONDS = 30;
 
-header('Content-Type: application/json; charset=utf-8');
-header('Cache-Control: no-store');
-
 $GLOBALS['DCLOUD_CURRENT_INPUT'] = [];
 
 // Some shared hosting stacks or older uploaded revisions may accidentally emit
@@ -127,6 +124,44 @@ function dcloud_relay_token_is_valid(string $provided): bool {
     return false;
 }
 
+function dcloud_render_landing_page(): void {
+    $peersPath = dcloud_storage_dir() . DIRECTORY_SEPARATOR . 'peers.json';
+    $peers = dcloud_read_json_file($peersPath, []);
+    $now = time();
+    $activePeers = 0;
+    foreach ($peers as $peer) {
+        if (!is_array($peer)) {
+            continue;
+        }
+        $age = $now - (int)($peer['relay_seen_at'] ?? 0);
+        if ($age <= DCLOUD_PEER_TTL_SECONDS) {
+            $activePeers++;
+        }
+    }
+
+    $html = '<!doctype html><html lang="de"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">'
+        . '<title>dcloud Relay</title><style>body{font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;background:#0f172a;color:#e2e8f0;margin:0;padding:2rem}main{max-width:640px;margin:0 auto;background:#111827;border:1px solid #1f2937;border-radius:14px;padding:1.5rem}h1{margin-top:0}.ok{color:#22c55e;font-weight:600}.muted{color:#94a3b8}</style></head><body><main>'
+        . '<h1>dcloud Relay aktiv</h1>'
+        . '<p class="ok">Endpoint erreichbar.</p>'
+        . '<p>Aktive Peers: <strong>' . (string)$activePeers . '</strong></p>'
+        . '<p class="muted">Fuer Clients weiter per POST+JSON nutzen.</p>'
+        . '</main></body></html>';
+
+    while (ob_get_level() > 0) {
+        @ob_end_clean();
+    }
+    if (!headers_sent()) {
+        http_response_code(200);
+        header('Content-Type: text/html; charset=utf-8');
+        header('Cache-Control: no-store');
+        header('X-Accel-Buffering: no');
+    }
+    echo $html;
+    flush();
+    exit;
+}
+
+
 function dcloud_json_response(array $payload, int $status = 200): void {
     // Guarantee a single JSON document per HTTP request. This also removes any
     // earlier notices or debug output that would otherwise cause Python/JS to
@@ -202,9 +237,12 @@ function dcloud_read_input(): array {
     // PHP fatal errors. The client still uses POST+JSON for relay actions, but
     // GET/HEAD without a JSON body now return the public health payload.
     if ($method === 'GET' || $method === 'HEAD') {
-        $action = (string)($_GET['action'] ?? 'health');
+        $action = (string)($_GET['action'] ?? '');
+        if ($action === '' || $action === 'status' || $action === 'landing') {
+            dcloud_render_landing_page();
+        }
         if ($action !== 'health') {
-            dcloud_fail('GET unterstuetzt nur die Relay-Health-Abfrage', 405);
+            dcloud_fail('GET unterstuetzt nur status/landing oder action=health', 405);
         }
         return [
             'protocol' => 'dcloud-relay-v1',
