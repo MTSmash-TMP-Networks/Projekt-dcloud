@@ -40,7 +40,7 @@ from ..network.p2p_storage import (
     verify_manifest_deletion,
     verify_manifest_revocation,
 )
-from ..network.peers import PeerProvider
+from ..network.peers import PeerProvider, display_name_for_peer
 from ..storage import ChunkStore, StorageError, StorageStats
 from .upload_progress import UploadProgressTracker
 
@@ -225,6 +225,8 @@ def create_app(
                 "SMB-Server läuft nicht. Prüfe Logausgabe, Port-Freigabe und ob der Speicherpfad verfügbar ist."
             )
         return {
+            "nodeName": config.node.name,
+            "nodeDisplayName": display_name_for_peer(identity.node_id, config.node.name),
             "clientType": config.node.client_type,
             "clientTypeLabel": client_type_label(config.node.client_type),
             "acceptsPeerStorage": _accepts_peer_storage(current_peers),
