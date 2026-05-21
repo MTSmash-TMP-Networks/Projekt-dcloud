@@ -219,10 +219,16 @@ class UploadProgressTracker:
     def _mark_stalled_locked(self, now: float | None = None) -> None:
         now = now or time.time()
         stall_cutoff = now - self.active_stall_seconds
+        browser_bound_phases = {"receiving", "saving_temp"}
         for item in self._items.values():
             if not item.active:
                 continue
             if float(item.updated_at or 0.0) >= stall_cutoff:
+                continue
+            # Only treat early upload phases as connection-bound to the browser.
+            # After temp-file save, processing is server-side and must continue
+            # independently from browser lifetime.
+            if str(item.phase or "") not in browser_bound_phases:
                 continue
             item.active = False
             item.ok = False
