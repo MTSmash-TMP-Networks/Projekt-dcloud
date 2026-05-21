@@ -171,12 +171,23 @@ setup_python_venv() {
     fi
   fi
 
+  if ! "$INSTALL_DIR/.venv/bin/python" -m pip --version >/dev/null 2>&1; then
+    echo "⚠️ pip fehlt in der virtuellen Umgebung, versuche ensurepip..."
+    "$INSTALL_DIR/.venv/bin/python" -m ensurepip --upgrade >/dev/null 2>&1 || true
+  fi
+
+  if ! "$INSTALL_DIR/.venv/bin/python" -m pip --version >/dev/null 2>&1; then
+    echo "❌ pip ist in der virtuellen Umgebung nicht verfuegbar." >&2
+    echo "   Installiere python3-pip (opkg) und starte die Installation erneut." >&2
+    exit 1
+  fi
+
   "$INSTALL_DIR/.venv/bin/python" -m pip install --upgrade pip
   if [ "${TARGET_OS:-}" = "openwrt" ]; then
     # OpenWrt nutzt bereits opkg-Pakete (u.a. cryptography/cffi/pyyaml).
     # Diese Wheels werden auf OpenWrt oft nicht bereitgestellt und ein Source-Build
     # scheitert regelmaessig (Rust/Build-Toolchain fehlt). Deshalb installieren wir
-    # nur die fehlenden Python-Userland-Abhaengigkeiten via pip.
+    # nur die fehlenden Python-Userland-Abhaengigkeiten via pip, inkl. Flask 3.x.
     "$INSTALL_DIR/.venv/bin/python" -m pip install --no-cache-dir --prefer-binary "Flask>=3.0,<4.0"
   else
     "$INSTALL_DIR/.venv/bin/python" -m pip install -r requirements.txt
