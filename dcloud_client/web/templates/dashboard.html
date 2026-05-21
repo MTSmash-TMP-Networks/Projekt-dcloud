@@ -1560,7 +1560,8 @@
         document.getElementById("ctxDownload").hidden = !isFile;
         document.getElementById("ctxShare").hidden = !isOwnerFile;
         document.getElementById("ctxOffload").hidden = !isOwnerFile;
-        document.getElementById("ctxMoveFolder").hidden = !isOwnerFile;
+        const moveFolderBtn = document.getElementById("ctxMoveFolder");
+        if(moveFolderBtn) moveFolderBtn.hidden = !isOwnerFile;
         document.getElementById("ctxMovePeer").hidden = !isOwnerFile;
         document.getElementById("ctxDelete").hidden = !(isOwnerFile || isDeletableFolder);
         document.getElementById("ctxUpload").hidden = false;
@@ -2341,7 +2342,10 @@ ${file.name}`)) return;
       document.getElementById("ctxDownload").onclick = () => { closeCtx(); if(selectedTarget.kind === "file") window.location.href = selectedTarget.file.downloadUrl; };
       document.getElementById("ctxShare").onclick = () => { closeCtx(); if(selectedTarget.kind === "file") toggleShare(selectedTarget.file).catch(error => showToast(error.message, "error")); };
       document.getElementById("ctxOffload").onclick = () => { closeCtx(); if(selectedTarget.kind === "file") offloadFile(selectedTarget.file).catch(error => showToast(error.message, "error")); };
-      document.getElementById("ctxMoveFolder").onclick = () => { closeCtx(); if(selectedTarget.kind === "file") openMoveFolderDialog(selectedTarget.file); };
+      const ctxMoveFolderBtn = document.getElementById("ctxMoveFolder");
+      if(ctxMoveFolderBtn){
+        ctxMoveFolderBtn.onclick = () => { closeCtx(); if(selectedTarget.kind === "file") openMoveFolderDialog(selectedTarget.file); };
+      }
       document.getElementById("ctxMovePeer").onclick = () => { closeCtx(); if(selectedTarget.kind === "file") openMovePeerDialog(selectedTarget.file); };
       document.getElementById("ctxDelete").onclick = () => {
         closeCtx();
@@ -2359,8 +2363,9 @@ ${file.name}`)) return;
       folderDialog.addEventListener("click", event => { if(event.target === folderDialog) closeFolderDialog(); });
       document.getElementById("shareDialogCancel").onclick = closeShareDialog;
       shareDialog.addEventListener("click", event => { if(event.target === shareDialog) closeShareDialog(); });
-      document.getElementById("moveFolderDialogCancel").onclick = closeMoveFolderDialog;
-      moveFolderDialog.addEventListener("click", event => { if(event.target === moveFolderDialog) closeMoveFolderDialog(); });
+      const moveFolderDialogCancel = document.getElementById("moveFolderDialogCancel");
+      if(moveFolderDialogCancel) moveFolderDialogCancel.onclick = closeMoveFolderDialog;
+      if(moveFolderDialog) moveFolderDialog.addEventListener("click", event => { if(event.target === moveFolderDialog) closeMoveFolderDialog(); });
       document.getElementById("movePeerDialogCancel").onclick = closeMovePeerDialog;
       movePeerDialog.addEventListener("click", event => { if(event.target === movePeerDialog) closeMovePeerDialog(); });
       document.getElementById("shareDialogForm").addEventListener("submit", event => {
@@ -2371,13 +2376,16 @@ ${file.name}`)) return;
           .then(() => closeShareDialog())
           .catch(error => showToast(error.message, "error"));
       });
-      document.getElementById("moveFolderDialogForm").addEventListener("submit", event => {
-        event.preventDefault();
-        if(!pendingMoveFolderFile) return;
-        moveFileToFolder(pendingMoveFolderFile, moveFolderSelect.value || "")
-          .then(() => closeMoveFolderDialog())
-          .catch(error => showToast(error.message, "error"));
-      });
+      const moveFolderDialogForm = document.getElementById("moveFolderDialogForm");
+      if(moveFolderDialogForm){
+        moveFolderDialogForm.addEventListener("submit", event => {
+          event.preventDefault();
+          if(!pendingMoveFolderFile) return;
+          moveFileToFolder(pendingMoveFolderFile, moveFolderSelect.value || "")
+            .then(() => closeMoveFolderDialog())
+            .catch(error => showToast(error.message, "error"));
+        });
+      }
       document.getElementById("movePeerDialogForm").addEventListener("submit", event => {
         event.preventDefault();
         if(!pendingMovePeerFile) return;
