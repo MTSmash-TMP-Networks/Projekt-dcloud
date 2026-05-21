@@ -181,6 +181,12 @@ def main() -> None:
                     # Wichtig: vor restore(), sonst wird die Datei direkt wiederhergestellt.
                     for virtual_path, manifest in list(manifest_by_virtual_path.items()):
                         if virtual_path not in existing_file_paths and virtual_path in previous_expected:
+                            # Nur eigene Dateien dürfen via SMB-Delete automatisch
+                            # entfernt werden. Geteilte/empfangene Manifeste können
+                            # ohne lokale Datei sichtbar sein und würden sonst
+                            # fälschlich gelöscht.
+                            if str(getattr(manifest, "owner_node_id", "")) != identity.node_id:
+                                continue
                             try:
                                 manifest_store.delete(manifest.manifest_id, delete_unreferenced_chunks=True)
                                 expected.discard(virtual_path)
