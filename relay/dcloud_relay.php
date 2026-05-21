@@ -4,17 +4,10 @@ declare(strict_types=1);
 /*
  * dcloud PHP HTTP relay/proxy
  *
- * Upload this single file to a PHP-capable webspace and enter its public URL in
- * dcloud under Einstellungen -> PHP-Relay. It provides a small HTTP mailbox for
- * clients that cannot reach each other directly because they are behind NAT or
- * in different networks.
+ * - POST + JSON: Relay API (health/register/enqueue_request/poll_requests/post_response/poll_response)
+ * - GET/HEAD: Modern minimal landing page (unless ?action=health to get JSON)
  *
- * Relay access uses an automatic daily token. The PHP script creates a local
- * random seed on first run, derives a day-token from it, exposes the current
- * token through the health action and accepts the current/previous day token.
- * No manual shared password is required in the client UI.
- * For large files/chunks, raise PHP values such as post_max_size,
- * upload_max_filesize and memory_limit on the webserver.
+ * Landing page intentionally reveals only minimal information.
  */
 
 const DCLOUD_RELAY_VERSION = '1.2.9';
@@ -27,11 +20,29 @@ const DCLOUD_CLEANUP_INTERVAL_SECONDS = 30;
 
 $GLOBALS['DCLOUD_CURRENT_INPUT'] = [];
 
-// Some shared hosting stacks or older uploaded revisions may accidentally emit
-// warnings/diagnostics before the relay response. Keep responses parseable for
-// the Python client by buffering all output and flushing exactly one JSON object.
+/**
+ * Start buffering early to prevent any accidental output from breaking JSON/HTML.
+ */
 if (ob_get_level() === 0) {
     ob_start();
+}
+
+/**
+ * Hard-stop any further output and close the connection cleanly.
+ */
+function dcloud_finalize_and_exit(): void {
+    // Try to force-close the request so nothing else can append output.
+    if (function_exists('fastcgi_finish_request')) {
+        @fastcgi_finish_request();
+    }
+    exit;
+}
+
+function dcloud_clear_all_output_buffers(): void {
+    // Clear as many levels as possible (some hosts stack multiple buffers).
+    for ($i = 0; $i < 50 && ob_get_level() > 0; $i++) {
+        @ob_end_clean();
+    }
 }
 
 function dcloud_storage_dir(): string {
@@ -124,94 +135,248 @@ function dcloud_relay_token_is_valid(string $provided): bool {
     return false;
 }
 
+function dcloud_request_method(): string {
+    return strtoupper((string)($_SERVER['REQUEST_METHOD'] ?? 'POST'));
+}
+
+function dcloud_accept_header(): string {
+    return strtolower((string)($_SERVER['HTTP_ACCEPT'] ?? ''));
+}
+
+function dcloud_is_browser_request(): bool {
+    $accept = dcloud_accept_header();
+    // Typical browsers send text/html. API clients often send */* or application/json.
+    if (strpos($accept, 'text/html') !== false) {
+        return true;
+    }
+    // Fallback heuristic: User-Agent present and not a typical script client.
+    $ua = strtolower((string)($_SERVER['HTTP_USER_AGENT'] ?? ''));
+    if ($ua !== '' && (strpos($ua, 'mozilla') !== false || strpos($ua, 'chrome') !== false || strpos($ua, 'safari') !== false || strpos($ua, 'firefox') !== false)) {
+        return true;
+    }
+    return false;
+}
+
+/**
+ * Minimal modern landing page (no tokens, no times, no exact peer counts).
+ */
 function dcloud_render_landing_page(): void {
+    // Compute only a coarse activity bucket.
     $peersPath = dcloud_storage_dir() . DIRECTORY_SEPARATOR . 'peers.json';
     $peers = dcloud_read_json_file($peersPath, []);
     $now = time();
+
     $activePeers = 0;
     foreach ($peers as $peer) {
-        if (!is_array($peer)) {
-            continue;
-        }
+        if (!is_array($peer)) continue;
         $age = $now - (int)($peer['relay_seen_at'] ?? 0);
-        if ($age <= DCLOUD_PEER_TTL_SECONDS) {
-            $activePeers++;
-        }
+        if ($age <= DCLOUD_PEER_TTL_SECONDS) $activePeers++;
     }
 
-    $html = '<!doctype html><html lang="de"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">'
-        . '<title>dcloud Relay</title><style>body{font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;background:#0f172a;color:#e2e8f0;margin:0;padding:2rem}main{max-width:640px;margin:0 auto;background:#111827;border:1px solid #1f2937;border-radius:14px;padding:1.5rem}h1{margin-top:0}.ok{color:#22c55e;font-weight:600}.muted{color:#94a3b8}</style></head><body><main>'
-        . '<h1>dcloud Relay aktiv</h1>'
-        . '<p class="ok">Endpoint erreichbar.</p>'
-        . '<p>Aktive Peers: <strong>' . (string)$activePeers . '</strong></p>'
-        . '<p class="muted">Fuer Clients weiter per POST+JSON nutzen.</p>'
-        . '</main></body></html>';
+    $activity = 'Keine';
+    if ($activePeers >= 1 && $activePeers <= 2) $activity = 'Niedrig';
+    elseif ($activePeers >= 3 && $activePeers <= 7) $activity = 'Normal';
+    elseif ($activePeers >= 8) $activity = 'Hoch';
 
-    while (ob_get_level() > 0) {
-        @ob_end_clean();
-    }
+    dcloud_clear_all_output_buffers();
+
     if (!headers_sent()) {
         http_response_code(200);
         header('Content-Type: text/html; charset=utf-8');
-        header('Cache-Control: no-store');
+
+        header('Cache-Control: no-store, no-cache, must-revalidate, max-age=0');
+        header('Pragma: no-cache');
+        header('Expires: 0');
+        header('Vary: Accept, Accept-Encoding');
+
+        header('X-Content-Type-Options: nosniff');
+        header('Referrer-Policy: no-referrer');
+        header('X-Frame-Options: DENY');
+        header("Content-Security-Policy: default-src 'none'; style-src 'unsafe-inline'; img-src data:; base-uri 'none'; form-action 'none'");
+
+        // Try to stop reverse proxies from buffering/merging outputs.
         header('X-Accel-Buffering: no');
+        header('Connection: close');
     }
+
+    $version = htmlspecialchars(DCLOUD_RELAY_VERSION, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8');
+    $activitySafe = htmlspecialchars($activity, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8');
+
+    $html = <<<HTML
+<!doctype html>
+<html lang="de">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>dcloud Relay</title>
+  <style>
+    :root{
+      --bg1:#070a12; --bg2:#0b1430;
+      --card:rgba(255,255,255,.06);
+      --stroke:rgba(255,255,255,.12);
+      --text:#eaf0ff; --muted:#a8b3d4;
+      --ok:#22c55e;
+      --shadow: 0 18px 60px rgba(0,0,0,.45);
+    }
+    *{box-sizing:border-box}
+    body{
+      margin:0; min-height:100vh;
+      font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif;
+      color:var(--text);
+      background:
+        radial-gradient(1100px 520px at 15% 10%, rgba(99,102,241,.22), transparent 60%),
+        radial-gradient(900px 520px at 85% 20%, rgba(34,197,94,.16), transparent 55%),
+        linear-gradient(180deg, var(--bg1), var(--bg2));
+      padding: 44px 16px;
+    }
+    .wrap{max-width: 920px; margin: 0 auto;}
+    .panel{
+      border: 1px solid var(--stroke);
+      background: linear-gradient(180deg, rgba(255,255,255,.09), rgba(255,255,255,.04));
+      border-radius: 18px;
+      box-shadow: var(--shadow);
+      overflow:hidden;
+    }
+    .header{
+      padding: 18px 18px 14px 18px;
+      display:flex; align-items:center; justify-content:space-between; gap:12px;
+      border-bottom: 1px solid rgba(255,255,255,.08);
+      flex-wrap:wrap;
+    }
+    h1{font-size: 18px; margin:0; letter-spacing:.2px}
+    .sub{color:var(--muted); font-size: 13px; margin-top:4px}
+    .badge{
+      display:inline-flex; align-items:center; gap:10px;
+      padding: 8px 12px; border-radius: 999px;
+      background: rgba(34,197,94,.14);
+      border: 1px solid rgba(34,197,94,.25);
+      color: #c9f7d6;
+      font-weight: 750;
+      white-space:nowrap;
+    }
+    .dot{
+      width:10px; height:10px; border-radius:50%;
+      background: var(--ok);
+      box-shadow: 0 0 0 6px rgba(34,197,94,.12);
+    }
+    .grid{
+      padding: 16px 18px 18px 18px;
+      display:grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 12px;
+    }
+    .card{
+      border:1px solid rgba(255,255,255,.10);
+      background: rgba(0,0,0,.18);
+      border-radius: 14px;
+      padding: 14px 14px;
+    }
+    .k{color:var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing:.14em}
+    .v{margin-top:7px; font-size: 16px; font-weight: 800}
+    .footer{
+      padding: 0 18px 18px 18px;
+      color: var(--muted);
+      font-size: 13px;
+      line-height: 1.5;
+    }
+    code{
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+      font-size: 12px;
+      padding: 2px 6px;
+      border-radius: 8px;
+      background: rgba(255,255,255,.08);
+      border: 1px solid rgba(255,255,255,.10);
+      color: #eef4ff;
+    }
+    @media (max-width: 760px){
+      .grid{grid-template-columns: 1fr;}
+    }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="panel">
+      <div class="header">
+        <div>
+          <h1>dcloud Relay</h1>
+          <div class="sub">Öffentliche Statusseite (reduzierte Informationen)</div>
+        </div>
+        <div class="badge"><span class="dot"></span> Online</div>
+      </div>
+
+      <div class="grid">
+        <div class="card">
+          <div class="k">Dienst</div>
+          <div class="v">Relay Endpoint</div>
+        </div>
+        <div class="card">
+          <div class="k">Aktivität</div>
+          <div class="v">{$activitySafe}</div>
+        </div>
+        <div class="card">
+          <div class="k">API</div>
+          <div class="v"><code>POST</code> JSON</div>
+        </div>
+        <div class="card">
+          <div class="k">Version</div>
+          <div class="v">v{$version}</div>
+        </div>
+      </div>
+
+      <div class="footer">
+        Für dcloud-Clients/Monitoring: <code>?action=health</code> (JSON).<br>
+        Diese Seite blendet absichtlich Tokens, Zeiten und exakte Peer-Daten aus.
+      </div>
+    </div>
+  </div>
+</body>
+</html>
+HTML;
+
     echo $html;
-    flush();
-    exit;
+    dcloud_finalize_and_exit();
 }
 
-
 function dcloud_json_response(array $payload, int $status = 200): void {
-    // Guarantee a single JSON document per HTTP request. This also removes any
-    // earlier notices or debug output that would otherwise cause Python/JS to
-    // fail with "Extra data after JSON". Content-Length helps nginx/FastCGI
-    // discard any accidental trailing bytes from stale buffers or old opcache
-    // workers instead of appending them to the JSON response.
-    while (ob_get_level() > 0) {
-        @ob_end_clean();
-    }
+    dcloud_clear_all_output_buffers();
+
     $encoded = json_encode($payload, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
     if ($encoded === false) {
         $encoded = '{"ok":false,"message":"JSON encoding failed"}';
     }
+
     if (!headers_sent()) {
         http_response_code($status);
         header('Content-Type: application/json; charset=utf-8');
         header('Cache-Control: no-store');
         header('X-Accel-Buffering: no');
+        header('X-Content-Type-Options: nosniff');
+        header('Connection: close');
         header('Content-Length: ' . strlen($encoded));
     }
+
     echo $encoded;
-    flush();
-    exit;
+    dcloud_finalize_and_exit();
 }
 
 function dcloud_fail(string $message, int $status = 200, array $details = []): void {
-    // Hosted panels such as Plesk/nginx often log every 4xx as a server error.
-    // Relay protocol validation errors are returned as JSON with ok=false and
-    // HTTP 200 so the Python client can show the real message and the webserver
-    // logs do not look like the PHP endpoint is missing or broken. Hard limits
-    // and server-side failures may still pass 413/500 explicitly.
     $safeStatus = ($status >= 500 || $status === 413) ? $status : 200;
     $input = $GLOBALS['DCLOUD_CURRENT_INPUT'] ?? [];
     $action = is_array($input) ? (string)($input['action'] ?? '') : '';
     if ($action === '') {
         $action = (string)($_POST['action'] ?? ($_GET['action'] ?? ''));
     }
-    $logPayload = array_merge([
+    dcloud_log_event('error', array_merge([
         'status' => $status,
         'returned_status' => $safeStatus,
         'message' => $message,
         'action' => $action,
-    ], $details);
-    dcloud_log_event('error', $logPayload);
+    ], $details));
+
     dcloud_json_response(['ok' => false, 'message' => $message, 'status' => $status, 'details' => $details], $safeStatus);
 }
 
 function dcloud_log_event(string $type, array $payload): void {
-    // Best-effort diagnostics for hosted PHP environments. Logging must never
-    // break relay traffic; failures are intentionally ignored.
     try {
         $dir = dcloud_storage_dir();
         $line = json_encode([
@@ -222,32 +387,20 @@ function dcloud_log_event(string $type, array $payload): void {
         ], JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE) . "\n";
         @file_put_contents($dir . DIRECTORY_SEPARATOR . 'relay-events.log', $line, FILE_APPEND | LOCK_EX);
     } catch (Throwable $exception) {
-        // no-op
+        // ignore
     }
-}
-
-function dcloud_request_method(): string {
-    return strtoupper((string)($_SERVER['REQUEST_METHOD'] ?? 'POST'));
 }
 
 function dcloud_read_input(): array {
     $method = dcloud_request_method();
 
-    // Browser checks, uptime monitors and simple curl tests should never create
-    // PHP fatal errors. The client still uses POST+JSON for relay actions, but
-    // GET/HEAD without a JSON body now return the public health payload.
+    // GET/HEAD is for humans (landing) unless explicitly requesting JSON health.
     if ($method === 'GET' || $method === 'HEAD') {
-        $action = (string)($_GET['action'] ?? '');
-        if ($action === '' || $action === 'status' || $action === 'landing') {
-            dcloud_render_landing_page();
+        $action = strtolower(trim((string)($_GET['action'] ?? '')));
+        if ($action === 'health' || $action === 'ping') {
+            return ['protocol' => 'dcloud-relay-v1', 'action' => 'health'];
         }
-        if ($action !== 'health') {
-            dcloud_fail('GET unterstuetzt nur status/landing oder action=health', 405);
-        }
-        return [
-            'protocol' => 'dcloud-relay-v1',
-            'action' => 'health',
-        ];
+        dcloud_render_landing_page();
     }
 
     if ($method === 'OPTIONS') {
@@ -255,11 +408,16 @@ function dcloud_read_input(): array {
     }
 
     if ($method !== 'POST') {
+        // If a browser hits it with something odd (rare), show landing instead of JSON spam.
+        if (dcloud_is_browser_request()) {
+            dcloud_render_landing_page();
+        }
         dcloud_fail('Nur POST JSON wird unterstuetzt', 405);
     }
 
     $raw = file_get_contents('php://input');
     $contentLength = (int)($_SERVER['CONTENT_LENGTH'] ?? 0);
+
     if ($raw === false) {
         dcloud_fail('Request konnte nicht gelesen werden', 400);
     }
@@ -280,35 +438,34 @@ function dcloud_read_input(): array {
     }
 
     $data = $decoded;
-    $GLOBALS['DCLOUD_CURRENT_INPUT'] = is_array($data) ? $data : [];
+    $GLOBALS['DCLOUD_CURRENT_INPUT'] = $data;
+
     if (($data['protocol'] ?? '') !== 'dcloud-relay-v1') {
-        // Be tolerant for diagnostics/older clients if an action is present, but
-        // keep recording the mismatch. Without an action this is not a relay request.
         if (!isset($data['action'])) {
             dcloud_fail('Falsches Relay-Protokoll', 400);
         }
-        dcloud_log_event('warning', ['message' => 'Falsches oder fehlendes Protokoll wurde toleriert', 'action' => (string)($data['action'] ?? '')]);
+        dcloud_log_event('warning', [
+            'message' => 'Falsches oder fehlendes Protokoll wurde toleriert',
+            'action' => (string)($data['action'] ?? ''),
+        ]);
     }
 
-    // The health action is intentionally public: it is how clients fetch the
-    // automatic daily relay token. Normalize aliases here as well so POST
-    // health/ping/status cannot be rejected before reaching the dispatcher.
     $actionForAuth = dcloud_normalize_action((string)($data['action'] ?? ''));
     $data['action'] = $actionForAuth;
     $GLOBALS['DCLOUD_CURRENT_INPUT'] = $data;
+
     if ($actionForAuth !== 'health') {
         $provided = (string)($data['relay_token'] ?? ($data['secret'] ?? ''));
         if (!dcloud_relay_token_is_valid($provided)) {
             dcloud_fail('Relay-Tages-Token fehlt oder ist abgelaufen', 403);
         }
     }
+
     return $data;
 }
 
 function dcloud_valid_id($value): bool {
-    if (!is_string($value) && !is_numeric($value)) {
-        return false;
-    }
+    if (!is_string($value) && !is_numeric($value)) return false;
     $text = trim((string)$value);
     return $text !== '' && preg_match('/^[A-Za-z0-9_.:-]{1,160}$/', $text) === 1;
 }
@@ -329,9 +486,7 @@ function dcloud_first_string_value(array $input, array $keys): string {
     foreach ($keys as $key) {
         if (array_key_exists($key, $input) && (is_string($input[$key]) || is_numeric($input[$key]))) {
             $value = trim((string)$input[$key]);
-            if ($value !== '') {
-                return $value;
-            }
+            if ($value !== '') return $value;
         }
     }
     return '';
@@ -354,13 +509,9 @@ function dcloud_response_file(string $requestId): string {
 }
 
 function dcloud_read_json_file(string $path, array $fallback): array {
-    if (!file_exists($path)) {
-        return $fallback;
-    }
+    if (!file_exists($path)) return $fallback;
     $raw = file_get_contents($path);
-    if ($raw === false || $raw === '') {
-        return $fallback;
-    }
+    if ($raw === false || $raw === '') return $fallback;
     $data = json_decode($raw, true);
     return is_array($data) ? $data : $fallback;
 }
@@ -379,9 +530,7 @@ function dcloud_write_json_file(string $path, array $data): void {
 function dcloud_with_peer_lock(callable $callback) {
     $lockPath = dcloud_storage_dir() . DIRECTORY_SEPARATOR . 'peers.lock';
     $handle = fopen($lockPath, 'c+');
-    if (!$handle) {
-        dcloud_fail('Relay-Lock konnte nicht geoeffnet werden', 500);
-    }
+    if (!$handle) dcloud_fail('Relay-Lock konnte nicht geoeffnet werden', 500);
     flock($handle, LOCK_EX);
     try {
         return $callback();
@@ -392,12 +541,8 @@ function dcloud_with_peer_lock(callable $callback) {
 }
 
 function dcloud_envelope_is_valid(array $payload): bool {
-    if (!dcloud_valid_id($payload['request_id'] ?? '')) {
-        return false;
-    }
-    if (!dcloud_valid_id($payload['from_node_id'] ?? '') || !dcloud_valid_id($payload['to_node_id'] ?? '')) {
-        return false;
-    }
+    if (!dcloud_valid_id($payload['request_id'] ?? '')) return false;
+    if (!dcloud_valid_id($payload['from_node_id'] ?? '') || !dcloud_valid_id($payload['to_node_id'] ?? '')) return false;
     $method = strtoupper((string)($payload['method'] ?? ''));
     $path = (string)($payload['path'] ?? '');
     return in_array($method, ['GET', 'POST'], true) && strncmp($path, '/api/p2p/', 9) === 0;
@@ -420,12 +565,9 @@ function dcloud_cleanup(): void {
 
     $responseBase = dcloud_storage_dir() . DIRECTORY_SEPARATOR . 'responses';
     $responseFiles = glob($responseBase . DIRECTORY_SEPARATOR . '*.json') ?: [];
-    // Old relay versions could write responses/.json for an empty request_id.
-    // glob('*.json') does not always include dotfiles, so remove it explicitly.
     $legacyEmptyResponse = $responseBase . DIRECTORY_SEPARATOR . '.json';
-    if (file_exists($legacyEmptyResponse)) {
-        $responseFiles[] = $legacyEmptyResponse;
-    }
+    if (file_exists($legacyEmptyResponse)) $responseFiles[] = $legacyEmptyResponse;
+
     foreach ($responseFiles as $file) {
         $expired = filemtime($file) !== false && $now - filemtime($file) > DCLOUD_MESSAGE_TTL_SECONDS;
         $payload = dcloud_read_json_file($file, []);
@@ -441,75 +583,54 @@ function dcloud_cleanup_if_due(): void {
     $last = 0;
     if (file_exists($marker)) {
         $raw = @file_get_contents($marker);
-        if (is_string($raw) && $raw !== '') {
-            $last = (int)trim($raw);
-        }
+        if (is_string($raw) && $raw !== '') $last = (int)trim($raw);
     }
-    if ($last > 0 && ($now - $last) < DCLOUD_CLEANUP_INTERVAL_SECONDS) {
-        return;
-    }
+    if ($last > 0 && ($now - $last) < DCLOUD_CLEANUP_INTERVAL_SECONDS) return;
 
     dcloud_cleanup();
     @file_put_contents($marker, (string)$now, LOCK_EX);
 }
 
 function dcloud_sanitize_relay_urls($value): array {
-    if ($value === null) {
-        return [];
-    }
+    if ($value === null) return [];
     $items = is_array($value) ? $value : preg_split('/[\s,;]+/', (string)$value);
     $urls = [];
     foreach ($items ?: [] as $raw) {
         $url = rtrim(trim((string)$raw), '/');
-        if ($url === '' || !preg_match('/^https?:\/\//i', $url)) {
-            continue;
-        }
-        if (!in_array($url, $urls, true)) {
-            $urls[] = $url;
-        }
-        if (count($urls) >= 20) {
-            break;
-        }
+        if ($url === '' || !preg_match('/^https?:\/\//i', $url)) continue;
+        if (!in_array($url, $urls, true)) $urls[] = $url;
+        if (count($urls) >= 20) break;
     }
     return $urls;
 }
 
 function dcloud_sanitize_relay_tokens($value): array {
-    if (!is_array($value)) {
-        return [];
-    }
+    if (!is_array($value)) return [];
     $tokens = [];
     foreach ($value as $item) {
-        if (!is_array($item)) {
-            continue;
-        }
+        if (!is_array($item)) continue;
         $url = rtrim(trim((string)($item['relay_url'] ?? ($item['url'] ?? ''))), '/');
         $token = trim((string)($item['relay_token'] ?? ($item['token'] ?? '')));
-        if ($url === '' || $token === '' || !preg_match('/^https?:\/\//i', $url)) {
-            continue;
-        }
+        if ($url === '' || $token === '' || !preg_match('/^https?:\/\//i', $url)) continue;
         $tokens[] = [
             'relay_url' => $url,
             'relay_token_day' => substr((string)($item['relay_token_day'] ?? ($item['day'] ?? '')), 0, 16),
             'relay_token_expires_at' => max(0, (int)($item['relay_token_expires_at'] ?? ($item['expires_at'] ?? 0))),
             'relay_token' => substr($token, 0, 128),
         ];
-        if (count($tokens) >= 20) {
-            break;
-        }
+        if (count($tokens) >= 20) break;
     }
     return $tokens;
 }
 
 function dcloud_sanitize_peer($peer, string $nodeId): array {
-    if (!is_array($peer)) {
-        dcloud_fail('Peer-Metadaten fehlen', 400);
-    }
+    if (!is_array($peer)) dcloud_fail('Peer-Metadaten fehlen', 400);
+
     $clientType = $peer['client_type'] ?? null;
-    if (!in_array($clientType, ['server', 'pc'], true)) {
-        $clientType = null;
-    }
+    if (!in_array($clientType, ['server', 'pc'], true)) $clientType = null;
+
     $relayUrls = dcloud_sanitize_relay_urls($peer['relay_urls'] ?? ($peer['relay_url'] ?? null));
+
     return [
         'node_id' => $nodeId,
         'public_key' => (string)($peer['public_key'] ?? ''),
@@ -535,9 +656,7 @@ function dcloud_active_peers_except(string $ownNodeId): array {
     $now = time();
     $active = [];
     foreach ($peers as $nodeId => $peer) {
-        if (!is_array($peer)) {
-            continue;
-        }
+        if (!is_array($peer)) continue;
         $age = $now - (int)($peer['relay_seen_at'] ?? 0);
         if ($age <= DCLOUD_PEER_TTL_SECONDS && $nodeId !== $ownNodeId) {
             $peer['relay_age_seconds'] = $age;
@@ -551,9 +670,6 @@ function dcloud_register(array $input): void {
     $nodeId = dcloud_safe_id((string)($input['node_id'] ?? ''), 'node_id');
     $peer = $input['peer'] ?? null;
 
-    // New clients send all metadata in the peer object. This fallback keeps the
-    // relay tolerant to slightly older clients that accidentally sent metadata
-    // at the top level, while still rejecting empty/null register requests.
     if (!is_array($peer)) {
         foreach (['public_key', 'name', 'udp_port', 'web_port', 'client_type', 'shared_storage_bytes', 'free_storage_bytes', 'accepts_peer_storage', 'relay_url', 'relay_urls'] as $key) {
             if (array_key_exists($key, $input)) {
@@ -563,10 +679,6 @@ function dcloud_register(array $input): void {
         }
     }
     if (!is_array($peer)) {
-        // Do not reject a node completely when an older or partially configured
-        // client registers without the nested peer object. A minimal heartbeat is
-        // enough for relay diagnostics and later poll cycles; richer metadata will
-        // replace it automatically on the next valid register.
         dcloud_log_event('warning', ['message' => 'Register ohne peer-Metadaten wurde minimal akzeptiert', 'node_id' => $nodeId]);
         $peer = [
             'node_id' => $nodeId,
@@ -580,6 +692,7 @@ function dcloud_register(array $input): void {
         $path = dcloud_storage_dir() . DIRECTORY_SEPARATOR . 'peers.json';
         $peers = dcloud_read_json_file($path, []);
         $now = time();
+
         foreach ($peers as $existingNodeId => $existingPeer) {
             if (!is_array($existingPeer) || $now - (int)($existingPeer['relay_seen_at'] ?? 0) > DCLOUD_PEER_TTL_SECONDS) {
                 unset($peers[$existingNodeId]);
@@ -588,9 +701,7 @@ function dcloud_register(array $input): void {
 
         $existing = isset($peers[$nodeId]) && is_array($peers[$nodeId]) ? $peers[$nodeId] : [];
         $sanitized = dcloud_sanitize_peer($peer, $nodeId);
-        // Some probes/older clients may only send a minimal register. Do not let
-        // such a heartbeat wipe useful storage metadata, otherwise other nodes
-        // stop treating this peer as a valid storage target.
+
         foreach (['public_key', 'client_type', 'shared_storage_bytes', 'free_storage_bytes', 'accepts_peer_storage', 'relay_url', 'relay_urls', 'relay_tokens', 'web_port', 'udp_port'] as $key) {
             $newValue = $sanitized[$key] ?? null;
             $emptyNewValue = $newValue === null || $newValue === '' || $newValue === [] || $newValue === 0 || $newValue === false;
@@ -598,26 +709,31 @@ function dcloud_register(array $input): void {
                 $sanitized[$key] = $existing[$key];
             }
         }
+
         $sanitized['relay_seen_at'] = $now;
         $peers[$nodeId] = $sanitized;
         dcloud_write_json_file($path, $peers);
         return dcloud_active_peers_except($nodeId);
     });
+
     $relayUrls = [];
     foreach ($peers as $peerInfo) {
         foreach (dcloud_sanitize_relay_urls($peerInfo['relay_urls'] ?? ($peerInfo['relay_url'] ?? null)) as $relayUrl) {
-            if (!in_array($relayUrl, $relayUrls, true)) {
-                $relayUrls[] = $relayUrl;
-            }
+            if (!in_array($relayUrl, $relayUrls, true)) $relayUrls[] = $relayUrl;
         }
     }
-    dcloud_json_response(array_merge(['ok' => true, 'version' => DCLOUD_RELAY_VERSION, 'peers' => $peers, 'relay_urls' => $relayUrls], dcloud_current_relay_token()));
+
+    dcloud_json_response(array_merge(
+        ['ok' => true, 'version' => DCLOUD_RELAY_VERSION, 'peers' => $peers, 'relay_urls' => $relayUrls],
+        dcloud_current_relay_token()
+    ));
 }
 
 function dcloud_enqueue_request(array $input): void {
     $fromNodeId = dcloud_safe_id(dcloud_first_string_value($input, ['node_id', 'from_node_id', 'sender_node_id']), 'node_id');
     $toNodeIdRaw = dcloud_first_string_value($input, ['to_node_id', 'target_node_id', 'target_node', 'peer_node_id', 'recipient_node_id']);
     $requestIdRaw = dcloud_first_string_value($input, ['request_id', 'id', 'relay_request_id']);
+
     if ($toNodeIdRaw === '' || $requestIdRaw === '') {
         dcloud_fail('Relay-Anfrage ist unvollstaendig', 200, [
             'missing_to_node_id' => $toNodeIdRaw === '',
@@ -625,21 +741,25 @@ function dcloud_enqueue_request(array $input): void {
             'keys' => array_keys($input),
         ]);
     }
+
     $toNodeId = dcloud_safe_id($toNodeIdRaw, 'to_node_id');
     $requestId = dcloud_safe_id($requestIdRaw, 'request_id');
+
     $method = strtoupper((string)($input['method'] ?? 'GET'));
     $path = (string)($input['path'] ?? ($input['api_path'] ?? ''));
+
     if (!in_array($method, ['GET', 'POST'], true) || strncmp($path, '/api/p2p/', 9) !== 0) {
         dcloud_fail('Nur GET/POST auf /api/p2p/ sind erlaubt', 403, ['method' => $method, 'path' => $path]);
     }
+
     $bodyBase64 = (string)($input['body_base64'] ?? ($input['body'] ?? ''));
     if (strlen($bodyBase64) > DCLOUD_MAX_ENCODED_BODY_BYTES) {
         dcloud_fail('Relay-Nutzdaten sind zu gross', 413);
     }
+
     $headers = $input['headers'] ?? [];
-    if (!is_array($headers)) {
-        $headers = [];
-    }
+    if (!is_array($headers)) $headers = [];
+
     $envelope = [
         'request_id' => $requestId,
         'from_node_id' => $fromNodeId,
@@ -650,8 +770,10 @@ function dcloud_enqueue_request(array $input): void {
         'body_base64' => $bodyBase64,
         'created_at' => time(),
     ];
+
     $file = dcloud_queue_dir($toNodeId) . DIRECTORY_SEPARATOR . time() . '-' . dcloud_safe_filename($requestId) . '.json';
     dcloud_write_json_file($file, $envelope);
+
     dcloud_json_response(['ok' => true, 'request_id' => $requestId, 'to_node_id' => $toNodeId]);
 }
 
@@ -659,11 +781,11 @@ function dcloud_poll_requests(array $input): void {
     $nodeId = dcloud_safe_id((string)($input['node_id'] ?? ''), 'node_id');
     $max = max(1, min(DCLOUD_MAX_REQUESTS_PER_POLL, (int)($input['max_requests'] ?? DCLOUD_MAX_REQUESTS_PER_POLL)));
     $waitUntil = microtime(true) + max(0.0, min(5.0, (float)($input['wait_seconds'] ?? 0)));
+
     do {
         $files = glob(dcloud_queue_dir($nodeId) . DIRECTORY_SEPARATOR . '*.json') ?: [];
-        // Queue files are prefixed with unix timestamps, so lexicographic
-        // ordering already matches creation order without costly filemtime().
         sort($files, SORT_STRING);
+
         $requests = [];
         foreach (array_slice($files, 0, $max) as $file) {
             $payload = dcloud_read_json_file($file, []);
@@ -674,9 +796,11 @@ function dcloud_poll_requests(array $input): void {
                 dcloud_log_event('warning', ['message' => 'Ungueltiger Queue-Eintrag wurde verworfen', 'file' => basename($file)]);
             }
         }
+
         if ($requests || microtime(true) >= $waitUntil) {
             dcloud_json_response(['ok' => true, 'requests' => $requests]);
         }
+
         usleep(200000);
     } while (true);
 }
@@ -684,13 +808,14 @@ function dcloud_poll_requests(array $input): void {
 function dcloud_post_response(array $input): void {
     $requestId = dcloud_safe_id(dcloud_first_string_value($input, ['request_id', 'id', 'relay_request_id']), 'request_id');
     $bodyBase64 = (string)($input['body_base64'] ?? '');
+
     if (strlen($bodyBase64) > DCLOUD_MAX_ENCODED_BODY_BYTES) {
         dcloud_fail('Relay-Antwort ist zu gross', 413);
     }
+
     $headers = $input['headers'] ?? [];
-    if (!is_array($headers)) {
-        $headers = [];
-    }
+    if (!is_array($headers)) $headers = [];
+
     $response = [
         'request_id' => $requestId,
         'status_code' => (int)($input['status_code'] ?? 502),
@@ -698,6 +823,7 @@ function dcloud_post_response(array $input): void {
         'body_base64' => $bodyBase64,
         'created_at' => time(),
     ];
+
     dcloud_write_json_file(dcloud_response_file($requestId), $response);
     dcloud_json_response(['ok' => true, 'request_id' => $requestId]);
 }
@@ -706,28 +832,32 @@ function dcloud_poll_response(array $input): void {
     $requestId = dcloud_safe_id(dcloud_first_string_value($input, ['request_id', 'id', 'relay_request_id']), 'request_id');
     $waitUntil = microtime(true) + max(0.0, min(5.0, (float)($input['wait_seconds'] ?? 0)));
     $file = dcloud_response_file($requestId);
+
     do {
         if (file_exists($file)) {
             $response = dcloud_read_json_file($file, []);
             @unlink($file);
+
             if (!$response || !dcloud_response_payload_is_valid($response) || (string)($response['request_id'] ?? '') !== $requestId) {
                 dcloud_log_event('warning', ['message' => 'Ungueltige Relay-Antwort wurde verworfen', 'request_id' => $requestId]);
                 dcloud_json_response(['ok' => true, 'ready' => false]);
             }
+
             dcloud_json_response(['ok' => true, 'ready' => true, 'response' => $response]);
         }
+
         if (microtime(true) >= $waitUntil) {
             dcloud_json_response(['ok' => true, 'ready' => false]);
         }
+
         usleep(200000);
     } while (true);
 }
 
 function dcloud_normalize_action(string $action): string {
     $action = strtolower(trim($action));
-    if ($action === '') {
-        return 'health';
-    }
+    if ($action === '') return 'health';
+
     $aliases = [
         'ping' => 'health',
         'status' => 'health',
@@ -750,14 +880,14 @@ function dcloud_normalize_action(string $action): string {
         'get_response' => 'poll_response',
         'poll_result' => 'poll_response',
     ];
+
     return $aliases[$action] ?? $action;
 }
 
 try {
     $input = dcloud_read_input();
     $action = dcloud_normalize_action((string)($input['action'] ?? ''));
-    // Polling actions are latency-sensitive and can run very frequently.
-    // Avoid a full relay filesystem sweep on every long-poll cycle.
+
     if (!in_array($action, ['poll_requests', 'poll_response'], true)) {
         dcloud_cleanup_if_due();
     }
@@ -765,32 +895,36 @@ try {
 
     switch ($action) {
         case 'health':
-            dcloud_json_response(array_merge(['ok' => true, 'version' => DCLOUD_RELAY_VERSION, 'time' => time()], dcloud_current_relay_token()));
-            return;
+            dcloud_json_response(array_merge(
+                ['ok' => true, 'version' => DCLOUD_RELAY_VERSION, 'time' => time()],
+                dcloud_current_relay_token()
+            ));
+            break;
+
         case 'register':
             dcloud_register($input);
-            return;
+            break;
+
         case 'enqueue_request':
             dcloud_enqueue_request($input);
-            return;
+            break;
+
         case 'poll_requests':
             dcloud_poll_requests($input);
-            return;
+            break;
+
         case 'post_response':
             dcloud_post_response($input);
-            return;
+            break;
+
         case 'poll_response':
             dcloud_poll_response($input);
-            return;
+            break;
+
         default:
-            // Unknown actions are client/protocol errors, not a missing PHP file.
-            // Return 400 instead of 404 so hosting logs and the UI do not look
-            // like the relay endpoint itself is unreachable.
             dcloud_fail('Unbekannte Relay-Aktion: ' . $action, 400);
     }
 } catch (Throwable $exception) {
-    // Last-resort safety net: malformed external requests must produce JSON,
-    // not a PHP fatal page in the webserver log.
     dcloud_json_response([
         'ok' => false,
         'message' => 'Relay-Fehler: ' . $exception->getMessage(),
