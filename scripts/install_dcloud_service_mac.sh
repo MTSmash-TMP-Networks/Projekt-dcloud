@@ -180,12 +180,66 @@ PLIST
   launchctl load "$plist_path"
 }
 
+setup_launchd_auto_update() {
+  local update_script="${INSTALL_DIR}/update_dcloud.sh"
+  cat > "$update_script" <<SCRIPT
+#!/usr/bin/env bash
+set -euo pipefail
+cd "${INSTALL_DIR}"
+
+if [ ! -d .git ]; then
+  exit 0
+fi
+
+git remote update --prune
+LOCAL_SHA=\$(git rev-parse @)
+REMOTE_SHA=\$(git rev-parse @{u})
+
+if [ "\$LOCAL_SHA" = "\$REMOTE_SHA" ]; then
+  exit 0
+fi
+
+launchctl unload "$HOME/Library/LaunchAgents/${SERVICE_NAME}.plist" >/dev/null 2>&1 || true
+git pull --ff-only
+"${INSTALL_DIR}/.venv/bin/pip" install -r "${INSTALL_DIR}/requirements.txt"
+launchctl load "$HOME/Library/LaunchAgents/${SERVICE_NAME}.plist"
+SCRIPT
+  chmod +x "$update_script"
+
+  local plist_path="$HOME/Library/LaunchAgents/${SERVICE_NAME}.autoupdate.plist"
+  cat > "$plist_path" <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>${SERVICE_NAME}.autoupdate</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>${update_script}</string>
+  </array>
+  <key>StartInterval</key>
+  <integer>300</integer>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>StandardOutPath</key>
+  <string>${INSTALL_DIR}/logs/dcloud.autoupdate.out.log</string>
+  <key>StandardErrorPath</key>
+  <string>${INSTALL_DIR}/logs/dcloud.autoupdate.err.log</string>
+</dict>
+</plist>
+PLIST
+  launchctl unload "$plist_path" >/dev/null 2>&1 || true
+  launchctl load "$plist_path"
+}
+
 main() {
   ensure_runtime_macos
   install_repo
   setup_python_venv
   write_config "$INSTALL_DIR/config.yml"
   setup_launchd
+  setup_launchd_auto_update
   cat <<DONE
 ✅ dcloud wurde auf macOS eingerichtet.
 Service-Label: $SERVICE_NAME
