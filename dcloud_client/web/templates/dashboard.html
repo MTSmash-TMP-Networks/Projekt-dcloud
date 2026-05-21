@@ -791,7 +791,7 @@
     <nav class="taskbar" aria-label="Taskleiste" id="taskbar">
       <button class="start" id="startBtn" type="button">Start</button>
       <span id="taskbar-apps"></span>
-      <span class="tray"><span id="tray-files">0 Datei(en)</span><span>dcloud</span></span>
+      <span class="tray"><span id="tray-files">0 Datei(en)</span><span id="tray-peer-name">Peer: -</span><span>dcloud</span></span>
     </nav>
   </div>
 
@@ -829,6 +829,7 @@
 
       const desktopArea = document.getElementById("desktopArea");
       const taskbarApps = document.getElementById("taskbar-apps");
+      const trayPeerName = document.getElementById("tray-peer-name");
       const uploadInput = document.getElementById("desktop-upload-input");
       const ctx = document.getElementById("ctxMenu");
       const folderDialog = document.getElementById("folderDialog");
@@ -1000,6 +1001,8 @@
         document.getElementById("status-storage-used").textContent = formatBytes(appState.stats.usedBytes);
         document.getElementById("status-network-capacity").textContent = formatBytes(capacity.networkLimitBytes || settings.networkLimitBytes || appState.stats.limitBytes);
         document.getElementById("status-network-capacity-sub").textContent = `${capacity.storagePeerCount || settings.storagePeerCount || 0} aktive Speicher-Peer(s)`;
+        const ownPeerName = String(settings.nodeName || "").trim() || String(appState.nodeId || "Peer").slice(0, 12);
+        if(trayPeerName) trayPeerName.textContent = `Peer: ${ownPeerName}`;
         const smbEnabled = !!settings.smbEnabled;
         const smbRunning = !!settings.smbRunning;
         const smbPort = settings.smbPort || 445;

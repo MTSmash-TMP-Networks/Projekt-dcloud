@@ -225,6 +225,7 @@ def create_app(
                 "SMB-Server läuft nicht. Prüfe Logausgabe, Port-Freigabe und ob der Speicherpfad verfügbar ist."
             )
         return {
+            "nodeName": config.node.name,
             "clientType": config.node.client_type,
             "clientTypeLabel": client_type_label(config.node.client_type),
             "acceptsPeerStorage": _accepts_peer_storage(current_peers),
