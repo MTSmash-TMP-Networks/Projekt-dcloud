@@ -340,7 +340,7 @@ case "$TARGET_OS" in
     ;;
   openwrt)
     opkg update || true
-    opkg install python3 python3-pip git-http ca-bundle || true
+    opkg install python3 python3-pip python3-venv python3-virtualenv py3-virtualenv git-http ca-bundle || true
     install_repo
     setup_python_venv
     write_config "$INSTALL_DIR/config.yml"
