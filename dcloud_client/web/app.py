@@ -1118,6 +1118,7 @@ def create_app(
             remote_successes = 0
             local_removed = 0
             remote_failures = 0
+            removal_candidates: list[str] = []
 
             for chunk in manifest.chunks:
                 entry = dict(chunk)
@@ -1158,7 +1159,7 @@ def create_app(
                     if add_only:
                         entry["locations"] = list(dict.fromkeys([*locations, identity.node_id])) or [identity.node_id]
                     else:
-                        chunk_store.chunk_path(digest).unlink(missing_ok=True)
+                        removal_candidates.append(digest)
                         local_removed += 1
                         entry["locations"] = list(dict.fromkeys(locations))
                 else:
@@ -1183,6 +1184,17 @@ def create_app(
                 chunks=updated_chunks,
                 placement=placement,
             )
+            # Chunk-Dateien nur löschen, wenn sie in keinem verbleibenden Manifest mehr referenziert werden.
+            # So verlieren deduplizierte Dateien ihre gemeinsamen Chunk-Daten nicht.
+            if removal_candidates:
+                local_removed = manifest_store.delete_chunks_if_unreferenced(removal_candidates)
+                placement["offloaded_local_chunks"] = local_removed
+                placement["transfer_status"] = "replicated_with_local_copy" if add_only else ("stored_on_peers" if local_removed else "local_only")
+                updated_manifest = manifest_store.update_placement(
+                    updated_manifest.manifest_id,
+                    identity,
+                    placement=placement,
+                )
 
             if add_only and remote_successes:
                 message = f"Zusätzlicher Knoten erstellt: {remote_successes} Chunk-Kopie(n) auf Ziel-Peer übertragen (lokale Sicherheitskopie bleibt erhalten)"
