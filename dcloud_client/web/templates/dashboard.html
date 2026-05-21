@@ -309,6 +309,22 @@
     .status-kpi{ font-size:1.32rem; font-weight:760; color:var(--accent); overflow-wrap:anywhere; }
     .status-sub{ color:var(--muted); font-size:.87rem; }
     .status-list{ margin:.45rem 0 0; padding-left:1rem; color:#1c2f4d; font-size:.92rem; }
+    .status-log-wrap{ margin-top:1rem; }
+    .status-log-box{
+      margin-top:.4rem;
+      background:#091326;
+      color:#d5e8ff;
+      border:1px solid #214472;
+      border-radius:12px;
+      padding:.7rem;
+      font-family:ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size:.78rem;
+      line-height:1.35;
+      max-height:210px;
+      overflow:auto;
+      white-space:pre-wrap;
+      user-select:text;
+    }
     .settings-form{ max-width:640px; display:grid; gap:.85rem; }
     .settings-form input[type="text"], .settings-form input[type="number"], .settings-form input[type="url"], .settings-form input[type="password"], .settings-form textarea, .settings-form select{
       width:100%; padding:.55rem .6rem; border:1px solid #aebbd0; border-radius:10px; background:#fff; color:var(--text);
@@ -653,6 +669,11 @@
           <section class="status-card"><h3>Verbund-Kapazität</h3><div class="status-kpi" id="status-network-capacity">0 B</div><div class="status-sub" id="status-network-capacity-sub">0 aktive Speicher-Peers</div></section>
           <section class="status-card"><h3>GitHub-Stand</h3><div class="status-kpi" id="status-git-revision">-</div><div class="status-sub">Lokaler Git Commit (short SHA)</div></section>
         </div>
+        <div class="status-log-wrap">
+          <h3>Logs</h3>
+          <div class="status-sub" id="status-log-source">Lade Audit-Log…</div>
+          <pre class="status-log-box" id="status-log-output">Lade Logs…</pre>
+        </div>
       </div>
     </section>
 
@@ -902,6 +923,7 @@
       let refreshRequestSeq = 0;
       let latestAppliedRefreshSeq = 0;
       let lastSuccessfulUploadAt = 0;
+      let lastLogsFetchAt = 0;
       const UPLOAD_SESSION_KEY = "dcloud_active_upload_ids";
 
       const windows = {
@@ -1038,6 +1060,19 @@
         if(requestSeq < latestAppliedRefreshSeq) return;
         latestAppliedRefreshSeq = requestSeq;
         applyState(data);
+        if(Date.now() - lastLogsFetchAt > 12000){
+          refreshLogs().catch(() => {});
+        }
+      }
+
+      async function refreshLogs(){
+        const response = await fetch("/api/logs", { cache:"no-store", headers: { "Accept":"application/json" } });
+        const data = await response.json();
+        lastLogsFetchAt = Date.now();
+        const output = document.getElementById("status-log-output");
+        const source = document.getElementById("status-log-source");
+        if(source) source.textContent = `Quelle: ${data.manifestAuditPath || "-"} · Aktualisiert: ${data.updatedAt || "-"}`;
+        if(output) output.textContent = String(data.manifestAuditLog || "Keine Logs verfügbar.");
       }
 
       function renderStats(){
@@ -2252,11 +2287,13 @@ ${file.name}`)) return;
       });
 
       applyState(appState);
+      refreshLogs().catch(() => {});
       setTransferPanelExpanded(false);
       updateQueueDisplay();
       updateTaskbar();
       restorePersistedUploads().catch(() => {});
       setInterval(() => { refreshState().catch(() => {}); }, 5000);
+      setInterval(() => { refreshLogs().catch(() => {}); }, 15000);
     })();
   </script>
 </body>
