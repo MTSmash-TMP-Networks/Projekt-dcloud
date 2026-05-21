@@ -1001,7 +1001,7 @@
         document.getElementById("status-storage-used").textContent = formatBytes(appState.stats.usedBytes);
         document.getElementById("status-network-capacity").textContent = formatBytes(capacity.networkLimitBytes || settings.networkLimitBytes || appState.stats.limitBytes);
         document.getElementById("status-network-capacity-sub").textContent = `${capacity.storagePeerCount || settings.storagePeerCount || 0} aktive Speicher-Peer(s)`;
-        const ownPeerName = String(settings.nodeName || "").trim() || String(appState.nodeId || "Peer").slice(0, 12);
+        const ownPeerName = String(settings.nodeDisplayName || settings.nodeName || "").trim() || String(appState.nodeId || "Peer").slice(0, 12);
         if(trayPeerName) trayPeerName.textContent = `Peer: ${ownPeerName}`;
         const smbEnabled = !!settings.smbEnabled;
         const smbRunning = !!settings.smbRunning;
