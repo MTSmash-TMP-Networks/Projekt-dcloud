@@ -17,7 +17,7 @@ from threading import RLock
 from typing import Any
 
 
-@dataclass(slots=True)
+@dataclass
 class UploadProgress:
     upload_id: str
     known: bool = True

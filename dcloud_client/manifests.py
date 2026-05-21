@@ -26,7 +26,7 @@ MANIFEST_META_FILES = {"folders.json", "share_revocations.json", "file_deletions
 LOG = logging.getLogger("dcloud.manifest_store")
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True)
 class FileManifest:
     manifest_id: str
     file_name: str

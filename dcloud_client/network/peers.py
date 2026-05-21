@@ -36,7 +36,7 @@ def display_name_for_peer(node_id: str, configured_name: str | None = None) -> s
     return f"{adjective} {noun} {suffix}"
 
 
-@dataclass(slots=True)
+@dataclass
 class Peer:
     node_id: str
     host: str
