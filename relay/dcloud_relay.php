@@ -814,11 +814,18 @@ function dcloud_poll_requests(array $input): void {
         $requests = [];
         foreach (array_slice($files, 0, $max) as $file) {
             $payload = dcloud_read_json_file($file, []);
-            @unlink($file);
             if ($payload && dcloud_envelope_is_valid($payload)) {
                 $requests[] = $payload;
+                @unlink($file);
             } else {
                 dcloud_log_event('warning', ['message' => 'Ungueltiger Queue-Eintrag wurde verworfen', 'file' => basename($file)]);
+                // Keep malformed/incomplete files for a short time so a
+                // concurrent writer or transient read does not permanently
+                // lose queued relay requests.
+                $age = time() - (int)@filemtime($file);
+                if ($age > 30) {
+                    @unlink($file);
+                }
             }
         }
 
