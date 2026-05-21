@@ -82,8 +82,15 @@ class UploadProgress:
 class UploadProgressTracker:
     """Thread-safe process-local upload progress registry."""
 
-    def __init__(self, *, ttl_seconds: int = 900, persist_dir: str | Path | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        ttl_seconds: int = 900,
+        persist_dir: str | Path | None = None,
+        active_stall_seconds: int = 120,
+    ) -> None:
         self.ttl_seconds = int(ttl_seconds)
+        self.active_stall_seconds = max(15, int(active_stall_seconds))
         self._items: dict[str, UploadProgress] = {}
         self._lock = RLock()
         self._persist_dir = Path(persist_dir).expanduser() if persist_dir else None
@@ -209,6 +216,26 @@ class UploadProgressTracker:
                     break
             return rows
 
+    def _mark_stalled_locked(self, now: float | None = None) -> None:
+        now = now or time.time()
+        stall_cutoff = now - self.active_stall_seconds
+        for item in self._items.values():
+            if not item.active:
+                continue
+            if float(item.updated_at or 0.0) >= stall_cutoff:
+                continue
+            item.active = False
+            item.ok = False
+            item.phase = "failed"
+            item.status = "Fehlgeschlagen"
+            item.message = (
+                "Upload wurde unterbrochen (Browser/Verbindung geschlossen). "
+                "Bitte Upload erneut starten."
+            )
+            item.finished_at = now
+            item.updated_at = now
+            self._save_item(item)
+
     def start(self, upload_id: str, *, file_name: str = "", folder_path: str = "", total_bytes: int = 0) -> None:
         now = time.time()
         with self._lock:
@@ -279,7 +306,10 @@ class UploadProgressTracker:
             self._save_item(item)
 
     def cleanup(self) -> None:
-        cutoff = time.time() - self.ttl_seconds
+        now = time.time()
+        with self._lock:
+            self._mark_stalled_locked(now)
+        cutoff = now - self.ttl_seconds
         with self._lock:
             stale = [
                 upload_id
