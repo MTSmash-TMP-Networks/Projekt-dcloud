@@ -295,12 +295,15 @@ class ManifestStore:
         return visibility in {"shared", "public"}
 
     def may_access(self, manifest: FileManifest, node_id: str) -> bool:
-        if manifest.owner_node_id == node_id:
+        current_node_id = str(node_id)
+        if str(manifest.owner_node_id) == current_node_id:
             return True
         access = manifest.access or {}
-        visibility = access.get("visibility")
+        visibility = str(access.get("visibility") or "").lower()
+        if visibility == "public":
+            return True
         shared_with = {str(item) for item in access.get("shared_with", [])}
-        return visibility in {"shared", "public"} and ("*" in shared_with or node_id in shared_with)
+        return visibility == "shared" and ("*" in shared_with or current_node_id in shared_with)
 
     def _resign_manifest(
         self,
