@@ -746,6 +746,7 @@
       <button type="button" id="ctxOpen"><span>Öffnen</span><span class="kbd">Enter</span></button>
       <button type="button" id="ctxDownload"><span>Download</span><span class="kbd">Ctrl+S</span></button>
       <button type="button" id="ctxShare"><span>Freigabe…</span><span class="kbd">Ctrl+H</span></button>
+      <button type="button" id="ctxOffload"><span>Auf Peers auslagern</span><span class="kbd">Ctrl+O</span></button>
       <button type="button" id="ctxDelete" style="color:#b42318;"><span>Löschen</span><span class="kbd">Del</span></button>
       <div class="sep"></div>
       <button type="button" id="ctxUpload"><span>Upload hier…</span><span class="kbd">Ctrl+U</span></button>
@@ -906,7 +907,8 @@
             owner: file.owner_node_id === appState.nodeId,
             downloadUrl: file.download_url || `/download/${file.manifest_id}`,
             deleteUrl: file.delete_url || `/files/${file.manifest_id}/delete`,
-            shareUrl: file.share_url || `/files/${file.manifest_id}/share`
+            shareUrl: file.share_url || `/files/${file.manifest_id}/share`,
+            offloadUrl: file.offload_url || `/files/${file.manifest_id}/offload`
           })).sort((a,b)=>a.name.localeCompare(b.name));
         });
         fsMap.forEach(node => node.folders.sort((a,b)=>a.localeCompare(b)));
@@ -1310,6 +1312,7 @@
         document.getElementById("ctxOpen").hidden = !(isFile || isFolder);
         document.getElementById("ctxDownload").hidden = !isFile;
         document.getElementById("ctxShare").hidden = !isOwnerFile;
+        document.getElementById("ctxOffload").hidden = !isOwnerFile;
         document.getElementById("ctxDelete").hidden = !(isOwnerFile || isDeletableFolder);
         document.getElementById("ctxUpload").hidden = false;
         const share = document.getElementById("ctxShare").querySelector("span");
@@ -1688,6 +1691,13 @@
         openShareDialog(file);
       }
 
+      async function offloadFile(file){
+        if(!file.owner) throw new Error("Nur der Eigentümer kann auslagern");
+        if(!confirm(`Lokale Chunk-Kopien auslagern und auf Peers verteilen?
+${file.name}`)) return;
+        await ajaxPost(file.offloadUrl, { next:"/" });
+      }
+
       desktopArea.addEventListener("click", event => {
         const item = event.target.closest(".desk-item");
         document.querySelectorAll(".desk-item.selected").forEach(el => el.classList.remove("selected"));
@@ -1806,6 +1816,7 @@
       };
       document.getElementById("ctxDownload").onclick = () => { closeCtx(); if(selectedTarget.kind === "file") window.location.href = selectedTarget.file.downloadUrl; };
       document.getElementById("ctxShare").onclick = () => { closeCtx(); if(selectedTarget.kind === "file") toggleShare(selectedTarget.file).catch(error => showToast(error.message, "error")); };
+      document.getElementById("ctxOffload").onclick = () => { closeCtx(); if(selectedTarget.kind === "file") offloadFile(selectedTarget.file).catch(error => showToast(error.message, "error")); };
       document.getElementById("ctxDelete").onclick = () => {
         closeCtx();
         if(selectedTarget.kind === "file") deleteFile(selectedTarget.file).catch(error => showToast(error.message, "error"));
@@ -1877,6 +1888,10 @@
         if(event.ctrlKey && (event.key === "s" || event.key === "S") && selectedTarget.kind === "file"){
           event.preventDefault();
           window.location.href = selectedTarget.file.downloadUrl;
+        }
+        if(event.ctrlKey && (event.key === "o" || event.key === "O") && selectedTarget.kind === "file" && selectedTarget.file.owner){
+          event.preventDefault();
+          offloadFile(selectedTarget.file).catch(error => showToast(error.message, "error"));
         }
         if(event.ctrlKey && (event.key === "h" || event.key === "H") && selectedTarget.kind === "file" && selectedTarget.file.owner){
           event.preventDefault();
