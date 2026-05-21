@@ -90,6 +90,8 @@ def create_app(
     relay_lock = threading.RLock()
     p2p_client = P2PStorageClient(default_web_port=config.web.port)
     upload_progress = UploadProgressTracker()
+    replication_repair_lock = threading.Lock()
+    last_replication_repair_at = 0.0
 
     def _is_ajax_request() -> bool:
         return request.headers.get("X-Requested-With") == "XMLHttpRequest" or request.accept_mimetypes.best == "application/json"
@@ -193,6 +195,55 @@ def create_app(
 
     def _eligible_storage_peer_node_ids() -> list[str]:
         return [peer.node_id for peer in _eligible_storage_peers()]
+
+    def _repair_under_replicated_manifests(peers: list[Any] | None = None, *, min_interval_seconds: float = 20.0) -> None:
+        """Best-effort healing for chunks that temporarily lost remote replicas."""
+        nonlocal last_replication_repair_at
+        now = time.monotonic()
+        if now - last_replication_repair_at < max(1.0, float(min_interval_seconds)):
+            return
+        if not replication_repair_lock.acquire(blocking=False):
+            return
+        try:
+            last_replication_repair_at = now
+            active_peers = _eligible_storage_peers(peers)
+            peers_by_id = {peer.node_id: peer for peer in active_peers}
+            if not peers_by_id:
+                return
+            for manifest in manifest_store.list_manifests():
+                if manifest.owner_node_id != identity.node_id:
+                    continue
+                manifest_changed = False
+                for chunk in manifest.chunks:
+                    existing_locations = [str(node_id) for node_id in chunk.get("locations", []) if str(node_id)]
+                    remote_locations = [node_id for node_id in existing_locations if node_id != identity.node_id]
+                    if remote_locations:
+                        continue
+                    digest = str(chunk.get("hash", ""))
+                    if not digest:
+                        continue
+                    try:
+                        stored_data = chunk_store.read_stored_chunk(digest)
+                    except StorageError:
+                        continue
+                    for peer_id, peer in peers_by_id.items():
+                        transfer = p2p_client.put_chunk(
+                            peer,
+                            digest=digest,
+                            stored_data=stored_data,
+                            original_size=int(chunk.get("size", len(stored_data))),
+                            stored_size=int(chunk.get("stored_size", len(stored_data))),
+                            index=int(chunk.get("index", 0)),
+                            compression=str(chunk.get("compression")) if chunk.get("compression") else None,
+                        )
+                        if transfer.ok:
+                            chunk["locations"] = list(dict.fromkeys([*existing_locations, peer_id]))
+                            manifest_changed = True
+                            break
+                if manifest_changed:
+                    manifest_store.save(manifest)
+        finally:
+            replication_repair_lock.release()
 
     def _network_storage_capacity(stats: StorageStats, peers: list[Any]) -> dict[str, int]:
         eligible = _eligible_storage_peers(peers)
@@ -592,6 +643,7 @@ def create_app(
         _sync_peer_connector_settings()
         stats = chunk_store.stats()
         peers = _list_active_peers()
+        _repair_under_replicated_manifests(peers)
         _deliver_pending_share_revocations(peers)
         _deliver_pending_file_deletions(peers)
         manifests = manifest_store.list_visible_for_node(identity.node_id)
