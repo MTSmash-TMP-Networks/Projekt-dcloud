@@ -18,7 +18,10 @@ import subprocess
 
 from flask import Flask, Response, abort, flash, jsonify, redirect, render_template, request, send_file, url_for
 from werkzeug.utils import secure_filename
-from smb.SMBConnection import SMBConnection
+try:
+    from smb.SMBConnection import SMBConnection
+except ImportError:
+    SMBConnection = None
 
 
 from ..config import (
@@ -876,6 +879,10 @@ def create_app(
     @app.post("/upload/smb")
     def upload_from_smb() -> Response:
         upload_id = _safe_upload_id(request.form.get("upload_id"))
+        if SMBConnection is None:
+            message = "SMB-Unterstuetzung ist nicht installiert (Python-Modul 'smb' fehlt)."
+            upload_progress.fail(upload_id, message)
+            return jsonify({"ok": False, "message": message, "uploadId": upload_id, "uploadProgress": upload_progress.get(upload_id)}), 503
         folder_path = sanitize_folder_path(request.form.get("folder", DEFAULT_FOLDER))
         host = (request.form.get("smb_host") or "").strip()
         share = (request.form.get("smb_share") or "").strip()

@@ -29,14 +29,14 @@ DEFAULT_MIN_REPLICAS_WITH_PEERS = 2
 DEFAULT_CHUNK_BATCH_SIZE = 8
 
 
-@dataclass(slots=True)
+@dataclass
 class PeerTransferResult:
     node_id: str
     ok: bool
     message: str = ""
 
 
-@dataclass(slots=True)
+@dataclass
 class DistributedUploadResult:
     chunks: list[dict[str, Any]] = field(default_factory=list)
     targets: list[str] = field(default_factory=list)
