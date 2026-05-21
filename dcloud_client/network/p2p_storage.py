@@ -497,6 +497,31 @@ def distribute_file_chunks(
             stored_data, compression = chunk_store.prepare_chunk_data(raw)
             digest = chunk_store.digest_for_stored_data(stored_data)
             locations: list[str] = []
+            # Keep a deterministic local primary copy for every chunk. This makes
+            # uploads immediately available on the local node and avoids relying
+            # on remote peers for initial durability/visibility in the UI.
+            notify(
+                phase="local_store",
+                status=f"Chunk {index + 1}/{max(total_chunks, 1)} wird lokal gespeichert…",
+                current_chunk=index + 1,
+                current_peer=local_node_id,
+            )
+            chunk_store.write_stored_chunk(
+                stored_data,
+                original_size=len(raw),
+                index=index,
+                compression=compression,
+                digest=digest,
+                validate=False,
+            )
+            result.local_chunks += 1
+            locations.append(local_node_id)
+            notify(
+                phase="local_store_done",
+                status=f"Chunk {index + 1}/{max(total_chunks, 1)} lokal gespeichert",
+                local_chunks=result.local_chunks,
+                current_peer=local_node_id,
+            )
             notify(
                 phase="chunk_compressed",
                 status=f"Chunk {index + 1}/{max(total_chunks, 1)} komprimiert: {len(raw)} -> {len(stored_data)} Bytes",
@@ -513,28 +538,6 @@ def distribute_file_chunks(
                 if node_id in locations:
                     continue
                 if target is None:
-                    notify(
-                        phase="local_store",
-                        status=f"Chunk {index + 1}/{max(total_chunks, 1)} wird lokal als Sicherheitskopie gespeichert…",
-                        current_chunk=index + 1,
-                        current_peer=local_node_id,
-                    )
-                    chunk_store.write_stored_chunk(
-                        stored_data,
-                        original_size=len(raw),
-                        index=index,
-                        compression=compression,
-                        digest=digest,
-                        validate=False,
-                    )
-                    result.local_chunks += 1
-                    locations.append(local_node_id)
-                    notify(
-                        phase="local_store_done",
-                        status=f"Chunk {index + 1}/{max(total_chunks, 1)} lokal gespeichert",
-                        local_chunks=result.local_chunks,
-                        current_peer=local_node_id,
-                    )
                     continue
 
                 peer_name = target.to_dict().get("display_name") or target.name or target.node_id[:12]
