@@ -1492,7 +1492,7 @@
       }
       function readPersistedUploadIds(){
         try{
-          const raw = sessionStorage.getItem(UPLOAD_SESSION_KEY);
+          const raw = localStorage.getItem(UPLOAD_SESSION_KEY);
           if(!raw) return [];
           const parsed = JSON.parse(raw);
           if(!Array.isArray(parsed)) return [];
@@ -1505,10 +1505,10 @@
         try{
           const safe = Array.from(new Set((ids || []).map(id => String(id || "").trim()).filter(Boolean))).slice(-6);
           if(!safe.length){
-            sessionStorage.removeItem(UPLOAD_SESSION_KEY);
+            localStorage.removeItem(UPLOAD_SESSION_KEY);
             return;
           }
-          sessionStorage.setItem(UPLOAD_SESSION_KEY, JSON.stringify(safe));
+          localStorage.setItem(UPLOAD_SESSION_KEY, JSON.stringify(safe));
         }catch(error){
           // ignore storage issues
         }
@@ -1609,7 +1609,12 @@
         return Math.max(0, Math.min(100, Number(progress.serverPercent || 0)));
       }
       function applyUploadProgress(progress){
-        if(!progress || progress.known === false) return;
+        if(!progress) return;
+        if(progress.known === false){
+          document.getElementById("transfer-status").textContent = "Upload läuft im Hintergrund – Status wird synchronisiert…";
+          document.getElementById("transfer-subtitle").textContent = "Nach Seiten-Neuladen wird der Server-Fortschritt wieder verbunden";
+          return;
+        }
         const serverPercent = Math.max(0, Math.min(100, Number(progress.serverPercent || 0)));
         const shownPercent = Math.max(lastTransferPercent, Number(progress.percent || 0));
         if(shownPercent) updateTransfer(shownPercent, progress.status || progress.message || "Server verarbeitet Upload…");
@@ -1839,6 +1844,8 @@
             showTransfer({ name:fileName, size:fileSize }, folder);
             currentUploadId = uploadId;
             if(progress.active){
+              document.getElementById("transfer-status").textContent = "Laufender Upload gefunden – verbinde Fortschritt…";
+              document.getElementById("transfer-subtitle").textContent = "Serveraufgabe wird nach dem Neuladen automatisch weiter beobachtet";
               startUploadPolling(uploadId);
             }else{
               finishTransfer(progress.message || (progress.ok ? "Upload abgeschlossen" : "Upload fehlgeschlagen"), !!progress.ok, progress);
