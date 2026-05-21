@@ -177,6 +177,64 @@ UNIT
   systemctl enable --now "$SERVICE_NAME"
 }
 
+setup_systemd_auto_update() {
+  UPDATE_SCRIPT="$INSTALL_DIR/update_dcloud.sh"
+  cat > "$UPDATE_SCRIPT" <<SCRIPT
+#!/usr/bin/env sh
+set -eu
+cd "$INSTALL_DIR"
+
+if [ ! -d .git ]; then
+  exit 0
+fi
+
+git remote update --prune
+LOCAL_SHA=\$(git rev-parse @)
+REMOTE_SHA=\$(git rev-parse @{u})
+
+if [ "\$LOCAL_SHA" = "\$REMOTE_SHA" ]; then
+  exit 0
+fi
+
+echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] Update erkannt, stoppe Dienst $SERVICE_NAME"
+systemctl stop "$SERVICE_NAME"
+git pull --ff-only
+"$INSTALL_DIR/.venv/bin/pip" install -r "$INSTALL_DIR/requirements.txt"
+echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] Starte Dienst $SERVICE_NAME neu"
+systemctl start "$SERVICE_NAME"
+SCRIPT
+  chmod +x "$UPDATE_SCRIPT"
+
+  UPDATE_SERVICE_FILE="/etc/systemd/system/${SERVICE_NAME}-autoupdate.service"
+  cat > "$UPDATE_SERVICE_FILE" <<UNIT
+[Unit]
+Description=dcloud auto update checker
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=$UPDATE_SCRIPT
+UNIT
+
+  UPDATE_TIMER_FILE="/etc/systemd/system/${SERVICE_NAME}-autoupdate.timer"
+  cat > "$UPDATE_TIMER_FILE" <<UNIT
+[Unit]
+Description=dcloud auto update timer
+
+[Timer]
+OnBootSec=3min
+OnUnitActiveSec=5min
+Unit=${SERVICE_NAME}-autoupdate.service
+
+[Install]
+WantedBy=timers.target
+UNIT
+
+  systemctl daemon-reload
+  systemctl enable --now "${SERVICE_NAME}-autoupdate.timer"
+}
+
 setup_openwrt_init() {
   INIT_FILE="/etc/init.d/${SERVICE_NAME}"
   cat > "$INIT_FILE" <<INIT
@@ -197,6 +255,37 @@ INIT
   chmod +x "$INIT_FILE"
   "$INIT_FILE" enable
   "$INIT_FILE" restart
+}
+
+setup_openwrt_auto_update() {
+  UPDATE_SCRIPT="/usr/bin/${SERVICE_NAME}_autoupdate.sh"
+  cat > "$UPDATE_SCRIPT" <<SCRIPT
+#!/bin/sh
+set -eu
+cd "$INSTALL_DIR"
+
+[ -d .git ] || exit 0
+git remote update --prune
+LOCAL_SHA=\$(git rev-parse @)
+REMOTE_SHA=\$(git rev-parse @{u})
+
+[ "\$LOCAL_SHA" = "\$REMOTE_SHA" ] && exit 0
+
+/etc/init.d/$SERVICE_NAME stop
+git pull --ff-only
+"$INSTALL_DIR/.venv/bin/pip" install -r "$INSTALL_DIR/requirements.txt"
+/etc/init.d/$SERVICE_NAME start
+SCRIPT
+  chmod +x "$UPDATE_SCRIPT"
+
+  CRON_FILE="/etc/crontabs/root"
+  CRON_LINE="*/5 * * * * $UPDATE_SCRIPT >> $INSTALL_DIR/logs/autoupdate.log 2>&1"
+  mkdir -p "$INSTALL_DIR/logs"
+  touch "$CRON_FILE"
+  if ! grep -F "$UPDATE_SCRIPT" "$CRON_FILE" >/dev/null 2>&1; then
+    echo "$CRON_LINE" >> "$CRON_FILE"
+  fi
+  /etc/init.d/cron restart || true
 }
 
 setup_windows_bootstrap() {
@@ -232,6 +321,7 @@ case "$TARGET_OS" in
     setup_python_venv
     write_config "$INSTALL_DIR/config.yml"
     setup_systemd
+    setup_systemd_auto_update
     ;;
   openwrt)
     opkg update || true
@@ -240,6 +330,7 @@ case "$TARGET_OS" in
     setup_python_venv
     write_config "$INSTALL_DIR/config.yml"
     setup_openwrt_init
+    setup_openwrt_auto_update
     ;;
   windows)
     mkdir -p "$INSTALL_DIR"
