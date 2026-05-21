@@ -147,7 +147,6 @@
     #win-network{ left:260px; top:98px; width:690px; height:490px; }
     #win-status{ left:310px; top:126px; width:680px; height:450px; }
     #win-settings{ left:360px; top:154px; width:720px; height:620px; }
-    #win-transfer{ left:calc(50vw - 275px); top:calc(50vh - 250px); width:550px; height:500px; min-width:500px; min-height:440px; resize:none; }
     @keyframes pop{ from{ opacity:.35; transform:scale(.982); } to{ opacity:1; transform:none; } }
 
     .titlebar{
@@ -341,7 +340,36 @@
     .settings-inline{ display:flex; align-items:center; gap:.6rem; flex-wrap:wrap; }
     .settings-inline input[type="number"]{ max-width:150px; }
 
-    .transfer-content{ padding:18px; background:#f8fbff; display:flex; flex-direction:column; gap:12px; }
+    .transfer-panel{
+      position:absolute;
+      top:14px;
+      right:14px;
+      width:min(440px, calc(100vw - 28px));
+      max-height:calc(100vh - 82px);
+      border:1px solid #cfe0f7;
+      border-radius:14px;
+      background:rgba(248,251,255,.98);
+      box-shadow:0 8px 22px rgba(10,38,75,.22);
+      z-index:240;
+      overflow:hidden;
+    }
+    .transfer-panel[hidden]{ display:none; }
+    .transfer-toggle{
+      width:100%;
+      display:flex;
+      align-items:center;
+      justify-content:space-between;
+      gap:10px;
+      border:0;
+      padding:10px 12px;
+      background:linear-gradient(180deg, #e8f2ff, #dcecff);
+      color:#153760;
+      font-weight:700;
+      cursor:pointer;
+    }
+    .transfer-toggle small{ color:#2e527f; font-weight:600; }
+    .transfer-body{ padding:12px; max-height:calc(100vh - 160px); overflow:auto; }
+    .transfer-content{ background:#f8fbff; display:flex; flex-direction:column; gap:12px; }
     .transfer-head{ display:flex; align-items:center; gap:12px; color:#1f3555; }
     .transfer-icon{ width:44px; height:44px; display:grid; place-items:center; border-radius:12px; background:#e8f2ff; font-size:1.8rem; }
     .transfer-title{ font-weight:750; }
@@ -696,15 +724,13 @@
       </div>
     </section>
 
-    <section class="window" id="win-transfer" hidden>
-      <div class="titlebar" data-app="transfer">
-        <span class="title"><span>📋</span><span id="transfer-window-title">Upload-Status</span></span>
-        <div class="window-controls">
-          <button type="button" data-action="min" aria-label="Minimieren">–</button>
-          <button type="button" data-action="close" aria-label="Schließen">×</button>
-        </div>
-      </div>
-      <div class="window-content transfer-content">
+    <aside class="transfer-panel" id="transfer-panel" hidden>
+      <button class="transfer-toggle" id="transfer-toggle" type="button" aria-expanded="true">
+        <span>📋 Upload-Status</span>
+        <small id="transfer-toggle-label">Einklappen</small>
+      </button>
+      <div class="transfer-body" id="transfer-body">
+      <div class="transfer-content">
         <div class="transfer-head">
           <div class="transfer-icon">⬆️</div>
           <div>
@@ -739,8 +765,8 @@
         <div class="transfer-actions">
           <button type="button" class="explorer-btn" id="transfer-cancel">Abbrechen</button>
         </div>
-      </div>
-    </section>
+      </div></div>
+    </aside>
 
     <div class="ctx" id="ctxMenu" role="menu" aria-label="Desktop Kontextmenü">
       <button type="button" id="ctxOpen"><span>Öffnen</span><span class="kbd">Enter</span></button>
@@ -837,22 +863,25 @@
       const shareDialog = document.getElementById("shareDialog");
       const sharePeerSelect = document.getElementById("sharePeerSelect");
       const shareFileLabel = document.getElementById("shareFileLabel");
+      const transferPanel = document.getElementById("transfer-panel");
+      const transferBody = document.getElementById("transfer-body");
+      const transferToggle = document.getElementById("transfer-toggle");
+      const transferToggleLabel = document.getElementById("transfer-toggle-label");
       let pendingShareFile = null;
 
       const windows = {
         explorer: document.getElementById("win-explorer"),
         network: document.getElementById("win-network"),
         status: document.getElementById("win-status"),
-        settings: document.getElementById("win-settings"),
-        transfer: document.getElementById("win-transfer")
+        settings: document.getElementById("win-settings")
       };
       const appLabels = {
         explorer:"📁 Datei-Explorer",
         network:"🌐 Netzwerk",
         status:"🖥️ Status",
-        settings:"⚙️ Einstellungen",
-        transfer:"📋 Upload"
+        settings:"⚙️ Einstellungen"
       };
+      let transferExpanded = true;
 
       function normalizeFolderPath(value){
         const raw = String(value || DEFAULT_FOLDER).replace(/\\/g, "/");
@@ -1232,6 +1261,16 @@
         if(app === "explorer") renderExplorer();
         updateTaskbar();
       }
+      function showTransferPanel(){
+        if(!transferPanel) return;
+        transferPanel.hidden = false;
+      }
+      function setTransferPanelExpanded(expanded){
+        transferExpanded = !!expanded;
+        if(transferBody) transferBody.hidden = !transferExpanded;
+        if(transferToggle) transferToggle.setAttribute("aria-expanded", transferExpanded ? "true" : "false");
+        if(transferToggleLabel) transferToggleLabel.textContent = transferExpanded ? "Einklappen" : "Ausklappen";
+      }
       function focusWindow(app){
         const win = windows[app];
         if(!win || win.hidden) return;
@@ -1249,9 +1288,6 @@
       function closeWindow(app){
         const win = windows[app];
         if(!win) return;
-        if(app === "transfer" && currentUploadXhr){
-          return;
-        }
         win.hidden = true;
         win.classList.remove("maximized");
         openOrder = openOrder.filter(item => item !== app);
@@ -1260,7 +1296,7 @@
       }
       function toggleMaximize(app){
         const win = windows[app];
-        if(!win || app === "transfer") return;
+        if(!win) return;
         if(win.classList.contains("maximized")){
           const prev = prevGeometry[app];
           if(prev){ Object.assign(win.style, prev); }
@@ -1500,7 +1536,8 @@
         pollUploadProgress(uploadId);
       }
       function showTransfer(file, folder){
-        openWindow("transfer");
+        showTransferPanel();
+        setTransferPanelExpanded(true);
         resetTransferDetails(file);
         document.getElementById("transfer-title").textContent = "Datei wird hochgeladen";
         document.getElementById("transfer-subtitle").textContent = "Kopieren nach dcloud Datenspeicher";
@@ -1537,6 +1574,7 @@
         const cancel = document.getElementById("transfer-cancel");
         cancel.textContent = "Schließen";
         cancel.disabled = false;
+        refreshState().catch(() => {});
       }
       function uploadFile(file, folder){
         const targetFolder = normalizeFolderPath(folder || DEFAULT_FOLDER);
@@ -1571,6 +1609,8 @@
           updateTransfer(Math.max(lastTransferPercent, 35), "Übertragung abgeschlossen; Server verarbeitet Chunks…");
           document.getElementById("transfer-browser").textContent = `${formatBytes(file.size)} / ${formatBytes(file.size)}`;
           document.getElementById("transfer-server").textContent = "startet…";
+          document.getElementById("transfer-subtitle").textContent = "Datei ist bereits sichtbar, Peer-Sync läuft im Hintergrund";
+          refreshState().catch(() => {});
           pollUploadProgress(uploadId);
         };
         xhr.onload = () => {
@@ -1858,9 +1898,12 @@ ${file.name}`)) return;
           currentUploadXhr.abort();
           currentUploadXhr = null;
         }else{
-          closeWindow("transfer");
+          if(transferPanel) transferPanel.hidden = true;
         }
       };
+      if(transferToggle){
+        transferToggle.onclick = () => setTransferPanelExpanded(!transferExpanded);
+      }
 
       window.addEventListener("keydown", event => {
         if(event.key === "Escape"){
