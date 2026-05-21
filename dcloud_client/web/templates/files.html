@@ -487,6 +487,7 @@
                            data-download="{{ url_for('download', manifest_id=manifest.manifest_id) }}"
                            data-delete="{{ url_for('delete_file', manifest_id=manifest.manifest_id) }}"
                            data-share="{{ url_for('share_file', manifest_id=manifest.manifest_id) }}"
+                           data-offload="{{ url_for('offload_file_chunks', manifest_id=manifest.manifest_id) }}"
                            data-shared="{% if manifest.access.visibility == 'shared' %}1{% else %}0{% endif %}">
                     <span class="icon">📄</span>
                     <span class="tile-name">{{ manifest.file_name }}</span>
@@ -536,6 +537,9 @@
       <div class="sep"></div>
       <button type="button" id="ctxShare">
         <span>Freigabe umschalten</span><span class="kbd">Ctrl+H</span>
+      </button>
+      <button type="button" id="ctxOffload">
+        <span>Auf Peers auslagern</span><span class="kbd">Ctrl+O</span>
       </button>
       <button type="button" id="ctxDelete" style="color:#b42318;">
         <span>Löschen</span><span class="kbd">Del</span>
@@ -657,6 +661,7 @@
         document.getElementById('ctxOpen').style.display = (hasFile || hasFolder) ? '' : 'none';
         document.getElementById('ctxDownload').style.display = hasFile ? '' : 'none';
         document.getElementById('ctxShare').style.display = isOwner ? '' : 'none';
+        document.getElementById('ctxOffload').style.display = isOwner ? '' : 'none';
         document.getElementById('ctxDelete').style.display = (isOwner || canDeleteFolder) ? '' : 'none';
         const deleteLabel = document.getElementById('ctxDelete').querySelector('span');
         if(canDeleteFolder) deleteLabel.textContent = 'Ordner löschen';
@@ -690,6 +695,19 @@
         actionPost.action = shareUrl;
         postShared.value = isShared ? 'off' : 'on';
         actionPost.submit();
+      });
+
+
+      document.getElementById('ctxOffload').addEventListener('click', ()=>{
+        closeCtx();
+        const offloadUrl = selectedTile?.dataset.offload;
+        if(!offloadUrl) return;
+        if(confirm('Lokale Chunk-Kopien auslagern und auf Peers verteilen?\nDie Datei bleibt verfügbar, solange Peers erreichbar sind.')){
+          actionPost.action = offloadUrl;
+          postShared.value = '';
+          postFolder.value = '';
+          actionPost.submit();
+        }
       });
 
       document.getElementById('ctxDelete').addEventListener('click', ()=>{
@@ -758,6 +776,13 @@
           if(selectedTile?.dataset.download){
             e.preventDefault();
             window.location.href = selectedTile.dataset.download;
+          }
+        }
+
+        if(e.ctrlKey && (e.key === 'o' || e.key === 'O')){
+          if(selectedTile && selectedTile.dataset.owner === '1'){
+            e.preventDefault();
+            document.getElementById('ctxOffload').click();
           }
         }
 
