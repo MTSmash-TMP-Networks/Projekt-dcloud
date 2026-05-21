@@ -151,12 +151,23 @@ setup_python_venv() {
   cd "$INSTALL_DIR"
 
   VENV_ARGS=""
+  VENV_CREATED="false"
   if [ "${TARGET_OS:-}" = "openwrt" ]; then
     VENV_ARGS="--system-site-packages"
   fi
 
-  if ! python3 -m venv $VENV_ARGS .venv; then
-    echo "⚠️ python3 -m venv fehlgeschlagen, versuche virtualenv-Fallback..."
+  if [ "${TARGET_OS:-}" = "openwrt" ] && command -v virtualenv >/dev/null 2>&1; then
+    if virtualenv $VENV_ARGS .venv >/dev/null 2>&1; then
+      VENV_CREATED="true"
+    fi
+  fi
+
+  if [ "$VENV_CREATED" != "true" ] && python3 -m venv $VENV_ARGS .venv >/dev/null 2>&1; then
+    VENV_CREATED="true"
+  fi
+
+  if [ "$VENV_CREATED" != "true" ]; then
+    echo "⚠️ venv-Erstellung fehlgeschlagen, versuche virtualenv-Fallback..."
     rm -rf .venv
 
     if ! python3 -m virtualenv $VENV_ARGS .venv 2>/dev/null && ! virtualenv $VENV_ARGS .venv 2>/dev/null; then
@@ -171,13 +182,24 @@ setup_python_venv() {
     fi
   fi
 
+  if ! "$INSTALL_DIR/.venv/bin/python" -m pip --version >/dev/null 2>&1; then
+    echo "⚠️ pip fehlt in der virtuellen Umgebung, versuche ensurepip..."
+    "$INSTALL_DIR/.venv/bin/python" -m ensurepip --upgrade >/dev/null 2>&1 || true
+  fi
+
+  if ! "$INSTALL_DIR/.venv/bin/python" -m pip --version >/dev/null 2>&1; then
+    echo "❌ pip ist in der virtuellen Umgebung nicht verfuegbar." >&2
+    echo "   Installiere python3-pip (opkg) und starte die Installation erneut." >&2
+    exit 1
+  fi
+
   "$INSTALL_DIR/.venv/bin/python" -m pip install --upgrade pip
   if [ "${TARGET_OS:-}" = "openwrt" ]; then
-    # OpenWrt nutzt bereits opkg-Pakete (u.a. cryptography/cffi/pyyaml).
-    # Diese Wheels werden auf OpenWrt oft nicht bereitgestellt und ein Source-Build
-    # scheitert regelmaessig (Rust/Build-Toolchain fehlt). Deshalb installieren wir
-    # nur die fehlenden Python-Userland-Abhaengigkeiten via pip.
-    "$INSTALL_DIR/.venv/bin/python" -m pip install --no-cache-dir --prefer-binary "Flask>=3.0,<4.0"
+    # OpenWrt soll Flask primaer aus opkg nutzen (python3-flask).
+    # Fallback auf pip nur falls das Paket im Feed nicht vorhanden ist.
+    if ! "$INSTALL_DIR/.venv/bin/python" -c "import flask" >/dev/null 2>&1; then
+      "$INSTALL_DIR/.venv/bin/python" -m pip install --no-cache-dir --prefer-binary "Flask>=3.0,<4.0"
+    fi
   else
     "$INSTALL_DIR/.venv/bin/python" -m pip install -r requirements.txt
   fi
@@ -283,6 +305,30 @@ INIT
   chmod +x "$INIT_FILE"
   "$INIT_FILE" enable
   "$INIT_FILE" restart
+  sleep 2
+  if ! "$INIT_FILE" status >/dev/null 2>&1; then
+    echo "⚠️ Dienst $SERVICE_NAME wurde gestartet, meldet aber keinen laufenden Status." >&2
+    echo "   Bitte pruefe: logread | tail -n 120" >&2
+    return 0
+  fi
+
+  WEB_PORT="$(awk '/^[[:space:]]*port:[[:space:]]*[0-9]+[[:space:]]*$/ {print $2; exit}' "$INSTALL_DIR/config.yml" 2>/dev/null || true)"
+  [ -n "${WEB_PORT:-}" ] || WEB_PORT="8787"
+  ATTEMPTS=10
+  while [ "$ATTEMPTS" -gt 0 ]; do
+    if command -v ss >/dev/null 2>&1 && ss -ltn 2>/dev/null | grep -q "[\.\:]$WEB_PORT[[:space:]]"; then
+      return 0
+    fi
+    sleep 1
+    ATTEMPTS=$((ATTEMPTS - 1))
+  done
+
+  echo "⚠️ Dienst $SERVICE_NAME laeuft, aber Port $WEB_PORT lauscht noch nicht." >&2
+  echo "   Bitte pruefe: /etc/init.d/$SERVICE_NAME status" >&2
+  echo "   und: logread | tail -n 120" >&2
+  if [ -f "$INSTALL_DIR/config.yml" ]; then
+    echo "   Konfig-Port laut $INSTALL_DIR/config.yml: $WEB_PORT" >&2
+  fi
 }
 
 setup_openwrt_auto_update() {
@@ -353,7 +399,7 @@ case "$TARGET_OS" in
     ;;
   openwrt)
     opkg update || true
-    opkg install python3 python3-pip python3-cryptography python3-cffi python3-pycparser python3-yaml git-http ca-bundle || true
+    opkg install python3 python3-pip python3-flask python3-cryptography python3-cffi python3-pycparser python3-yaml git-http ca-bundle || true
     install_repo
     setup_python_venv
     write_config "$INSTALL_DIR/config.yml"
