@@ -459,6 +459,19 @@ class ManifestStore:
         records.append(record)
         self._save_share_revocations(records)
 
+    def clear_share_revocation(self, manifest_id: str, owner_node_id: str) -> bool:
+        """Remove stored revocation tombstones for a manifest when it is shared again."""
+        records = self._load_share_revocations()
+        kept = [
+            record
+            for record in records
+            if not (record.get("manifest_id") == str(manifest_id) and record.get("owner_node_id") == str(owner_node_id))
+        ]
+        if len(kept) == len(records):
+            return False
+        self._save_share_revocations(kept)
+        return True
+
     def list_pending_share_revocations(self, owner_node_id: str) -> list[dict[str, Any]]:
         """Return owner-created revocations that still need peer delivery."""
         pending: list[dict[str, Any]] = []
