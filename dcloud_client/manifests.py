@@ -467,7 +467,11 @@ class ManifestStore:
                 continue
             targets = set(record.get("target_node_ids", []))
             delivered = set(record.get("delivered_node_ids", []))
-            if "*" in targets or targets - delivered:
+            if "*" in targets:
+                if not delivered:
+                    pending.append(record)
+                continue
+            if targets - delivered:
                 pending.append(record)
         return pending
 
@@ -555,7 +559,11 @@ class ManifestStore:
                 continue
             targets = set(record.get("target_node_ids", []))
             delivered = set(record.get("delivered_node_ids", []))
-            if "*" in targets or targets - delivered:
+            if "*" in targets:
+                if not delivered:
+                    pending.append(record)
+                continue
+            if targets - delivered:
                 pending.append(record)
         return pending
 
