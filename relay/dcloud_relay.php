@@ -652,7 +652,7 @@ function dcloud_sanitize_peer($peer, string $nodeId): array {
     if (!is_array($peer)) dcloud_fail('Peer-Metadaten fehlen', 400);
 
     $clientType = $peer['client_type'] ?? null;
-    if (!in_array($clientType, ['server', 'pc'], true)) $clientType = null;
+    if (!in_array($clientType, ['server'], true)) $clientType = null;
 
     $relayUrls = dcloud_sanitize_relay_urls($peer['relay_urls'] ?? ($peer['relay_url'] ?? null));
 

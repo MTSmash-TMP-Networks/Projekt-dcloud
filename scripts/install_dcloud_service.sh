@@ -5,7 +5,7 @@ set -eu
 # Beispiel via curl:
 #   curl -fsSL https://raw.githubusercontent.com/MTSmash-TMP-Networks/Projekt-dcloud/main/scripts/install_dcloud_service.sh | sh -s -- --role server --storage-gb 200 --enable-smb
 
-ROLE="pc"
+ROLE="server"
 STORAGE_GB="50"
 ENABLE_SMB="false"
 SMB_USER=""
@@ -17,7 +17,7 @@ TARGET_OS="auto"
 usage() {
   cat <<USAGE
 Usage: $0 [options]
-  --role pc|server          Node-Rolle (default: pc)
+  --role server          Node-Rolle (default: server)
   --storage-gb N            Freigegebener Speicher in GB, min. 5 (default: 50)
   --enable-smb              SMB aktivieren
   --disable-smb             SMB deaktivieren
@@ -47,8 +47,8 @@ while [ "$#" -gt 0 ]; do
 done
 
 case "$ROLE" in
-  pc|server) ;;
-  *) echo "--role muss pc oder server sein" >&2; exit 1 ;;
+  server) ;;
+  *) echo "--role muss server sein" >&2; exit 1 ;;
 esac
 
 case "$STORAGE_GB" in

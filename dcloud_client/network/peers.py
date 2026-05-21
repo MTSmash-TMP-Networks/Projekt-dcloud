@@ -23,7 +23,7 @@ _NOUNS = [
 def display_name_for_peer(node_id: str, configured_name: str | None = None) -> str:
     """Return a memorable, stable name for UI lists and sharing dialogs."""
     configured = (configured_name or "").strip()
-    if configured and configured.lower() not in {"dcloud-node", "node", "client", "pc", "server"}:
+    if configured and configured.lower() not in {"dcloud-node", "node", "client", "server"}:
         return configured
     digest = node_id.replace("-", "") or "0"
     try:

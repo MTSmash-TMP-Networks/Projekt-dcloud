@@ -1,6 +1,6 @@
 # dcloud Client MVP – dezentraler Datenspeicher
 
-Dieses Repository enthält eine erste Python-MVP-Codebasis für einen später dezentralen Storage-Client. Der Client läuft lokal, erzeugt beim ersten Start eine eigene Node-Identität, stellt konfigurierbaren Speicher bereit, komprimiert Uploads, zerlegt sie in content-addressed Chunks und erzeugt signierte Manifeste. In den Einstellungen kann der Knoten als **Server** oder **PC** markiert werden und der freigegebene Speicher wird mit mindestens 5 GB begrenzt. Eine zentrale API ist **nicht** fest verdrahtet: Jeder Client lauscht selbst als kleiner UDP-Discovery-Server und sucht im LAN automatisch nach sichtbaren dcloud-Clients auf UDP-Port **6881**. Zusätzlich ist ein öffentliches PHP-HTTP-Relay fest hinterlegt, damit Peers außerhalb des gleichen Heimnetzwerks per Webserver-Mailbox miteinander kommunizieren können; weitere selbst gehostete Relays können in den Einstellungen ergänzt werden und werden per Discovery/Gossip im Netzwerk verteilt.
+Dieses Repository enthält eine erste Python-MVP-Codebasis für einen später dezentralen Storage-Client. Der Client läuft lokal, erzeugt beim ersten Start eine eigene Node-Identität, stellt konfigurierbaren Speicher bereit, komprimiert Uploads, zerlegt sie in content-addressed Chunks und erzeugt signierte Manifeste. In den Einstellungen kann der Knoten als **Server** markiert werden und der freigegebene Speicher wird mit mindestens 5 GB begrenzt. Eine zentrale API ist **nicht** fest verdrahtet: Jeder Client lauscht selbst als kleiner UDP-Discovery-Server und sucht im LAN automatisch nach sichtbaren dcloud-Clients auf UDP-Port **6881**. Zusätzlich ist ein öffentliches PHP-HTTP-Relay fest hinterlegt, damit Peers außerhalb des gleichen Heimnetzwerks per Webserver-Mailbox miteinander kommunizieren können; weitere selbst gehostete Relays können in den Einstellungen ergänzt werden und werden per Discovery/Gossip im Netzwerk verteilt.
 
 ## Architekturübersicht
 
@@ -76,7 +76,7 @@ http://127.0.0.1:8787
 node:
   name: dcloud-node
   identity_path: ./storage/identity
-  client_type: pc # pc oder server
+  client_type: server
 storage:
   path: ./storage
   limit_bytes: 53687091200 # freigegebener Speicher, Minimum 5 GiB
@@ -183,10 +183,9 @@ Hinweis: Für den SMB-Server wird `impacket` benötigt (ist in `requirements.txt
 
 ## Client-Typ und Speicherfreigabe
 
-Im Einstellungsfenster kann jeder Knoten als **Server** oder **PC** betrieben werden:
+Im Einstellungsfenster kann jeder Knoten als **Server** betrieben werden:
 
 - **Server:** Der Knoten wird als dauerhaftes Speicherziel für das Peer-to-Peer-Netz angekündigt. Andere Peers dürfen diesen Client für P2P-Ablage einplanen.
-- **PC:** Der Knoten wird nur dann als P2P-Speicherziel genutzt, wenn mindestens ein weiterer PC erreichbar ist. Dadurch wird vermieden, dass ein häufig ausgeschalteter PC die einzige erreichbare Kopie hält.
 
 Der freigegebene Speicher wird in GB konfiguriert und kann über die UI nicht unter **5 GB** gesetzt werden. Die Einstellung wird in `config.yml` gespeichert und zur Laufzeit direkt auf das aktive Speicherlimit angewendet.
 
@@ -298,7 +297,7 @@ Der MVP ist als saubere, modulare Grundlage gedacht, damit zentrale Komponenten 
 
 ## Service-Installer per `curl` (Linux/OpenWrt/Windows-Bootstrap)
 
-Es gibt ein Install-Script unter `scripts/install_dcloud_service.sh`, das den Client als Service einrichtet und dabei Rolle (PC/Server), freigegebenen Speicher und SMB-Konfiguration setzt.
+Es gibt ein Install-Script unter `scripts/install_dcloud_service.sh`, das den Client als Service einrichtet und dabei Rolle (Server), freigegebenen Speicher und SMB-Konfiguration setzt.
 
 Beispiel:
 

@@ -641,7 +641,7 @@
         <p>Aktueller Zustand dieses Knotens auf deinem Desktop.</p>
         <div class="status-grid">
           <section class="status-card"><h3>Node ID</h3><div class="status-kpi" id="status-node-id">-</div><div class="status-sub">Identität dieser Instanz</div></section>
-          <section class="status-card"><h3>Client-Typ</h3><div class="status-kpi" id="status-client-type">PC</div><div class="status-sub">Server oder PC für P2P-Speicher</div></section>
+          <section class="status-card"><h3>Client-Typ</h3><div class="status-kpi" id="status-client-type">Server</div><div class="status-sub">Server für P2P-Speicher</div></section>
           <section class="status-card"><h3>P2P-Ablage</h3><div class="status-kpi" id="status-peer-storage">Wartet</div><div class="status-sub" id="status-peer-storage-sub">-</div></section>
           <section class="status-card"><h3>Discovery-Port</h3><div class="status-kpi" id="status-discovery-port">6881</div><div class="status-sub">UDP-Port dieser Instanz</div></section>
           <section class="status-card"><h3>PHP-Relay</h3><div class="status-kpi" id="status-relay-state">Aus</div><div class="status-sub" id="status-relay-sub">Nur LAN-Verbindungen</div></section>
@@ -1026,7 +1026,7 @@
             ? (network.relayLastError ? `Relay-Fehler: ${network.relayLastError}` : relayNames)
             : "Nur LAN-Verbindungen";
         }
-        document.getElementById("status-client-type").textContent = settings.clientTypeLabel || (settings.clientType === "server" ? "Server" : "PC");
+        document.getElementById("status-client-type").textContent = settings.clientTypeLabel || ("Server");
         document.getElementById("status-peer-storage").textContent = settings.acceptsPeerStorage ? "Aktiv" : "Wartet";
         document.getElementById("status-peer-storage-sub").textContent = settings.storagePolicy || "-";
         document.getElementById("status-file-count").textContent = String(appState.fileCount || 0);

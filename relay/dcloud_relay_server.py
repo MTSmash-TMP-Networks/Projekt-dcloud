@@ -143,7 +143,7 @@ def sanitize_urls(value: Any) -> list[str]:
 def sanitize_peer(peer: Any, node_id: str) -> dict[str, Any]:
     peer = peer if isinstance(peer, dict) else {}
     relay_urls = sanitize_urls(peer.get("relay_urls", peer.get("relay_url")))
-    client_type = peer.get("client_type") if peer.get("client_type") in {"server", "pc"} else None
+    client_type = peer.get("client_type") if peer.get("client_type") in {"server"} else None
     return {
         "node_id": node_id,
         "public_key": str(peer.get("public_key", "")),
