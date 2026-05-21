@@ -1176,6 +1176,40 @@ def create_app(
         except (ValueError, StorageError) as exc:
             return jsonify({"ok": False, "message": str(exc), "state": state_payload()}), 400
 
+    @app.post("/api/p2p/chunks/batch")
+    def api_p2p_put_chunks_batch() -> Response:
+        try:
+            payload = request.get_json(force=True)
+            raw_chunks = payload.get("chunks", []) if isinstance(payload, dict) else []
+            if not isinstance(raw_chunks, list) or not raw_chunks:
+                raise StorageError("Batch payload must include at least one chunk")
+            stored: list[str] = []
+            for item in raw_chunks:
+                if not isinstance(item, dict):
+                    continue
+                digest = str(item.get("digest", "")).strip()
+                if not digest:
+                    continue
+                original_size = int(item.get("original_size", 0))
+                index = int(item.get("index", 0))
+                if original_size <= 0:
+                    continue
+                compression = str(item.get("compression")) if item.get("compression") else None
+                encoded = str(item.get("stored_data_b64", ""))
+                data = base64.b64decode(encoded.encode("ascii"), validate=True)
+                chunk_store.write_stored_chunk(
+                    data,
+                    original_size=original_size,
+                    index=index,
+                    compression=compression,
+                    digest=digest,
+                )
+                stored.append(digest)
+            _sync_peer_connector_settings()
+            return jsonify({"ok": True, "stored": stored, "stored_count": len(stored), "state": state_payload()})
+        except (ValueError, StorageError, TypeError) as exc:
+            return jsonify({"ok": False, "message": str(exc), "state": state_payload()}), 400
+
     @app.post("/api/p2p/manifests/revoke")
     def api_p2p_revoke_manifest() -> Response:
         try:
