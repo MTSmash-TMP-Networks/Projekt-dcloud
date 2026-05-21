@@ -838,6 +838,7 @@
       <button type="button" id="ctxDownload"><span>Download</span><span class="kbd">Ctrl+S</span></button>
       <button type="button" id="ctxShare"><span>Freigabe…</span><span class="kbd">Ctrl+H</span></button>
       <button type="button" id="ctxOffload"><span>Auf Peers auslagern</span><span class="kbd">Ctrl+O</span></button>
+      <button type="button" id="ctxMoveFolder"><span>In Ordner verschieben…</span><span class="kbd">Ctrl+B</span></button>
       <button type="button" id="ctxMovePeer"><span>Zusätzlichen Knoten erstellen…</span><span class="kbd">Ctrl+M</span></button>
       <button type="button" id="ctxDelete" style="color:#b42318;"><span>Löschen</span><span class="kbd">Del</span></button>
       <div class="sep"></div>
@@ -877,6 +878,21 @@
         </main>
       </form>
     </div>
+    <div class="dialog-backdrop" id="moveFolderDialog" hidden>
+      <form class="folder-dialog" id="moveFolderDialogForm">
+        <header>Datei verschieben</header>
+        <main>
+          <p class="settings-note" id="moveFolderFileLabel">Datei auswählen…</p>
+          <label for="moveFolderSelect">Zielordner auswählen</label>
+          <select id="moveFolderSelect" name="folder"></select>
+          <div class="dialog-actions">
+            <button type="button" class="explorer-btn" id="moveFolderDialogCancel">Abbrechen</button>
+            <button type="submit" class="explorer-btn">Verschieben</button>
+          </div>
+        </main>
+      </form>
+    </div>
+
     <div class="dialog-backdrop" id="movePeerDialog" hidden>
       <form class="folder-dialog" id="movePeerDialogForm">
         <header>Zusätzlichen Knoten erstellen</header>
@@ -926,6 +942,7 @@
       let selectedTarget = { kind:"desktop" };
       let folderDialogBasePath = VROOT;
       let pendingUploadTarget = DEFAULT_FOLDER;
+      let pendingMoveFolderFile = null;
       let currentUploadXhr = null;
       let currentUploadPoll = null;
       let currentUploadId = null;
@@ -948,6 +965,9 @@
       const shareDialog = document.getElementById("shareDialog");
       const sharePeerSelect = document.getElementById("sharePeerSelect");
       const shareFileLabel = document.getElementById("shareFileLabel");
+      const moveFolderDialog = document.getElementById("moveFolderDialog");
+      const moveFolderSelect = document.getElementById("moveFolderSelect");
+      const moveFolderFileLabel = document.getElementById("moveFolderFileLabel");
       const movePeerDialog = document.getElementById("movePeerDialog");
       const movePeerSelect = document.getElementById("movePeerSelect");
       const movePeerFileLabel = document.getElementById("movePeerFileLabel");
@@ -1540,6 +1560,8 @@
         document.getElementById("ctxDownload").hidden = !isFile;
         document.getElementById("ctxShare").hidden = !isOwnerFile;
         document.getElementById("ctxOffload").hidden = !isOwnerFile;
+        const moveFolderBtn = document.getElementById("ctxMoveFolder");
+        if(moveFolderBtn) moveFolderBtn.hidden = !isOwnerFile;
         document.getElementById("ctxMovePeer").hidden = !isOwnerFile;
         document.getElementById("ctxDelete").hidden = !(isOwnerFile || isDeletableFolder);
         document.getElementById("ctxUpload").hidden = false;
@@ -2093,6 +2115,45 @@ ${file.name}`)) return;
           }
         }
       }
+
+      function openMoveFolderDialog(file){
+        pendingMoveFolderFile = file;
+        moveFolderFileLabel.textContent = `${file.name} wird in einen anderen Ordner verschoben.`;
+        moveFolderSelect.innerHTML = "";
+        (appState.folders || []).forEach(folder => {
+          const normalized = normalizeFolderPath(folder || DEFAULT_FOLDER);
+          if(normalized === normalizeFolderPath(file.folder)) return;
+          const option = document.createElement("option");
+          option.value = normalized;
+          option.textContent = normalized;
+          moveFolderSelect.appendChild(option);
+        });
+        if(!moveFolderSelect.options.length){
+          showToast("Keine alternativen Ordner verfügbar", "warning");
+          pendingMoveFolderFile = null;
+          return;
+        }
+        moveFolderDialog.hidden = false;
+        setTimeout(() => moveFolderSelect.focus(), 40);
+      }
+      function closeMoveFolderDialog(){ moveFolderDialog.hidden = true; pendingMoveFolderFile = null; }
+      async function moveFileToFolder(file, folderPath){
+        if(!folderPath) throw new Error("Bitte einen Zielordner auswählen");
+        const previousId = file.id;
+        const payload = await ajaxPost(`/files/${encodeURIComponent(file.id)}/move`, { next:"/", folder: folderPath });
+        const nextId = payload && payload.manifest && payload.manifest.manifest_id;
+        if(nextId && nextId !== previousId){
+          const replacement = findFileById(nextId);
+          if(replacement){
+            refreshSelectedFileReference(previousId, replacement);
+          }else{
+            applyManifestIdentity(file, payload && payload.manifest);
+            file.folder = normalizeFolderPath(folderPath);
+            refreshSelectedFileReference(previousId, file);
+          }
+        }
+      }
+
       function openMovePeerDialog(file){
         pendingMovePeerFile = file;
         movePeerFileLabel.textContent = `${file.name} erhält einen zusätzlichen Knoten auf dem ausgewählten Peer.`;
@@ -2281,6 +2342,10 @@ ${file.name}`)) return;
       document.getElementById("ctxDownload").onclick = () => { closeCtx(); if(selectedTarget.kind === "file") window.location.href = selectedTarget.file.downloadUrl; };
       document.getElementById("ctxShare").onclick = () => { closeCtx(); if(selectedTarget.kind === "file") toggleShare(selectedTarget.file).catch(error => showToast(error.message, "error")); };
       document.getElementById("ctxOffload").onclick = () => { closeCtx(); if(selectedTarget.kind === "file") offloadFile(selectedTarget.file).catch(error => showToast(error.message, "error")); };
+      const ctxMoveFolderBtn = document.getElementById("ctxMoveFolder");
+      if(ctxMoveFolderBtn){
+        ctxMoveFolderBtn.onclick = () => { closeCtx(); if(selectedTarget.kind === "file") openMoveFolderDialog(selectedTarget.file); };
+      }
       document.getElementById("ctxMovePeer").onclick = () => { closeCtx(); if(selectedTarget.kind === "file") openMovePeerDialog(selectedTarget.file); };
       document.getElementById("ctxDelete").onclick = () => {
         closeCtx();
@@ -2298,6 +2363,9 @@ ${file.name}`)) return;
       folderDialog.addEventListener("click", event => { if(event.target === folderDialog) closeFolderDialog(); });
       document.getElementById("shareDialogCancel").onclick = closeShareDialog;
       shareDialog.addEventListener("click", event => { if(event.target === shareDialog) closeShareDialog(); });
+      const moveFolderDialogCancel = document.getElementById("moveFolderDialogCancel");
+      if(moveFolderDialogCancel) moveFolderDialogCancel.onclick = closeMoveFolderDialog;
+      if(moveFolderDialog) moveFolderDialog.addEventListener("click", event => { if(event.target === moveFolderDialog) closeMoveFolderDialog(); });
       document.getElementById("movePeerDialogCancel").onclick = closeMovePeerDialog;
       movePeerDialog.addEventListener("click", event => { if(event.target === movePeerDialog) closeMovePeerDialog(); });
       document.getElementById("shareDialogForm").addEventListener("submit", event => {
@@ -2308,6 +2376,16 @@ ${file.name}`)) return;
           .then(() => closeShareDialog())
           .catch(error => showToast(error.message, "error"));
       });
+      const moveFolderDialogForm = document.getElementById("moveFolderDialogForm");
+      if(moveFolderDialogForm){
+        moveFolderDialogForm.addEventListener("submit", event => {
+          event.preventDefault();
+          if(!pendingMoveFolderFile) return;
+          moveFileToFolder(pendingMoveFolderFile, moveFolderSelect.value || "")
+            .then(() => closeMoveFolderDialog())
+            .catch(error => showToast(error.message, "error"));
+        });
+      }
       document.getElementById("movePeerDialogForm").addEventListener("submit", event => {
         event.preventDefault();
         if(!pendingMovePeerFile) return;

@@ -1344,6 +1344,23 @@ def create_app(
             flash(message, "error")
         return redirect(redirect_target)
 
+    @app.post("/files/<manifest_id>/move")
+    def move_file(manifest_id: str) -> Response | str:
+        redirect_target = _safe_next(request.form.get("next"), url_for("dashboard"))
+        target_folder = sanitize_folder_path(request.form.get("folder", DEFAULT_FOLDER))
+        try:
+            manifest = manifest_store.move_to_folder(manifest_id, target_folder, identity)
+            message = f"Datei verschoben: {manifest.file_name} → {manifest.folder_path}"
+            if _is_ajax_request():
+                return jsonify({"ok": True, "message": message, "manifest": manifest_payload(manifest), "state": state_payload()})
+            flash(message, "success")
+        except StorageError as exc:
+            message = str(exc)
+            if _is_ajax_request():
+                return jsonify({"ok": False, "message": message, "state": state_payload()}), 400
+            flash(message, "error")
+        return redirect(redirect_target)
+
 
     @app.post("/settings")
     def update_settings() -> Response | str:
