@@ -1956,6 +1956,16 @@
         }
         return null;
       }
+      function applyManifestIdentity(file, manifest){
+        if(!file || !manifest) return;
+        const nextId = manifest.manifest_id;
+        if(!nextId) return;
+        file.id = nextId;
+        file.downloadUrl = manifest.download_url || `/download/${nextId}`;
+        file.deleteUrl = manifest.delete_url || `/files/${nextId}/delete`;
+        file.shareUrl = manifest.share_url || `/files/${nextId}/share`;
+        file.offloadUrl = manifest.offload_url || `/files/${nextId}/offload`;
+      }
       async function offloadFile(file){
         if(!file.owner) throw new Error("Nur der Eigentümer kann auslagern");
         if(!confirm(`Lokale Chunk-Kopien auslagern und auf Peers verteilen?
@@ -1964,7 +1974,13 @@ ${file.name}`)) return;
         const payload = await ajaxPost(file.offloadUrl, { next:"/" });
         const nextId = payload && payload.manifest && payload.manifest.manifest_id;
         if(nextId && nextId !== previousId){
-          refreshSelectedFileReference(previousId, findFileById(nextId));
+          const replacement = findFileById(nextId);
+          if(replacement){
+            refreshSelectedFileReference(previousId, replacement);
+          }else{
+            applyManifestIdentity(file, payload && payload.manifest);
+            refreshSelectedFileReference(previousId, file);
+          }
         }
       }
       function openMovePeerDialog(file){
@@ -1992,7 +2008,13 @@ ${file.name}`)) return;
         const payload = await ajaxPost(file.offloadUrl, { next:"/", target_peer_node_id: targetPeerNodeId, add_only:"1" });
         const nextId = payload && payload.manifest && payload.manifest.manifest_id;
         if(nextId && nextId !== previousId){
-          refreshSelectedFileReference(previousId, findFileById(nextId));
+          const replacement = findFileById(nextId);
+          if(replacement){
+            refreshSelectedFileReference(previousId, replacement);
+          }else{
+            applyManifestIdentity(file, payload && payload.manifest);
+            refreshSelectedFileReference(previousId, file);
+          }
         }
       }
 
