@@ -5,9 +5,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
+import logging
 import json
 import os
 import tempfile
+import time
 from typing import Any
 
 from .crypto import b64decode, sha256_hex, sign_bytes, verify_signature
@@ -16,6 +18,12 @@ from .storage import ChunkInfo, ChunkStore, StorageError
 
 MANIFEST_VERSION = 1
 DEFAULT_FOLDER = "Meine Dateien"
+MANIFEST_TRASH_RETENTION = 20
+MANIFEST_LOCK_TIMEOUT_SECONDS = 10
+MANIFEST_LOCK_POLL_SECONDS = 0.1
+MANIFEST_LOCK_STALE_SECONDS = 120
+MANIFEST_META_FILES = {"folders.json", "share_revocations.json", "file_deletions.json", "manifest_audit.log"}
+LOG = logging.getLogger("dcloud.manifest_store")
 
 
 @dataclass(frozen=True, slots=True)
@@ -207,17 +215,24 @@ class ManifestStore:
         self.manifests_dir.mkdir(parents=True, exist_ok=True)
         data = json.dumps(manifest.to_dict(), sort_keys=True, indent=2).encode("utf-8")
         self.chunk_store.ensure_capacity(len(data))
+        self._acquire_manifest_lock()
         fd, tmp_name = tempfile.mkstemp(prefix="manifest-", suffix=".tmp", dir=self.chunk_store.tmp_dir)
         try:
             with os.fdopen(fd, "wb") as handle:
                 handle.write(data)
                 handle.flush()
+                os.fsync(handle.fileno())
             target = self.path_for(manifest.manifest_id)
+            self._backup_existing_file(target)
             Path(tmp_name).replace(target)
+            self._append_audit_event("write", {"manifest_id": manifest.manifest_id, "target": str(target)})
             return target
-        except Exception:
+        except Exception as exc:
+            self._append_audit_event("write_error", {"manifest_id": manifest.manifest_id, "error": str(exc)})
             Path(tmp_name).unlink(missing_ok=True)
             raise
+        finally:
+            self._release_manifest_lock()
 
     def path_for(self, manifest_id: str) -> Path:
         return self.manifests_dir / f"{manifest_id}.json"
@@ -323,7 +338,8 @@ class ManifestStore:
         updated = FileManifest.from_dict({**data, "manifest_id": new_manifest_id, "signature": signature})
         self.save(updated)
         if old_path != self.path_for(updated.manifest_id):
-            old_path.unlink(missing_ok=True)
+            self._move_to_trash(old_path)
+            self._append_audit_event("resign_old_manifest_retired", {"path": str(old_path), "new_manifest_id": updated.manifest_id})
         return updated
 
     def set_shared(
@@ -382,7 +398,7 @@ class ManifestStore:
             except (json.JSONDecodeError, TypeError):
                 data = {}
         data[owner_node_id] = folders
-        self.folders_path.write_text(json.dumps(data, sort_keys=True, indent=2), encoding="utf-8")
+        self._write_json_atomically(self.folders_path, data, "save_folders")
 
     @property
     def share_revocations_path(self) -> Path:
@@ -415,10 +431,7 @@ class ManifestStore:
 
     def _save_share_revocations(self, revocations: list[dict[str, Any]]) -> None:
         self.manifests_dir.mkdir(parents=True, exist_ok=True)
-        self.share_revocations_path.write_text(
-            json.dumps(revocations, sort_keys=True, indent=2),
-            encoding="utf-8",
-        )
+        self._write_json_atomically(self.share_revocations_path, revocations, "save_share_revocations")
 
     def add_share_revocation(self, revocation: dict[str, Any], target_node_ids: list[str] | None = None) -> None:
         """Persist a share revocation/tombstone and optional delivery targets."""
@@ -506,10 +519,7 @@ class ManifestStore:
 
     def _save_file_deletions(self, deletions: list[dict[str, Any]]) -> None:
         self.manifests_dir.mkdir(parents=True, exist_ok=True)
-        self.file_deletions_path.write_text(
-            json.dumps(deletions, sort_keys=True, indent=2),
-            encoding="utf-8",
-        )
+        self._write_json_atomically(self.file_deletions_path, deletions, "save_file_deletions")
 
     def add_file_deletion(self, deletion: dict[str, Any], target_node_ids: list[str] | None = None) -> None:
         """Persist a signed file-delete tombstone and optional delivery targets."""
@@ -590,9 +600,16 @@ class ManifestStore:
     def load(self, manifest_id: str) -> FileManifest:
         path = self.path_for(manifest_id)
         if not path.exists():
-            raise StorageError(f"Manifest {manifest_id} not found")
+            if self._restore_from_backup(path):
+                self._append_audit_event("restore_from_backup", {"manifest_id": manifest_id, "path": str(path)})
+            elif self._restore_from_trash(path):
+                self._append_audit_event("restore_from_trash", {"manifest_id": manifest_id, "path": str(path)})
+            else:
+                self._append_audit_event("read_missing", {"manifest_id": manifest_id})
+                raise StorageError(f"Manifest {manifest_id} not found")
         manifest = FileManifest.from_dict(json.loads(path.read_text(encoding="utf-8")))
         if not self.verify(manifest):
+            self._append_audit_event("signature_invalid", {"manifest_id": manifest_id, "path": str(path)})
             raise StorageError(f"Manifest signature verification failed for {manifest_id}")
         return manifest
 
@@ -612,9 +629,137 @@ class ManifestStore:
     def delete(self, manifest_id: str, *, delete_unreferenced_chunks: bool = True) -> None:
         manifest = self.load(manifest_id)
         manifest_path = self.path_for(manifest_id)
-        manifest_path.unlink(missing_ok=True)
+        self._acquire_manifest_lock()
+        try:
+            if manifest_path.exists():
+                self._move_to_trash(manifest_path)
+                self._append_audit_event("delete", {"manifest_id": manifest_id, "path": str(manifest_path)})
+            else:
+                self._append_audit_event("delete_missing", {"manifest_id": manifest_id, "path": str(manifest_path)})
+        finally:
+            self._release_manifest_lock()
 
         if not delete_unreferenced_chunks:
             return
 
         self.delete_chunks_if_unreferenced([str(chunk["hash"]) for chunk in manifest.chunks])
+
+    @property
+    def trash_dir(self) -> Path:
+        return self.manifests_dir / ".trash"
+
+    @property
+    def lock_file(self) -> Path:
+        return self.manifests_dir / ".manifest.lock"
+
+    @property
+    def audit_log_path(self) -> Path:
+        return self.manifests_dir / "manifest_audit.log"
+
+    def _write_json_atomically(self, target: Path, payload: Any, event_name: str) -> None:
+        self._acquire_manifest_lock()
+        fd, tmp_name = tempfile.mkstemp(prefix=f"{target.stem}-", suffix=".tmp", dir=self.chunk_store.tmp_dir)
+        try:
+            with os.fdopen(fd, "wb") as handle:
+                handle.write(json.dumps(payload, sort_keys=True, indent=2).encode("utf-8"))
+                handle.flush()
+                os.fsync(handle.fileno())
+            self._backup_existing_file(target)
+            Path(tmp_name).replace(target)
+            self._append_audit_event(event_name, {"target": str(target)})
+        finally:
+            Path(tmp_name).unlink(missing_ok=True)
+            self._release_manifest_lock()
+
+    def _backup_existing_file(self, path: Path) -> None:
+        if path.exists():
+            backup_path = path.with_suffix(f"{path.suffix}.bak")
+            path.replace(backup_path)
+            self._append_audit_event("backup", {"source": str(path), "backup": str(backup_path)})
+
+    def _restore_from_backup(self, path: Path) -> bool:
+        backup_path = path.with_suffix(f"{path.suffix}.bak")
+        if not backup_path.exists():
+            return False
+        backup_path.replace(path)
+        return True
+
+    def _move_to_trash(self, path: Path) -> None:
+        if not path.exists():
+            return
+        self.trash_dir.mkdir(parents=True, exist_ok=True)
+        ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S")
+        target = self.trash_dir / f"{ts}-{path.name}"
+        path.replace(target)
+        self._purge_old_trash()
+
+    def _restore_from_trash(self, path: Path) -> bool:
+        if not self.trash_dir.exists():
+            return False
+        candidates = sorted(self.trash_dir.glob(f"*-{path.name}"), reverse=True)
+        if not candidates:
+            return False
+        candidates[0].replace(path)
+        return True
+
+    def _purge_old_trash(self) -> None:
+        entries = sorted(self.trash_dir.glob("*.json"), key=lambda item: item.stat().st_mtime, reverse=True)
+        for stale in entries[MANIFEST_TRASH_RETENTION:]:
+            stale.unlink(missing_ok=True)
+
+    def _acquire_manifest_lock(self) -> None:
+        self.manifests_dir.mkdir(parents=True, exist_ok=True)
+        for _ in range(MANIFEST_LOCK_TIMEOUT_SECONDS * 10):
+            try:
+                fd = os.open(self.lock_file, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+                with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                    handle.write(str(os.getpid()))
+                return
+            except FileExistsError:
+                try:
+                    age = time.time() - self.lock_file.stat().st_mtime
+                    if age > MANIFEST_LOCK_STALE_SECONDS:
+                        self._append_audit_event("lock_stale_removed", {"path": str(self.lock_file), "age_seconds": int(age)})
+                        self.lock_file.unlink(missing_ok=True)
+                        continue
+                except OSError:
+                    pass
+                time.sleep(MANIFEST_LOCK_POLL_SECONDS)
+        raise StorageError("Manifest lock could not be acquired")
+
+    def _release_manifest_lock(self) -> None:
+        self.lock_file.unlink(missing_ok=True)
+
+    def _append_audit_event(self, event: str, payload: dict[str, Any]) -> None:
+        self.manifests_dir.mkdir(parents=True, exist_ok=True)
+        row = {
+            "ts": datetime.now(timezone.utc).isoformat(),
+            "event": event,
+            "payload": payload,
+        }
+        with self.audit_log_path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(row, sort_keys=True) + "\n")
+        LOG.info("Manifest event %s: %s", event, payload)
+
+    def run_manifest_consistency_check(self) -> dict[str, int]:
+        repaired_backup = 0
+        repaired_trash = 0
+        invalid = 0
+        for path in sorted(self.manifests_dir.glob("*.json")):
+            if path.name in MANIFEST_META_FILES:
+                continue
+            try:
+                manifest = FileManifest.from_dict(json.loads(path.read_text(encoding="utf-8")))
+                if not self.verify(manifest):
+                    invalid += 1
+                    self._append_audit_event("consistency_invalid", {"path": str(path)})
+            except Exception:
+                if self._restore_from_backup(path):
+                    repaired_backup += 1
+                elif self._restore_from_trash(path):
+                    repaired_trash += 1
+                else:
+                    invalid += 1
+        summary = {"repaired_backup": repaired_backup, "repaired_trash": repaired_trash, "invalid": invalid}
+        self._append_audit_event("consistency_run", summary)
+        return summary
