@@ -9,7 +9,6 @@ import os
 import re
 import shutil
 import tempfile
-from urllib.parse import urlparse
 
 import yaml
 
@@ -25,8 +24,8 @@ DEFAULT_PEER_CLEANUP_INTERVAL_SECONDS = 5
 DEFAULT_RELAY_POLL_INTERVAL_SECONDS = 1
 DEFAULT_RELAY_REQUEST_TIMEOUT_SECONDS = 180
 DEFAULT_RELAY_CHUNK_SIZE_BYTES = 512 * 1024
-DEFAULT_RELAY_MAX_IN_FLIGHT_CHUNKS = 4
 DEFAULT_PUBLIC_RELAY_URL = "https://support.tmp-networks.de/dcstorage/dcloud_relay.php"
+
 
 
 @dataclass(slots=True)
@@ -64,22 +63,20 @@ class NetworkConfig:
     bootstrap_nodes: list[str] = field(default_factory=list)
     tree_parent_nodes: list[str] = field(default_factory=list)
     relay_children: bool = False
-    relay_builtin_enabled: bool = True
     discovery_interval_seconds: int = 10
-    auto_discovery_enabled: bool = False
+    auto_discovery_enabled: bool = True
     auto_discovery_ports: list[int] = field(default_factory=lambda: DEFAULT_AUTO_DISCOVERY_PORTS.copy())
     auto_discovery_hosts: list[str] = field(default_factory=lambda: DEFAULT_AUTO_DISCOVERY_HOSTS.copy())
     startup_discovery_seconds: int = 12
     startup_discovery_interval_seconds: int = 2
     peer_timeout_seconds: int = DEFAULT_PEER_TIMEOUT_SECONDS
     peer_cleanup_interval_seconds: int = DEFAULT_PEER_CLEANUP_INTERVAL_SECONDS
-    relay_url: str = ""
-    relay_urls: list[str] = field(default_factory=list)
+    relay_url: str = DEFAULT_PUBLIC_RELAY_URL
+    relay_urls: list[str] = field(default_factory=lambda: [DEFAULT_PUBLIC_RELAY_URL])
     relay_secret: str = ""  # deprecated; bundled relays use automatic daily tokens
     relay_poll_interval_seconds: float = DEFAULT_RELAY_POLL_INTERVAL_SECONDS
     relay_request_timeout_seconds: int = DEFAULT_RELAY_REQUEST_TIMEOUT_SECONDS
     relay_chunk_size_bytes: int = DEFAULT_RELAY_CHUNK_SIZE_BYTES
-    relay_max_in_flight_chunks: int = DEFAULT_RELAY_MAX_IN_FLIGHT_CHUNKS
 
 
 @dataclass(slots=True)
@@ -210,15 +207,6 @@ def normalize_relay_url(value: str | None) -> str:
     return url.rstrip("/")
 
 
-def is_localhost_relay_url(value: str) -> bool:
-    """Return True when a relay URL points to localhost/loopback."""
-    try:
-        host = (urlparse(value).hostname or "").strip().lower()
-    except Exception:
-        return False
-    return host in {"localhost", "127.0.0.1", "::1"}
-
-
 def _iter_relay_url_candidates(value: Any) -> list[str]:
     if value is None:
         return []
@@ -239,14 +227,6 @@ def normalize_relay_urls(values: Any, *, include_default: bool = True) -> list[s
         result.append(DEFAULT_PUBLIC_RELAY_URL)
     for raw in _iter_relay_url_candidates(values):
         url = normalize_relay_url(raw)
-        if is_localhost_relay_url(url):
-            # Local loopback relay URLs are not usable by other peers and should
-            # therefore never be saved as additional relay endpoints.
-            continue
-        if not include_default and url == DEFAULT_PUBLIC_RELAY_URL:
-            # When the bundled relay is disabled, keep it out even if legacy
-            # configs still contain it explicitly.
-            continue
         if url and url not in result:
             result.append(url)
     return result
@@ -258,27 +238,6 @@ def extra_relay_urls(values: Any) -> list[str]:
 
 def normalize_relay_secret(value: str | None) -> str:
     return (value or "").strip()
-
-
-def normalize_bool(value: bool | str | int | None, default: bool = False) -> bool:
-    """Parse booleans from config/UI values without treating ``"false"`` as true.
-
-    Python's built-in ``bool("false")`` evaluates to ``True`` because non-empty
-    strings are truthy. Several settings can arrive as form values or YAML text,
-    so keep boolean parsing explicit and predictable.
-    """
-    if value is None:
-        return bool(default)
-    if isinstance(value, bool):
-        return value
-    if isinstance(value, int):
-        return value != 0
-    text = str(value).strip().lower()
-    if text in {"1", "true", "yes", "y", "on", "enabled", "ja"}:
-        return True
-    if text in {"0", "false", "no", "n", "off", "disabled", "nein", ""}:
-        return False
-    return bool(default)
 
 
 def ensure_config(config_path: Path) -> None:
@@ -340,22 +299,20 @@ def load_config(config_path: str | Path = "config.yml", *, create_if_missing: bo
             bootstrap_nodes=list(network_raw.get("bootstrap_nodes", [])),
             tree_parent_nodes=list(network_raw.get("tree_parent_nodes", [])),
             relay_children=bool(network_raw.get("relay_children", False)),
-            relay_builtin_enabled=bool(network_raw.get("relay_builtin_enabled", True)),
             discovery_interval_seconds=max(1, int(network_raw.get("discovery_interval_seconds", 10))),
-            auto_discovery_enabled=bool(network_raw.get("auto_discovery_enabled", False)),
+            auto_discovery_enabled=bool(network_raw.get("auto_discovery_enabled", True)),
             auto_discovery_ports=normalize_ports(network_raw.get("auto_discovery_ports"), DEFAULT_AUTO_DISCOVERY_PORTS),
             auto_discovery_hosts=normalize_hosts(network_raw.get("auto_discovery_hosts"), DEFAULT_AUTO_DISCOVERY_HOSTS),
             startup_discovery_seconds=max(0, int(network_raw.get("startup_discovery_seconds", 12))),
             startup_discovery_interval_seconds=max(1, int(network_raw.get("startup_discovery_interval_seconds", 2))),
             peer_timeout_seconds=max(5, int(network_raw.get("peer_timeout_seconds", DEFAULT_PEER_TIMEOUT_SECONDS))),
             peer_cleanup_interval_seconds=max(1, int(network_raw.get("peer_cleanup_interval_seconds", DEFAULT_PEER_CLEANUP_INTERVAL_SECONDS))),
-            relay_url=normalize_relay_urls([network_raw.get("relay_urls", []), network_raw.get("relay_url", "")], include_default=bool(network_raw.get("relay_builtin_enabled", True)))[0] if normalize_relay_urls([network_raw.get("relay_urls", []), network_raw.get("relay_url", "")], include_default=bool(network_raw.get("relay_builtin_enabled", True))) else "",
-            relay_urls=normalize_relay_urls([network_raw.get("relay_urls", []), network_raw.get("relay_url", "")], include_default=bool(network_raw.get("relay_builtin_enabled", True))),
+            relay_url=normalize_relay_urls([network_raw.get("relay_urls", []), network_raw.get("relay_url", "")], include_default=True)[0],
+            relay_urls=normalize_relay_urls([network_raw.get("relay_urls", []), network_raw.get("relay_url", "")], include_default=True),
             relay_secret=normalize_relay_secret(str(network_raw.get("relay_secret", ""))),
             relay_poll_interval_seconds=max(0.2, float(network_raw.get("relay_poll_interval_seconds", DEFAULT_RELAY_POLL_INTERVAL_SECONDS))),
             relay_request_timeout_seconds=max(30, int(network_raw.get("relay_request_timeout_seconds", DEFAULT_RELAY_REQUEST_TIMEOUT_SECONDS))),
             relay_chunk_size_bytes=max(64 * 1024, min(int(network_raw.get("relay_chunk_size_bytes", DEFAULT_RELAY_CHUNK_SIZE_BYTES)), 2 * 1024 * 1024)),
-            relay_max_in_flight_chunks=max(1, min(int(network_raw.get("relay_max_in_flight_chunks", DEFAULT_RELAY_MAX_IN_FLIGHT_CHUNKS)), 16)),
         ),
         security=SecurityConfig(protocol_magic=str(security_raw.get("protocol_magic", "DCLOUD1"))),
         smb=SmbConfig(
@@ -371,17 +328,16 @@ def load_config(config_path: str | Path = "config.yml", *, create_if_missing: bo
 
 
 def persist_relay_urls(config: AppConfig, relay_urls: list[str]) -> AppConfig:
-    """Persist relay URLs and respect whether the built-in public relay is enabled."""
-    normalized_relay_urls = normalize_relay_urls(relay_urls, include_default=bool(config.network.relay_builtin_enabled))
+    """Persist the fixed public relay plus known additional relay URLs."""
+    normalized_relay_urls = normalize_relay_urls(relay_urls, include_default=True)
     raw = _load_yaml(config.config_path)
     raw.setdefault("network", {})
     if not isinstance(raw["network"], dict):
         raise ValueError("Konfigurationsdatei hat kein gültiges network Mapping")
-    raw["network"]["relay_builtin_enabled"] = bool(config.network.relay_builtin_enabled)
-    raw["network"]["relay_url"] = normalized_relay_urls[0] if normalized_relay_urls else ""
+    raw["network"]["relay_url"] = DEFAULT_PUBLIC_RELAY_URL
     raw["network"]["relay_urls"] = normalized_relay_urls
     _write_yaml_atomic(config.config_path, raw)
-    config.network.relay_url = normalized_relay_urls[0] if normalized_relay_urls else ""
+    config.network.relay_url = normalized_relay_urls[0]
     config.network.relay_urls = normalized_relay_urls
     return config
 
@@ -394,10 +350,7 @@ def update_runtime_settings(
     relay_server_url: str | None = None,
     relay_server_urls: Any | None = None,
     relay_secret: str | None = None,
-    relay_builtin_enabled: bool | str | int | None = None,
-    relay_children: bool | str | int | None = None,
     smb_enabled: bool | str | int | None = None,
-    auto_discovery_enabled: bool | str | int | None = None,
     smb_username: str | None = None,
     smb_password: str | None = None,
 ) -> AppConfig:
@@ -405,11 +358,10 @@ def update_runtime_settings(
     normalized_type = normalize_client_type(client_type)
     storage_limit_bytes = validate_shared_storage_bytes(gib_to_bytes(shared_storage_gb))
     relay_values = relay_server_urls if relay_server_urls is not None else relay_server_url
-    builtin_enabled = normalize_bool(relay_builtin_enabled, bool(config.network.relay_builtin_enabled))
     normalized_relay_urls = (
-        normalize_relay_urls(relay_values, include_default=builtin_enabled)
+        normalize_relay_urls(relay_values, include_default=True)
         if relay_values is not None
-        else normalize_relay_urls(config.network.relay_urls, include_default=builtin_enabled)
+        else normalize_relay_urls(config.network.relay_urls, include_default=True)
     )
     # Relay access tokens are generated automatically by each PHP relay and
     # refreshed daily by the client. Manual relay_secret values from older
@@ -428,29 +380,20 @@ def update_runtime_settings(
 
     raw["node"]["client_type"] = normalized_type
     raw["storage"]["limit_bytes"] = storage_limit_bytes
-    raw["network"]["relay_builtin_enabled"] = builtin_enabled
-    raw["network"]["relay_children"] = normalize_bool(relay_children, bool(config.network.relay_children))
-    raw["network"]["relay_url"] = normalized_relay_urls[0] if normalized_relay_urls else ""
+    raw["network"]["relay_url"] = DEFAULT_PUBLIC_RELAY_URL
     raw["network"]["relay_urls"] = normalized_relay_urls
     raw["network"]["relay_secret"] = normalized_relay_secret
-    raw["network"]["auto_discovery_enabled"] = normalize_bool(auto_discovery_enabled, bool(config.network.auto_discovery_enabled))
-    raw["smb"]["enabled"] = normalize_bool(smb_enabled, bool(config.smb.enabled))
+    raw["smb"]["enabled"] = bool(smb_enabled) if smb_enabled is not None else config.smb.enabled
     raw["smb"]["username"] = (smb_username if smb_username is not None else config.smb.username).strip()
-    # The settings form intentionally leaves the password field empty when a
-    # password is already set (placeholder: "neu eingeben zum Ändern"). Do not
-    # erase the stored password unless a non-empty replacement is submitted.
-    raw["smb"]["password"] = smb_password if smb_password not in {None, ""} else config.smb.password
+    raw["smb"]["password"] = smb_password if smb_password is not None else config.smb.password
     _write_yaml_atomic(config.config_path, raw)
 
     config.node.client_type = normalized_type
     config.storage.limit_bytes = storage_limit_bytes
-    config.network.relay_builtin_enabled = builtin_enabled
-    config.network.relay_children = normalize_bool(relay_children, bool(config.network.relay_children))
-    config.network.relay_url = normalized_relay_urls[0] if normalized_relay_urls else ""
+    config.network.relay_url = normalized_relay_urls[0]
     config.network.relay_urls = normalized_relay_urls
     config.network.relay_secret = normalized_relay_secret
-    config.network.auto_discovery_enabled = normalize_bool(auto_discovery_enabled, bool(config.network.auto_discovery_enabled))
-    config.smb.enabled = normalize_bool(smb_enabled, bool(config.smb.enabled))
+    config.smb.enabled = bool(smb_enabled) if smb_enabled is not None else config.smb.enabled
     config.smb.username = (smb_username if smb_username is not None else config.smb.username).strip()
-    config.smb.password = smb_password if smb_password not in {None, ""} else config.smb.password
+    config.smb.password = smb_password if smb_password is not None else config.smb.password
     return config

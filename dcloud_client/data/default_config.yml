@@ -19,9 +19,8 @@ network:
   bootstrap_nodes: []
   tree_parent_nodes: [] # upstream peers that can relay for this node behind NAT
   relay_children: false # set true on the one LAN node with port forwarding
-  relay_builtin_enabled: true # bundled public relay is enabled by default; additional relays can be added
   discovery_interval_seconds: 10
-  auto_discovery_enabled: false
+  auto_discovery_enabled: true
   auto_discovery_ports:
     - 6881 # sichtbare dcloud-Clients im LAN automatisch ansprechen
   auto_discovery_hosts:
@@ -37,7 +36,6 @@ network:
   relay_poll_interval_seconds: 1 # Relay-Mailbox-Long-Polling für entfernte Peers
   relay_request_timeout_seconds: 180 # Timeout für Chunk-/Manifest-Transfers über Relay
   relay_chunk_size_bytes: 524288 # 512 KiB: PHP-Relay-sichere Chunk-Größe gegen post_max_size/JSON-Limits
-  relay_max_in_flight_chunks: 4 # gleichzeitige Chunk-Uploads pro Datei (kleines Parallel-Fenster)
 security:
   protocol_magic: DCLOUD1
 smb:

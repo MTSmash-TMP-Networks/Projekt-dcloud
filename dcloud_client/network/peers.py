@@ -9,7 +9,6 @@ from typing import Protocol
 
 
 DEFAULT_PEER_TIMEOUT_SECONDS = 35.0
-DEFAULT_PEER_STALE_GRACE_FACTOR = 1.5
 
 _ADJECTIVES = [
     "Blauer", "Roter", "Goldener", "Silberner", "Grüner", "Mutiger",
@@ -59,29 +58,12 @@ class Peer:
         their node ID in the key so one PHP relay can hold many active nodes
         without collapsing them into a single duplicate endpoint.
         """
-        if self.route_via_node_id:
-            # Multiple remote peers can be reachable through the same relay/tree
-            # parent and therefore share host/port metadata. Include node_id for
-            # relayed peers so automatic discovery does not collapse distinct
-            # nodes into one entry and accidentally hide active shares.
-            return (self.host, self.udp_port, self.node_id)
         if self.relay_url and self.host == "__relay__":
             return (f"relay:{self.relay_url}", 0, self.node_id)
-        # Keep node ids distinct even when multiple peers share one visible
-        # endpoint (e.g. NAT, VPN or relay parent). Removing one because another
-        # heartbeat arrived causes shares to disappear/flap in the UI.
-        return (self.host, self.udp_port, self.node_id)
+        return (self.host, self.udp_port, self.route_via_node_id)
 
     def to_dict(self) -> dict[str, str | int | bool | float | None]:
         age = max(0.0, (datetime.now(timezone.utc) - self.last_seen).total_seconds())
-        if self.host == "__relay__":
-            transport = "relay"
-        elif self.route_via_node_id:
-            transport = "nat-tree"
-        elif self.relay_url:
-            transport = "direct+relay"
-        else:
-            transport = "direct"
         return {
             "node_id": self.node_id,
             "host": self.host,
@@ -94,7 +76,7 @@ class Peer:
             "web_port": self.web_port,
             "free_storage_bytes": self.free_storage_bytes,
             "relay_url": self.relay_url,
-            "transport": transport,
+            "transport": "relay" if self.host == "__relay__" else ("direct+relay" if self.relay_url else "direct"),
             "display_name": display_name_for_peer(self.node_id, self.name),
             "last_seen": self.last_seen.isoformat(),
             "last_seen_age_seconds": round(age, 1),
@@ -124,7 +106,8 @@ class InMemoryPeerProvider:
     A peer becomes active only after we have received a direct discovery/control
     packet from its node ID. Gossiped peers should be probed first and only added
     after they answer. Entries that do not answer again within the configured
-    timeout are removed automatically.
+    timeout are removed automatically, and a changed identity at the same
+    host/port replaces the older entry instead of creating duplicates.
     """
 
     def __init__(
@@ -137,9 +120,6 @@ class InMemoryPeerProvider:
         if timeout is None:
             timeout = DEFAULT_PEER_TIMEOUT_SECONDS
         self.peer_timeout_seconds = max(0.05, float(timeout))
-        # Add a small grace window so peers do not flap between online/offline
-        # when one discovery round is delayed by network jitter.
-        self.peer_stale_grace_factor = DEFAULT_PEER_STALE_GRACE_FACTOR
         # Backwards-compatible name for code/tests that used the previous term.
         self.stale_after_seconds = self.peer_timeout_seconds
         self._peers: dict[str, Peer] = {}
@@ -165,19 +145,23 @@ class InMemoryPeerProvider:
                 peer.free_storage_bytes = (
                     peer.free_storage_bytes if peer.free_storage_bytes is not None else existing.free_storage_bytes
                 )
-                # If a peer is seen via PHP relay, keep that route sticky.
-                # Mixing direct UDP and relay endpoints for the same node makes
-                # transport selection flap between API:6881 and PHP-Relay,
-                # which can break cross-network peers that only work via relay.
-                existing_is_relay = existing.host == "__relay__"
-                incoming_is_relay = peer.host == "__relay__"
-                if existing_is_relay or incoming_is_relay:
-                    peer.host = "__relay__"
-                    peer.udp_port = 0
-                    peer.route_via_node_id = None
-                    peer.relay_url = peer.relay_url or existing.relay_url
+                # Keep the fast LAN endpoint when it exists, but remember the
+                # relay as a fallback for peers behind NAT or outside the LAN.
+                if peer.relay_url and not existing.relay_url:
+                    peer.host = existing.host
+                    peer.udp_port = existing.udp_port
+                    peer.route_via_node_id = existing.route_via_node_id
                 elif existing.relay_url and not peer.relay_url:
                     peer.relay_url = existing.relay_url
+
+            endpoint_key = peer.endpoint_key()
+            duplicate_ids = [
+                node_id
+                for node_id, existing_peer in self._peers.items()
+                if node_id != peer.node_id and existing_peer.endpoint_key() == endpoint_key
+            ]
+            for duplicate_id in duplicate_ids:
+                self._peers.pop(duplicate_id, None)
 
             peer.last_seen = now
             self._peers[peer.node_id] = peer
@@ -205,6 +189,6 @@ class InMemoryPeerProvider:
             return self._purge_stale_locked(now)
 
     def _purge_stale_locked(self, now: datetime) -> list[Peer]:
-        cutoff = now - timedelta(seconds=self.peer_timeout_seconds * self.peer_stale_grace_factor)
+        cutoff = now - timedelta(seconds=self.peer_timeout_seconds)
         stale_ids = [node_id for node_id, peer in self._peers.items() if peer.last_seen < cutoff]
         return [self._peers.pop(node_id) for node_id in stale_ids]

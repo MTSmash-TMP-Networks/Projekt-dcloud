@@ -621,7 +621,6 @@
           <section class="status-card"><h3>Gespeicherte Dateien</h3><div class="status-kpi" id="status-file-count">0</div><div class="status-sub">Sichtbar in deinem Explorer</div></section>
           <section class="status-card"><h3>Verwendeter Speicher</h3><div class="status-kpi" id="status-storage-used">0 B</div><div class="status-sub">Lokale Chunks + Manifeste</div></section>
           <section class="status-card"><h3>Verbund-Kapazität</h3><div class="status-kpi" id="status-network-capacity">0 B</div><div class="status-sub" id="status-network-capacity-sub">0 aktive Speicher-Peers</div></section>
-          <section class="status-card"><h3>Datensicherheit</h3><div class="status-kpi" id="status-data-safety">Niedrig</div><div class="status-sub" id="status-data-safety-sub">Keine externe Redundanz erkannt</div></section>
         </div>
       </div>
     </section>
@@ -637,7 +636,7 @@
       </div>
       <div class="window-content dummy-app">
         <h2>Einstellungen</h2>
-        <p>Lege fest, ob dieser Client als dauerhafter Server oder als normaler PC arbeitet, und wie viel Speicher Server-Knoten im dcloud-Netzwerk bereitstellen.</p>
+        <p>Lege fest, ob dieser Client als dauerhafter Server oder als normaler PC arbeitet, und wie viel Speicher du dem dcloud-Netzwerk freigibst.</p>
 
         <form method="post" action="/settings" class="settings-form" id="settings-form">
           <input type="hidden" name="next" value="/">
@@ -650,7 +649,7 @@
               </label>
               <label class="radio-card">
                 <input type="radio" name="client_type" value="pc" {% if config.node.client_type == 'pc' %}checked{% endif %}>
-                <span><strong>PC</strong>Dieser Client stellt keinen Speicher für andere bereit und nutzt vorhandene Server-Knoten als Speicherziele.</span>
+                <span><strong>PC</strong>Daten werden nur als P2P-Ziel genutzt, wenn mindestens ein weiterer PC erreichbar ist. So wird vermieden, dass ein oft ausgeschalteter PC die einzige Kopie hält.</span>
               </label>
             </div>
             <p class="settings-note" id="settings-current-policy">{{ settings_json.storagePolicy }}</p>
@@ -670,24 +669,10 @@
             <h3>PHP-Relay / Proxy für Internet-Peers</h3>
             <label for="settings-relay-url">Festes Standard-Relay</label>
             <input id="settings-relay-url" type="url" value="{{ settings_json.fixedRelayUrl }}" readonly>
-            <label style="display:flex;align-items:center;gap:.45rem;">
-              <input id="settings-relay-builtin" type="checkbox" name="relay_builtin_enabled" {% if settings_json.relayBuiltinEnabled %}checked{% endif %}> Öffentliches Standard-Relay nutzen
-            </label>
-            <label style="display:flex;align-items:center;gap:.45rem;">
-              <input id="settings-relay-children" type="checkbox" name="relay_children" {% if settings_json.relayChildren %}checked{% endif %}> Diesen Client als Master-/Relay-Node für NAT-Children verwenden
-            </label>
             <label for="settings-relay-urls">Weitere Relay-URLs hinzufügen</label>
             <textarea id="settings-relay-urls" name="relay_server_urls" rows="3" placeholder="https://deine-domain.de/dcloud_relay.php">{{ settings_json.additionalRelayUrlsText }}</textarea>
             <p class="settings-note"><strong>Relay-Zugriff:</strong> <span id="settings-relay-token-mode">{{ settings_json.relayTokenLabel }}</span>. Der Tages-Schlüssel wird automatisch vom Relay erzeugt, täglich erneuert und vom Client bei Bedarf direkt abgerufen.</p>
-            <p class="settings-note" id="settings-relay-note">Das Standard-Relay kann optional deaktiviert werden. Zusätzliche Relays werden gespeichert, automatisch genutzt und per LAN-/Relay-Discovery an andere Peers verteilt.</p>
-          </section>
-
-          <section class="settings-panel">
-            <h3>Peer Discovery</h3>
-            <label style="display:flex;align-items:center;gap:.45rem;">
-              <input id="settings-auto-discovery-enabled" type="checkbox" name="auto_discovery_enabled" {% if settings_json.autoDiscoveryEnabled %}checked{% endif %}> Automatische Netzwerksuche aktivieren
-            </label>
-            <p class="settings-note">Standard ist aus. Wenn aktiviert, werden im LAN automatisch Peers auf den Discovery-Ports gesucht.</p>
+            <p class="settings-note" id="settings-relay-note">Das Standard-Relay ist fest hinterlegt. Zusätzliche Relays werden gespeichert, automatisch genutzt und per LAN-/Relay-Discovery an andere Peers verteilt, damit das Netzwerk auch über Heimnetzgrenzen hinweg erreichbar bleibt.</p>
           </section>
 
           <section class="settings-panel">
@@ -981,23 +966,9 @@
         renderExplorerNav();
         if(!windows.explorer.hidden) renderExplorer();
       }
-      let refreshRequestSeq = 0;
-      let lastAppliedRefreshSeq = 0;
-      const stickySharedVisibility = new Map();
-      function fileShareStickyKey(file){
-        if(!file) return "";
-        const folder = normalizeFolderPath(file.folder || DEFAULT_FOLDER);
-        return `${folder}::${file.name || ""}::${Number(file.size || 0)}`;
-      }
       async function refreshState(){
-        const seq = ++refreshRequestSeq;
         const response = await fetch("/api/state", { cache:"no-store", headers: { "Accept":"application/json" } });
         const data = await response.json();
-        if(seq < lastAppliedRefreshSeq) return;
-        if(!response.ok || !data || !Array.isArray(data.folderTree)){
-          throw new Error((data && data.message) || `Status-Refresh fehlgeschlagen (${response.status})`);
-        }
-        lastAppliedRefreshSeq = seq;
         applyState(data);
       }
 
@@ -1035,28 +1006,6 @@
         document.getElementById("status-storage-used").textContent = formatBytes(appState.stats.usedBytes);
         document.getElementById("status-network-capacity").textContent = formatBytes(capacity.networkLimitBytes || settings.networkLimitBytes || appState.stats.limitBytes);
         document.getElementById("status-network-capacity-sub").textContent = `${capacity.storagePeerCount || settings.storagePeerCount || 0} aktive Speicher-Peer(s)`;
-        const storagePeers = Number(capacity.storagePeerCount || settings.storagePeerCount || 0);
-        const reachablePeers = (appState.peers || []).length;
-        const networkFreeBytes = Number(capacity.networkFreeBytes || settings.networkFreeBytes || appState.stats.freeLimitBytes || 0);
-        const safetyEl = document.getElementById("status-data-safety");
-        const safetySubEl = document.getElementById("status-data-safety-sub");
-        let safetyLabel = "Niedrig";
-        let safetySub = "Keine externe Redundanz erkannt";
-        if(storagePeers >= 3){
-          safetyLabel = "Sehr hoch";
-          safetySub = `RAID-ähnlich: bis zu ${storagePeers - 1} Peer-Ausfall/Ausfälle abfederbar · ${reachablePeers} erreichbar`;
-        } else if(storagePeers === 2){
-          safetyLabel = "Hoch";
-          safetySub = `Doppelte externe Ablage aktiv · ein Peer-Ausfall tolerierbar · ${reachablePeers} erreichbar`;
-        } else if(storagePeers === 1){
-          safetyLabel = "Mittel";
-          safetySub = `Eine externe Kopie vorhanden · bei Offline-Status erhöhtes Risiko · frei ${formatBytes(networkFreeBytes)}`;
-        } else if(settings.acceptsPeerStorage){
-          safetyLabel = "Mittel";
-          safetySub = "Peer-Speicher ist aktiv, aber aktuell keine externen Speicher-Peers online";
-        }
-        if(safetyEl) safetyEl.textContent = safetyLabel;
-        if(safetySubEl) safetySubEl.textContent = safetySub;
         const smbEnabled = !!settings.smbEnabled;
         const smbRunning = !!settings.smbRunning;
         const smbPort = settings.smbPort || 445;
@@ -1097,10 +1046,6 @@
         document.querySelectorAll('input[name="client_type"]').forEach(input => {
           if(document.activeElement !== input) input.checked = input.value === selectedType;
         });
-        const relayBuiltinInput = document.getElementById("settings-relay-builtin");
-        if(relayBuiltinInput && document.activeElement !== relayBuiltinInput) relayBuiltinInput.checked = settings.relayBuiltinEnabled !== false;
-        const relayChildrenInput = document.getElementById("settings-relay-children");
-        if(relayChildrenInput && document.activeElement !== relayChildrenInput) relayChildrenInput.checked = !!settings.relayChildren;
         const smbEnabledInput = document.getElementById("settings-smb-enabled");
         if(smbEnabledInput && document.activeElement !== smbEnabledInput) smbEnabledInput.checked = !!settings.smbEnabled;
         const smbUserInput = document.getElementById("settings-smb-username");
@@ -1119,11 +1064,7 @@
             const type = peer.client_type === "server" ? "Server" : (peer.client_type === "pc" ? "PC" : "unbekannt");
             const storage = peer.accepts_peer_storage ? `P2P-Speicher aktiv · frei ${formatBytes(peer.free_storage_bytes || peer.shared_storage_bytes || 0)}` : "keine P2P-Ablage";
             const api = peer.web_port ? `API :${peer.web_port}` : "API unbekannt";
-            const route = peer.transport === "relay"
-              ? "PHP-Relay"
-              : (peer.transport === "nat-tree"
-                ? `NAT-Child über Parent ${String(peer.route_via_node_id || "").slice(0, 12)} · ${peer.host}:${peer.udp_port}`
-                : (peer.transport === "direct+relay" ? `${peer.host}:${peer.udp_port} · Relay-Fallback` : `${peer.host}:${peer.udp_port}`));
+            const route = peer.transport === "relay" ? "PHP-Relay" : (peer.transport === "direct+relay" ? `${peer.host}:${peer.udp_port} · Relay-Fallback` : `${peer.host}:${peer.udp_port}`);
             const age = Number(peer.last_seen_age_seconds || 0);
             const seen = age < 2 ? "gerade aktiv" : `vor ${Math.round(age)}s gesehen`;
             item.textContent = `${label} · ${type} · ${route} · ${api} · ${storage} · ${seen}`;
@@ -1244,10 +1185,6 @@
           grid.appendChild(tile);
         });
         data.files.forEach(file => {
-          const stickyKey = fileShareStickyKey(file);
-          const stickyShared = !!stickySharedVisibility.get(stickyKey);
-          const effectiveShared = file.shared || stickyShared;
-          if(file.shared && stickyKey) stickySharedVisibility.set(stickyKey, true);
           const tile = document.createElement("button");
           tile.type = "button";
           tile.className = "explorer-tile";
@@ -1262,7 +1199,7 @@
           meta.textContent = `${formatBytes(file.size)} · ${file.chunks} Chunk(s)${distribution}`;
           const access = document.createElement("span");
           access.className = "tile-meta";
-          access.textContent = effectiveShared ? "🌐 freigegeben" : "🔒 privat";
+          access.textContent = file.shared ? "🌐 freigegeben" : "🔒 privat";
           tile.append(name, meta, access);
           tile.addEventListener("dblclick", () => { window.location.href = file.downloadUrl; });
           tile.addEventListener("click", () => selectExplorerTile(tile, { kind:"file", file }));
@@ -1743,11 +1680,7 @@
           const option = document.createElement("option");
           option.value = peer.node_id;
           const type = peer.client_type === "server" ? "Server" : (peer.client_type === "pc" ? "PC" : "Peer");
-          const route = peer.transport === "relay"
-            ? "PHP-Relay"
-            : (peer.transport === "nat-tree"
-              ? `NAT-Child via ${String(peer.route_via_node_id || "").slice(0, 8)}`
-              : `${peer.host}:${peer.udp_port}`);
+          const route = peer.transport === "relay" ? "PHP-Relay" : `${peer.host}:${peer.udp_port}`;
           option.textContent = `${peerDisplayName(peer)} (${type}, ${route})`;
           sharePeerSelect.appendChild(option);
         });
@@ -1757,15 +1690,11 @@
       function closeShareDialog(){ shareDialog.hidden = true; pendingShareFile = null; }
       async function shareFileWithPeer(file, peerNodeId){
         await ajaxPost(file.shareUrl, { next:"/", shared:"on", peer_node_id: peerNodeId || "*" });
-        const stickyKey = fileShareStickyKey(file);
-        if(stickyKey) stickySharedVisibility.set(stickyKey, true);
       }
       async function toggleShare(file){
         if(file.shared){
           if(!confirm(`Freigabe wirklich deaktivieren?\n${file.name}`)) return;
           await ajaxPost(file.shareUrl, { next:"/", shared:"off" });
-          const stickyKey = fileShareStickyKey(file);
-          if(stickyKey) stickySharedVisibility.delete(stickyKey);
           return;
         }
         openShareDialog(file);

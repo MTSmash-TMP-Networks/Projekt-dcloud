@@ -7,7 +7,6 @@ larger than one safe UDP datagram.
 
 from __future__ import annotations
 
-from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from dataclasses import dataclass, field
 import json
 import logging
@@ -16,7 +15,7 @@ from typing import Any, Callable, Mapping
 from urllib import error, parse, request
 
 from .http_relay import RelayError, RelayHttpResponse, HttpRelayClient, RELAY_HOST
-from .peers import Peer, PeerProvider
+from .peers import Peer
 from ..crypto import b64decode, derive_node_id, sign_bytes, verify_signature
 from ..identity import NodeIdentity
 from ..manifests import FileManifest, canonical_manifest_bytes
@@ -77,54 +76,24 @@ def _relay_http_message(response: RelayHttpResponse) -> str:
 
 
 def canonical_revocation_bytes(data: dict[str, Any]) -> bytes:
-    """Stable bytes that are signed by the file owner for share revocations.
-
-    Newer revocations bind the removal to the exact manifest signature that was
-    visible when the owner disabled sharing. That makes delayed relay delivery
-    safe: an old revoke cannot remove a freshly re-shared manifest version.
-    """
+    """Stable bytes that are signed by the file owner for share revocations."""
     signable = {
         "action": REVOCATION_ACTION,
         "manifest_id": str(data["manifest_id"]),
         "owner_node_id": str(data["owner_node_id"]),
         "owner_public_key": str(data["owner_public_key"]),
     }
-
-    revoked_signature = str(data.get("revoked_manifest_signature", "") or "")
-    if revoked_signature:
-        signable["revoked_manifest_signature"] = revoked_signature
-
-    revoked_at = str(data.get("revoked_at", "") or "")
-    if revoked_at:
-        signable["revoked_at"] = revoked_at
-
     return json.dumps(signable, sort_keys=True, separators=(",", ":")).encode("utf-8")
 
 
-def build_manifest_revocation(manifest: FileManifest | str, identity: NodeIdentity) -> dict[str, Any]:
-    """Create a signed revocation payload for an old shared manifest.
-
-    ``manifest`` may still be a string for compatibility with older call sites,
-    but passing the full FileManifest is preferred because the revocation can
-    then be tied to the exact manifest signature being revoked.
-    """
-    if isinstance(manifest, FileManifest):
-        manifest_id = manifest.manifest_id
-        revoked_manifest_signature = manifest.signature
-    else:
-        manifest_id = str(manifest)
-        revoked_manifest_signature = ""
-
+def build_manifest_revocation(manifest_id: str, identity: NodeIdentity) -> dict[str, Any]:
+    """Create a signed revocation payload for an old shared manifest id."""
     payload: dict[str, Any] = {
         "action": REVOCATION_ACTION,
         "manifest_id": str(manifest_id),
         "owner_node_id": identity.node_id,
         "owner_public_key": identity.public_key_b64,
-        "revoked_at": str(int(time.time())),
     }
-    if revoked_manifest_signature:
-        payload["revoked_manifest_signature"] = revoked_manifest_signature
-
     payload["signature"] = sign_bytes(identity.private_key, canonical_revocation_bytes(payload))
     return payload
 
@@ -230,7 +199,6 @@ class P2PStorageClient:
         default_web_port: int = 8787,
         relay_client: HttpRelayClient | None = None,
         relay_clients: Mapping[str, HttpRelayClient] | None = None,
-        peer_provider: PeerProvider | None = None,
     ) -> None:
         self.timeout = float(timeout)
         self.default_web_port = int(default_web_port)
@@ -240,7 +208,6 @@ class P2PStorageClient:
             self.set_relay_clients(relay_clients)
         elif relay_client is not None:
             self.set_relay_clients({relay_client.relay_url: relay_client})
-        self.peer_provider = peer_provider
 
     def set_relay_clients(self, relay_clients: Mapping[str, HttpRelayClient] | list[HttpRelayClient]) -> None:
         if isinstance(relay_clients, list):
@@ -263,20 +230,6 @@ class P2PStorageClient:
             host = f"[{host}]"
         port = int(peer.web_port or self.default_web_port)
         return f"http://{host}:{port}"
-
-    def _direct_url(self, peer: Peer, path: str) -> str:
-        return f"{self.api_base(peer)}{path}"
-
-    def _parent_proxy_url(self, peer: Peer, path: str) -> str | None:
-        if not peer.route_via_node_id:
-            return None
-        parent = self.peer_provider.get_peer(peer.route_via_node_id) if hasattr(self, "peer_provider") else None
-        if parent is None:
-            return None
-        if not parent.host or parent.host == RELAY_HOST:
-            return None
-        quoted_target = parse.quote(str(peer.node_id), safe="")
-        return f"{self.api_base(parent)}/api/p2p/forward/{quoted_target}{path}"
 
     def _relay_client_for(self, peer: Peer) -> HttpRelayClient | None:
         if not peer.relay_url:
@@ -326,8 +279,7 @@ class P2PStorageClient:
         compression: str | None,
     ) -> PeerTransferResult:
         path = f"/api/p2p/chunks/{parse.quote(digest)}"
-        url = self._direct_url(peer, path)
-        proxy_url = self._parent_proxy_url(peer, path)
+        url = f"{self.api_base(peer)}{path}"
         headers = {
             "Content-Type": "application/octet-stream",
             "X-DCloud-Chunk-Original-Size": str(int(original_size)),
@@ -337,18 +289,16 @@ class P2PStorageClient:
         if compression:
             headers["X-DCloud-Chunk-Compression"] = compression
         if peer.host != RELAY_HOST:
-            for attempt_url, label in ((url, "stored"), (proxy_url, "stored via parent-proxy")):
-                if not attempt_url:
-                    continue
-                req = request.Request(attempt_url, data=stored_data, headers=headers, method="POST")
-                try:
-                    with request.urlopen(req, timeout=self.timeout) as response:
-                        if 200 <= response.status < 300:
-                            return PeerTransferResult(peer.node_id, True, label)
-                except (OSError, error.URLError, error.HTTPError):
-                    LOG.debug("Chunk upload to peer %s failed", peer.node_id, exc_info=True)
-            if not self._relay_available(peer):
-                return PeerTransferResult(peer.node_id, False, "Direkt- und Parent-Proxy-Upload fehlgeschlagen")
+            req = request.Request(url, data=stored_data, headers=headers, method="POST")
+            try:
+                with request.urlopen(req, timeout=self.timeout) as response:
+                    if 200 <= response.status < 300:
+                        return PeerTransferResult(peer.node_id, True, "stored")
+                    return PeerTransferResult(peer.node_id, False, f"HTTP {response.status}")
+            except (OSError, error.URLError, error.HTTPError) as exc:
+                LOG.debug("Chunk upload to peer %s failed", peer.node_id, exc_info=True)
+                if not self._relay_available(peer):
+                    return PeerTransferResult(peer.node_id, False, str(exc))
         if self._relay_available(peer):
             last_error = ""
             for attempt in range(3):
@@ -373,22 +323,18 @@ class P2PStorageClient:
 
     def get_chunk(self, peer: Peer, *, digest: str) -> bytes:
         path = f"/api/p2p/chunks/{parse.quote(digest)}"
-        url = self._direct_url(peer, path)
-        proxy_url = self._parent_proxy_url(peer, path)
+        url = f"{self.api_base(peer)}{path}"
         direct_error: Exception | None = None
         if peer.host != RELAY_HOST:
-            for attempt_url in (url, proxy_url):
-                if not attempt_url:
-                    continue
-                req = request.Request(attempt_url, headers={"Accept": "application/octet-stream"}, method="GET")
-                try:
-                    with request.urlopen(req, timeout=self.timeout) as response:
-                        if response.status != 200:
-                            raise StorageError(f"Peer {peer.node_id} returned HTTP {response.status} for chunk {digest}")
-                        return response.read()
-                except (OSError, error.URLError, error.HTTPError, StorageError) as exc:
-                    direct_error = exc
-                    LOG.debug("Direct chunk download from peer %s failed", peer.node_id, exc_info=True)
+            req = request.Request(url, headers={"Accept": "application/octet-stream"}, method="GET")
+            try:
+                with request.urlopen(req, timeout=self.timeout) as response:
+                    if response.status != 200:
+                        raise StorageError(f"Peer {peer.node_id} returned HTTP {response.status} for chunk {digest}")
+                    return response.read()
+            except (OSError, error.URLError, error.HTTPError, StorageError) as exc:
+                direct_error = exc
+                LOG.debug("Direct chunk download from peer %s failed", peer.node_id, exc_info=True)
         if self._relay_available(peer):
             last_error: Exception | None = None
             for attempt in range(3):
@@ -411,20 +357,17 @@ class P2PStorageClient:
         data = json.dumps(payload, sort_keys=True).encode("utf-8")
         headers = {"Content-Type": "application/json", "Accept": "application/json"}
         if peer.host != RELAY_HOST:
-            urls = [self._direct_url(peer, path), self._parent_proxy_url(peer, path)]
-            for idx, url in enumerate(urls):
-                if not url:
-                    continue
-                req = request.Request(url, data=data, headers=headers, method="POST")
-                try:
-                    with request.urlopen(req, timeout=self.timeout) as response:
-                        if 200 <= response.status < 300:
-                            suffix = "" if idx == 0 else " via parent-proxy"
-                            return PeerTransferResult(peer.node_id, True, f"{success_message}{suffix}")
-                except (OSError, error.URLError, error.HTTPError):
-                    LOG.debug(log_message, peer.node_id, exc_info=True)
-            if not self._relay_available(peer):
-                return PeerTransferResult(peer.node_id, False, "Direkt- und Parent-Proxy-Request fehlgeschlagen")
+            url = f"{self.api_base(peer)}{path}"
+            req = request.Request(url, data=data, headers=headers, method="POST")
+            try:
+                with request.urlopen(req, timeout=self.timeout) as response:
+                    if 200 <= response.status < 300:
+                        return PeerTransferResult(peer.node_id, True, success_message)
+                    return PeerTransferResult(peer.node_id, False, f"HTTP {response.status}")
+            except (OSError, error.URLError, error.HTTPError) as exc:
+                LOG.debug(log_message, peer.node_id, exc_info=True)
+                if not self._relay_available(peer):
+                    return PeerTransferResult(peer.node_id, False, str(exc))
         if self._relay_available(peer):
             try:
                 response = self._forward_via_relay(peer, method="POST", path=path, headers=headers, body=data)
@@ -479,37 +422,6 @@ def _rotated_targets(targets: list[Peer | None], target_ids: list[str], start_in
     return rotated
 
 
-def prioritize_storage_peers(peers: list[Peer]) -> list[Peer]:
-    """Sort storage targets for BitTorrent-like *direct-first* chunk transport.
-
-    Order rules:
-    1) Directly reachable peers first.
-    2) Hybrid peers (direct + relay fallback) before relay-only peers.
-    3) Within each class, prefer peers with more free storage.
-    """
-
-    def _transport_rank(peer: Peer) -> int:
-        host = (peer.host or "").strip()
-        is_relay_only = host in {RELAY_HOST, "__relay__"}
-        # Peers that advertise a direct endpoint and also a relay fallback stay
-        # in the fast lane: direct transfer is always attempted first.
-        has_relay_fallback = bool(peer.relay_url)
-        if not is_relay_only and not has_relay_fallback:
-            return 0
-        if not is_relay_only and has_relay_fallback:
-            return 1
-        return 2
-
-    return sorted(
-        peers,
-        key=lambda peer: (
-            _transport_rank(peer),
-            -(int(peer.free_storage_bytes) if peer.free_storage_bytes is not None else -1),
-            peer.node_id,
-        ),
-    )
-
-
 def distribute_file_chunks(
     *,
     source_path,
@@ -520,7 +432,6 @@ def distribute_file_chunks(
     min_replicas_with_peers: int = DEFAULT_MIN_REPLICAS_WITH_PEERS,
     progress_callback: Callable[[dict[str, Any]], None] | None = None,
     chunk_size_bytes: int | None = None,
-    max_in_flight_chunks: int = 1,
 ) -> DistributedUploadResult:
     """Read a file once, compress each chunk and place it on local/peer targets.
 
@@ -534,13 +445,12 @@ def distribute_file_chunks(
     if effective_chunk_size <= 0:
         effective_chunk_size = chunk_store.chunk_size
 
-    sorted_peers = prioritize_storage_peers(peers)
-    if sorted_peers:
+    if peers:
         # Prefer active remote storage first so even small one-chunk uploads use
         # decentralized capacity. The local node remains in the target ring to
         # provide a second copy when there is only one peer.
-        targets: list[Peer | None] = [*sorted_peers, None]
-        target_ids = [*[peer.node_id for peer in sorted_peers], local_node_id]
+        targets: list[Peer | None] = [*peers, None]
+        target_ids = [*[peer.node_id for peer in peers], local_node_id]
         desired_replicas = min(max(1, int(min_replicas_with_peers)), len(targets))
     else:
         targets = [None]
@@ -571,23 +481,44 @@ def distribute_file_chunks(
         compressed_chunks=0,
     )
 
-    max_in_flight = max(1, int(max_in_flight_chunks))
-
-    def _process_chunk(index: int, raw: bytes) -> dict[str, Any]:
-        stored_data, compression = chunk_store.prepare_chunk_data(raw)
-        digest = chunk_store.digest_for_stored_data(stored_data)
-        locations: list[str] = []
-        remote_successes = 0
-        remote_failures = 0
-        local_chunks = 0
-
-        for target, node_id in _rotated_targets(targets, target_ids, index):
-            if len(locations) >= desired_replicas:
+    with source_path.open("rb") as handle:
+        index = 0
+        while True:
+            raw = handle.read(effective_chunk_size)
+            if not raw:
                 break
-            if node_id in locations:
-                continue
-            if target is None:
-                try:
+            notify(
+                phase="chunk_read",
+                status=f"Chunk {index + 1}/{max(total_chunks, 1)} wird gelesen…",
+                current_chunk=index + 1,
+                total_chunks=total_chunks,
+                raw_bytes_processed=result.raw_bytes,
+            )
+            stored_data, compression = chunk_store.prepare_chunk_data(raw)
+            digest = chunk_store.digest_for_stored_data(stored_data)
+            locations: list[str] = []
+            notify(
+                phase="chunk_compressed",
+                status=f"Chunk {index + 1}/{max(total_chunks, 1)} komprimiert: {len(raw)} -> {len(stored_data)} Bytes",
+                current_chunk=index + 1,
+                total_chunks=total_chunks,
+                raw_bytes_processed=result.raw_bytes + len(raw),
+                stored_bytes=result.stored_bytes + len(stored_data),
+                compressed_chunks=result.compressed_chunks + (1 if compression else 0),
+            )
+
+            for target, node_id in _rotated_targets(targets, target_ids, index):
+                if len(locations) >= desired_replicas:
+                    break
+                if node_id in locations:
+                    continue
+                if target is None:
+                    notify(
+                        phase="local_store",
+                        status=f"Chunk {index + 1}/{max(total_chunks, 1)} wird lokal als Sicherheitskopie gespeichert…",
+                        current_chunk=index + 1,
+                        current_peer=local_node_id,
+                    )
                     chunk_store.write_stored_chunk(
                         stored_data,
                         original_size=len(raw),
@@ -595,26 +526,61 @@ def distribute_file_chunks(
                         compression=compression,
                         digest=digest,
                         validate=False,
-                        enforce_capacity=False,
                     )
-                    local_chunks += 1
+                    result.local_chunks += 1
                     locations.append(local_node_id)
-                except StorageError:
-                    # If local quota is full, keep using remote capacity instead
-                    # of aborting the whole upload. This allows small local
-                    # shares (e.g. 5 GB) while still storing the file on peers.
-                    LOG.info("Local chunk fallback skipped due to storage limit for chunk %s", digest)
-                continue
+                    notify(
+                        phase="local_store_done",
+                        status=f"Chunk {index + 1}/{max(total_chunks, 1)} lokal gespeichert",
+                        local_chunks=result.local_chunks,
+                        current_peer=local_node_id,
+                    )
+                    continue
 
-            transfer = p2p_client.put_chunk(target, digest=digest, stored_data=stored_data, original_size=len(raw), stored_size=len(stored_data), index=index, compression=compression)
-            if transfer.ok:
-                remote_successes += 1
-                locations.append(node_id)
-            else:
-                remote_failures += 1
+                peer_name = target.to_dict().get("display_name") or target.name or target.node_id[:12]
+                notify(
+                    phase="peer_upload",
+                    status=f"Chunk {index + 1}/{max(total_chunks, 1)} wird an {peer_name} übertragen…",
+                    current_chunk=index + 1,
+                    current_peer=peer_name,
+                )
+                transfer = p2p_client.put_chunk(
+                    target,
+                    digest=digest,
+                    stored_data=stored_data,
+                    original_size=len(raw),
+                    stored_size=len(stored_data),
+                    index=index,
+                    compression=compression,
+                )
+                if transfer.ok:
+                    result.remote_successes += 1
+                    locations.append(node_id)
+                    notify(
+                        phase="peer_upload_done",
+                        status=f"Chunk {index + 1}/{max(total_chunks, 1)} auf {peer_name} gespeichert",
+                        remote_successes=result.remote_successes,
+                        current_peer=peer_name,
+                    )
+                else:
+                    result.remote_failures += 1
+                    notify(
+                        phase="peer_upload_failed",
+                        status=f"{peer_name} nicht erreichbar: {transfer.message or 'unbekannter Fehler'}; nächstes Ziel wird versucht…",
+                        remote_failures=result.remote_failures,
+                        current_peer=peer_name,
+                        remote_error=transfer.message,
+                    )
 
-        if len(locations) < desired_replicas and local_node_id not in locations:
-            try:
+            if len(locations) < desired_replicas and local_node_id not in locations:
+                # Last-resort safety copy. This path is important if every
+                # remote peer failed before the local target was reached.
+                notify(
+                    phase="local_fallback",
+                    status=f"Chunk {index + 1}/{max(total_chunks, 1)} bekommt eine lokale Fallback-Kopie…",
+                    current_chunk=index + 1,
+                    current_peer=local_node_id,
+                )
                 chunk_store.write_stored_chunk(
                     stored_data,
                     original_size=len(raw),
@@ -622,70 +588,41 @@ def distribute_file_chunks(
                     compression=compression,
                     digest=digest,
                     validate=False,
-                    enforce_capacity=False,
                 )
-                local_chunks += 1
+                result.local_chunks += 1
                 locations.append(local_node_id)
-            except StorageError:
-                LOG.info("Local safety copy skipped due to storage limit for chunk %s", digest)
 
-        if not locations:
-            raise StorageError(
-                "Chunk konnte weder auf Peers noch lokal gespeichert werden (lokales Limit erreicht oder alle Peers fehlgeschlagen)"
+            if len(locations) > 1:
+                result.replicated_chunks += 1
+            if len(locations) < desired_replicas:
+                result.under_replicated_chunks += 1
+
+            entry: dict[str, Any] = {
+                "index": index,
+                "hash": digest,
+                "size": len(raw),
+                "stored_size": len(stored_data),
+                "locations": list(dict.fromkeys(locations)),
+            }
+            if compression:
+                entry["compression"] = compression
+                result.compressed_chunks += 1
+            result.chunks.append(entry)
+            result.raw_bytes += len(raw)
+            result.stored_bytes += len(stored_data)
+            notify(
+                phase="chunk_done",
+                status=f"Chunk {index + 1}/{max(total_chunks, 1)} abgeschlossen",
+                current_chunk=index + 1,
+                total_chunks=total_chunks,
+                raw_bytes_processed=result.raw_bytes,
+                stored_bytes=result.stored_bytes,
+                compressed_chunks=result.compressed_chunks,
+                local_chunks=result.local_chunks,
+                remote_successes=result.remote_successes,
+                remote_failures=result.remote_failures,
             )
-
-        entry: dict[str, Any] = {"index": index, "hash": digest, "size": len(raw), "stored_size": len(stored_data), "locations": list(dict.fromkeys(locations))}
-        if compression:
-            entry["compression"] = compression
-
-        return {
-            "entry": entry,
-            "raw_len": len(raw),
-            "stored_len": len(stored_data),
-            "remote_successes": remote_successes,
-            "remote_failures": remote_failures,
-            "local_chunks": local_chunks,
-            "compressed": bool(compression),
-            "replicated": len(locations) > 1,
-            "under_replicated": len(locations) < desired_replicas,
-        }
-
-    with source_path.open("rb") as handle, ThreadPoolExecutor(max_workers=max_in_flight) as pool:
-        pending: dict[Future[dict[str, Any]], int] = {}
-        index = 0
-
-        while True:
-            while len(pending) < max_in_flight:
-                raw = handle.read(effective_chunk_size)
-                if not raw:
-                    break
-                notify(phase="chunk_read", status=f"Chunk {index + 1}/{max(total_chunks, 1)} wird gelesen…", current_chunk=index + 1, total_chunks=total_chunks, raw_bytes_processed=result.raw_bytes)
-                fut = pool.submit(_process_chunk, index, raw)
-                pending[fut] = index
-                index += 1
-
-            if not pending:
-                break
-
-            done, _ = wait(set(pending.keys()), return_when=FIRST_COMPLETED)
-            for fut in done:
-                pending.pop(fut, None)
-                chunk_result = fut.result()
-                result.chunks.append(chunk_result["entry"])
-                result.raw_bytes += chunk_result["raw_len"]
-                result.stored_bytes += chunk_result["stored_len"]
-                result.remote_successes += chunk_result["remote_successes"]
-                result.remote_failures += chunk_result["remote_failures"]
-                result.local_chunks += chunk_result["local_chunks"]
-                if chunk_result["compressed"]:
-                    result.compressed_chunks += 1
-                if chunk_result["replicated"]:
-                    result.replicated_chunks += 1
-                if chunk_result["under_replicated"]:
-                    result.under_replicated_chunks += 1
-                notify(phase="chunk_done", status="Chunk abgeschlossen", current_chunk=len(result.chunks), total_chunks=total_chunks, raw_bytes_processed=result.raw_bytes, stored_bytes=result.stored_bytes, compressed_chunks=result.compressed_chunks, local_chunks=result.local_chunks, remote_successes=result.remote_successes, remote_failures=result.remote_failures)
-
-    result.chunks.sort(key=lambda item: int(item.get("index", 0)))
+            index += 1
 
     notify(
         phase="chunking_done",

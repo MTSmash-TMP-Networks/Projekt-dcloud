@@ -158,7 +158,6 @@ class ChunkStore:
         compression: str | None = None,
         digest: str | None = None,
         validate: bool = True,
-        enforce_capacity: bool = True,
     ) -> ChunkInfo:
         """Persist bytes that are already in their on-disk/transfer format.
 
@@ -181,8 +180,7 @@ class ChunkStore:
                 compression=compression,
             )
 
-        if enforce_capacity:
-            self.ensure_capacity(len(stored_data))
+        self.ensure_capacity(len(stored_data))
         target.parent.mkdir(parents=True, exist_ok=True)
         fd, tmp_name = tempfile.mkstemp(prefix="chunk-", suffix=".tmp", dir=self.tmp_dir)
         try:

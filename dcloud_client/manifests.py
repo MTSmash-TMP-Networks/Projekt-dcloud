@@ -6,7 +6,8 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 import json
-import sqlite3
+import os
+import tempfile
 from typing import Any
 
 from .crypto import b64decode, sha256_hex, sign_bytes, verify_signature
@@ -90,22 +91,6 @@ class ManifestStore:
     def __init__(self, chunk_store: ChunkStore) -> None:
         self.chunk_store = chunk_store
         self.manifests_dir = chunk_store.manifests_dir
-        self.db_path = self.manifests_dir / "manifest_store.db"
-        self._init_db()
-
-    def _connect(self) -> sqlite3.Connection:
-        self.manifests_dir.mkdir(parents=True, exist_ok=True)
-        conn = sqlite3.connect(self.db_path)
-        conn.row_factory = sqlite3.Row
-        return conn
-
-    def _init_db(self) -> None:
-        with self._connect() as conn:
-            conn.execute("CREATE TABLE IF NOT EXISTS manifests (manifest_id TEXT PRIMARY KEY, data TEXT NOT NULL)")
-            conn.execute("CREATE TABLE IF NOT EXISTS manifest_aliases (old_id TEXT PRIMARY KEY, new_id TEXT NOT NULL)")
-            conn.execute("CREATE TABLE IF NOT EXISTS folders (owner_node_id TEXT NOT NULL, folder_path TEXT NOT NULL, PRIMARY KEY(owner_node_id, folder_path))")
-            conn.execute("CREATE TABLE IF NOT EXISTS share_revocations (manifest_id TEXT NOT NULL, owner_node_id TEXT NOT NULL, data TEXT NOT NULL, PRIMARY KEY(manifest_id, owner_node_id))")
-            conn.execute("CREATE TABLE IF NOT EXISTS file_deletions (manifest_id TEXT NOT NULL, owner_node_id TEXT NOT NULL, data TEXT NOT NULL, PRIMARY KEY(manifest_id, owner_node_id))")
 
     def create_for_file(
         self,
@@ -176,7 +161,16 @@ class ManifestStore:
         access: dict[str, Any] | None = None,
     ) -> FileManifest:
         now = datetime.now(timezone.utc).isoformat()
-        normalized_chunks = self._normalize_chunk_entries(chunk_entries, identity)
+        normalized_chunks = sorted((dict(chunk) for chunk in chunk_entries), key=lambda item: int(item["index"]))
+        for chunk in normalized_chunks:
+            chunk["index"] = int(chunk["index"])
+            chunk["hash"] = str(chunk["hash"])
+            chunk["size"] = int(chunk["size"])
+            chunk["stored_size"] = int(chunk.get("stored_size", chunk["size"]))
+            locations = [str(node_id) for node_id in chunk.get("locations", []) if str(node_id)]
+            chunk["locations"] = list(dict.fromkeys(locations)) or [identity.node_id]
+            if chunk.get("compression") in {None, ""}:
+                chunk.pop("compression", None)
 
         unique_targets = list(dict.fromkeys(
             str(location)
@@ -197,7 +191,7 @@ class ManifestStore:
             "folder_path": sanitize_folder_path(folder_path),
             "access": access or {"visibility": "private", "shared_with": []},
             "placement": placement or {
-                "strategy": "distributed_direct_first_chunks",
+                "strategy": "distributed_round_robin_chunks",
                 "target_count": len(unique_targets),
                 "targets": unique_targets,
                 "transfer_status": "local_only" if unique_targets == [identity.node_id] else "stored_on_peers",
@@ -209,73 +203,32 @@ class ManifestStore:
         self.save(manifest)
         return manifest
 
-    def update_from_chunk_entries(
-        self,
-        manifest_id: str,
-        *,
-        file_name: str,
-        file_size: int,
-        chunk_entries: list[dict[str, Any]],
-        identity: NodeIdentity,
-        folder_path: str = DEFAULT_FOLDER,
-        placement: dict[str, Any] | None = None,
-    ) -> FileManifest:
-        """Update an existing owned manifest in-place while preserving manifest_id."""
-        manifest = self.load(manifest_id)
-        normalized_chunks = self._normalize_chunk_entries(chunk_entries, identity)
-        unique_targets = list(dict.fromkeys(
-            str(location)
-            for chunk in normalized_chunks
-            for location in chunk.get("locations", [])
-            if str(location)
-        ))
-        updates: dict[str, Any] = {
-            "file_name": file_name,
-            "file_size": int(file_size),
-            "chunks": normalized_chunks,
-            "folder_path": sanitize_folder_path(folder_path),
-            "placement": placement or {
-                "strategy": "distributed_direct_first_chunks",
-                "target_count": len(unique_targets),
-                "targets": unique_targets,
-                "transfer_status": "local_only" if unique_targets == [identity.node_id] else "stored_on_peers",
-            },
-        }
-        previous_chunk_hashes = [str(chunk["hash"]) for chunk in manifest.chunks]
-        updated_manifest = self._resign_manifest(manifest, identity, updates, rekey=False)
-        self.delete_chunks_if_unreferenced(previous_chunk_hashes)
-        return updated_manifest
-
-    def _normalize_chunk_entries(self, chunk_entries: list[dict[str, Any]], identity: NodeIdentity) -> list[dict[str, Any]]:
-        normalized_chunks = sorted((dict(chunk) for chunk in chunk_entries), key=lambda item: int(item["index"]))
-        for chunk in normalized_chunks:
-            chunk["index"] = int(chunk["index"])
-            chunk["hash"] = str(chunk["hash"])
-            chunk["size"] = int(chunk["size"])
-            chunk["stored_size"] = int(chunk.get("stored_size", chunk["size"]))
-            locations = [str(node_id) for node_id in chunk.get("locations", []) if str(node_id)]
-            chunk["locations"] = list(dict.fromkeys(locations)) or [identity.node_id]
-            if chunk.get("compression") in {None, ""}:
-                chunk.pop("compression", None)
-        return normalized_chunks
-
     def save(self, manifest: FileManifest) -> Path:
-        data = json.dumps(manifest.to_dict(), sort_keys=True)
-        self.chunk_store.ensure_capacity(len(data.encode("utf-8")))
-        with self._connect() as conn:
-            conn.execute("INSERT OR REPLACE INTO manifests (manifest_id, data) VALUES (?, ?)", (manifest.manifest_id, data))
-        return self.path_for(manifest.manifest_id)
+        self.manifests_dir.mkdir(parents=True, exist_ok=True)
+        data = json.dumps(manifest.to_dict(), sort_keys=True, indent=2).encode("utf-8")
+        self.chunk_store.ensure_capacity(len(data))
+        fd, tmp_name = tempfile.mkstemp(prefix="manifest-", suffix=".tmp", dir=self.chunk_store.tmp_dir)
+        try:
+            with os.fdopen(fd, "wb") as handle:
+                handle.write(data)
+                handle.flush()
+            target = self.path_for(manifest.manifest_id)
+            Path(tmp_name).replace(target)
+            return target
+        except Exception:
+            Path(tmp_name).unlink(missing_ok=True)
+            raise
 
     def path_for(self, manifest_id: str) -> Path:
         return self.manifests_dir / f"{manifest_id}.json"
 
     def list_manifests(self) -> list[FileManifest]:
         manifests: list[FileManifest] = []
-        with self._connect() as conn:
-            rows = conn.execute("SELECT manifest_id FROM manifests ORDER BY manifest_id").fetchall()
-        for row in rows:
+        if not self.manifests_dir.exists():
+            return manifests
+        for path in sorted(self.manifests_dir.glob("*.json")):
             try:
-                manifests.append(self.load(str(row["manifest_id"])))
+                manifests.append(self.load(path.stem))
             except Exception:
                 continue
         return manifests
@@ -354,81 +307,21 @@ class ManifestStore:
         manifest: FileManifest,
         identity: NodeIdentity,
         updates: dict[str, Any],
-        *,
-        rekey: bool = False,
     ) -> FileManifest:
-        """Re-sign an owned manifest after metadata changes.
-
-        By default the existing manifest id is preserved. For access/share changes,
-        pass ``rekey=True`` so the changed manifest receives a fresh id. That keeps
-        old share revocation tombstones from invalidating a newly shared manifest
-        with the same id on remote peers.
-        """
         if manifest.owner_node_id != identity.node_id:
             raise StorageError("Only the owner can change this manifest")
-
-        old_manifest_id = manifest.manifest_id
         data = manifest.to_dict()
+        old_path = self.path_for(manifest.manifest_id)
         data.update(updates)
         data.pop("signature", None)
-
-        if rekey:
-            data.pop("manifest_id", None)
-            signature = sign_bytes(identity.private_key, canonical_manifest_bytes(data))
-            new_manifest_id = sha256_hex(canonical_manifest_bytes({**data, "signature": signature}))
-            updated = FileManifest.from_dict({
-                **data,
-                "manifest_id": new_manifest_id,
-                "signature": signature,
-            })
-            self.save(updated)
-
-            if new_manifest_id != old_manifest_id:
-                with self._connect() as conn:
-                    conn.execute("DELETE FROM manifests WHERE manifest_id = ?", (old_manifest_id,))
-                self._record_manifest_alias(old_manifest_id, new_manifest_id)
-
-            return updated
-
-        data["manifest_id"] = old_manifest_id
+        data.pop("manifest_id", None)
         signature = sign_bytes(identity.private_key, canonical_manifest_bytes(data))
-        updated = FileManifest.from_dict({**data, "signature": signature})
+        new_manifest_id = sha256_hex(canonical_manifest_bytes({**data, "signature": signature}))
+        updated = FileManifest.from_dict({**data, "manifest_id": new_manifest_id, "signature": signature})
         self.save(updated)
+        if old_path != self.path_for(updated.manifest_id):
+            old_path.unlink(missing_ok=True)
         return updated
-
-    def _load_manifest_aliases(self) -> dict[str, str]:
-        with self._connect() as conn:
-            rows = conn.execute("SELECT old_id, new_id FROM manifest_aliases").fetchall()
-        return {str(row["old_id"]): str(row["new_id"]) for row in rows if str(row["old_id"]) != str(row["new_id"])}
-
-    def _save_manifest_aliases(self, aliases: dict[str, str]) -> None:
-        with self._connect() as conn:
-            conn.execute("DELETE FROM manifest_aliases")
-            conn.executemany("INSERT INTO manifest_aliases (old_id, new_id) VALUES (?, ?)", aliases.items())
-
-    def _record_manifest_alias(self, old_manifest_id: str, new_manifest_id: str) -> None:
-        old_manifest_id = str(old_manifest_id)
-        new_manifest_id = str(new_manifest_id)
-        if not old_manifest_id or not new_manifest_id or old_manifest_id == new_manifest_id:
-            return
-        aliases = self._load_manifest_aliases()
-        resolved_new = new_manifest_id
-        aliases[old_manifest_id] = resolved_new
-        for alias, current in list(aliases.items()):
-            if current == old_manifest_id:
-                aliases[alias] = resolved_new
-        aliases = {old_id: new_id for old_id, new_id in aliases.items() if old_id != new_id}
-        self._save_manifest_aliases(aliases)
-
-    def resolve_manifest_id(self, manifest_id: str, *, aliases: dict[str, str] | None = None) -> str:
-        manifest_id = str(manifest_id)
-        aliases = aliases if aliases is not None else self._load_manifest_aliases()
-        seen: set[str] = set()
-        current = manifest_id
-        while current in aliases and current not in seen:
-            seen.add(current)
-            current = aliases[current]
-        return current
 
     def set_shared(
         self,
@@ -440,24 +333,7 @@ class ManifestStore:
         manifest = self.load(manifest_id)
         targets = list(dict.fromkeys(str(item) for item in (shared_with or ["*"]) if str(item)))
         access = {"visibility": "shared" if shared else "private", "shared_with": targets if shared else []}
-
-        current_access = manifest.access or {"visibility": "private", "shared_with": []}
-        current_visibility = str(current_access.get("visibility", "private"))
-        current_targets = list(dict.fromkeys(str(item) for item in current_access.get("shared_with", []) if str(item)))
-        normalized_current = {
-            "visibility": "shared" if current_visibility in {"shared", "public"} else "private",
-            "shared_with": current_targets if current_visibility in {"shared", "public"} else [],
-        }
-
-        if normalized_current == access:
-            # No access change: avoid creating a new manifest id/signature revision.
-            return manifest
-
-        access_with_revision = {
-            **access,
-            "changed_at": datetime.now(timezone.utc).isoformat(),
-        }
-        return self._resign_manifest(manifest, identity, {"access": access_with_revision}, rekey=True)
+        return self._resign_manifest(manifest, identity, {"access": access})
 
     def update_placement(
         self,
@@ -480,25 +356,44 @@ class ManifestStore:
             raise StorageError(f"Manifest signature verification failed for {manifest.manifest_id}")
         return self.save(manifest)
 
+    @property
+    def folders_path(self) -> Path:
+        return self.manifests_dir / "folders.json"
+
     def _load_saved_folders(self, owner_node_id: str) -> list[str]:
-        with self._connect() as conn:
-            rows = conn.execute("SELECT folder_path FROM folders WHERE owner_node_id = ? ORDER BY lower(folder_path)", (owner_node_id,)).fetchall()
-        return [sanitize_folder_path(str(row["folder_path"])) for row in rows]
+        if not self.folders_path.exists():
+            return []
+        try:
+            data = json.loads(self.folders_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            return []
+        return [sanitize_folder_path(folder) for folder in data.get(owner_node_id, [])]
 
     def _save_folders(self, owner_node_id: str, folders: list[str]) -> None:
-        with self._connect() as conn:
-            conn.execute("DELETE FROM folders WHERE owner_node_id = ?", (owner_node_id,))
-            conn.executemany("INSERT OR IGNORE INTO folders (owner_node_id, folder_path) VALUES (?, ?)", [(owner_node_id, sanitize_folder_path(folder)) for folder in folders])
+        self.manifests_dir.mkdir(parents=True, exist_ok=True)
+        data: dict[str, list[str]] = {}
+        if self.folders_path.exists():
+            try:
+                loaded = json.loads(self.folders_path.read_text(encoding="utf-8"))
+                data = {str(key): list(value) for key, value in loaded.items()}
+            except (json.JSONDecodeError, TypeError):
+                data = {}
+        data[owner_node_id] = folders
+        self.folders_path.write_text(json.dumps(data, sort_keys=True, indent=2), encoding="utf-8")
+
+    @property
+    def share_revocations_path(self) -> Path:
+        return self.manifests_dir / "share_revocations.json"
 
     def _load_share_revocations(self) -> list[dict[str, Any]]:
-        with self._connect() as conn:
-            rows = conn.execute("SELECT data FROM share_revocations").fetchall()
-        raw = []
-        for row in rows:
-            try:
-                raw.append(json.loads(str(row["data"])))
-            except json.JSONDecodeError:
-                continue
+        if not self.share_revocations_path.exists():
+            return []
+        try:
+            raw = json.loads(self.share_revocations_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            return []
+        if not isinstance(raw, list):
+            return []
         result: list[dict[str, Any]] = []
         for item in raw:
             if not isinstance(item, dict):
@@ -516,9 +411,11 @@ class ManifestStore:
         return result
 
     def _save_share_revocations(self, revocations: list[dict[str, Any]]) -> None:
-        with self._connect() as conn:
-            conn.execute("DELETE FROM share_revocations")
-            conn.executemany("INSERT OR REPLACE INTO share_revocations (manifest_id, owner_node_id, data) VALUES (?, ?, ?)", [(str(item.get("manifest_id", "")), str(item.get("owner_node_id", "")), json.dumps(item, sort_keys=True)) for item in revocations])
+        self.manifests_dir.mkdir(parents=True, exist_ok=True)
+        self.share_revocations_path.write_text(
+            json.dumps(revocations, sort_keys=True, indent=2),
+            encoding="utf-8",
+        )
 
     def add_share_revocation(self, revocation: dict[str, Any], target_node_ids: list[str] | None = None) -> None:
         """Persist a share revocation/tombstone and optional delivery targets."""
@@ -575,39 +472,19 @@ class ManifestStore:
             for record in self._load_share_revocations()
         )
 
-    def clear_share_revocation(self, manifest_id: str, owner_node_id: str) -> bool:
-        """Remove a previously persisted share revocation tombstone.
-
-        This is needed when an owner intentionally shares the exact same
-        manifest again. Without clearing the old tombstone first, receivers
-        reject the fresh manifest as already revoked and it disappears again
-        after relay delivery.
-        """
-        target_manifest_id = str(manifest_id)
-        target_owner_node_id = str(owner_node_id)
-        records = self._load_share_revocations()
-        filtered = [
-            record
-            for record in records
-            if not (
-                record.get("manifest_id") == target_manifest_id
-                and record.get("owner_node_id") == target_owner_node_id
-            )
-        ]
-        if len(filtered) == len(records):
-            return False
-        self._save_share_revocations(filtered)
-        return True
+    @property
+    def file_deletions_path(self) -> Path:
+        return self.manifests_dir / "file_deletions.json"
 
     def _load_file_deletions(self) -> list[dict[str, Any]]:
-        with self._connect() as conn:
-            rows = conn.execute("SELECT data FROM file_deletions").fetchall()
-        raw = []
-        for row in rows:
-            try:
-                raw.append(json.loads(str(row["data"])))
-            except json.JSONDecodeError:
-                continue
+        if not self.file_deletions_path.exists():
+            return []
+        try:
+            raw = json.loads(self.file_deletions_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            return []
+        if not isinstance(raw, list):
+            return []
         result: list[dict[str, Any]] = []
         for item in raw:
             if not isinstance(item, dict):
@@ -625,9 +502,11 @@ class ManifestStore:
         return result
 
     def _save_file_deletions(self, deletions: list[dict[str, Any]]) -> None:
-        with self._connect() as conn:
-            conn.execute("DELETE FROM file_deletions")
-            conn.executemany("INSERT OR REPLACE INTO file_deletions (manifest_id, owner_node_id, data) VALUES (?, ?, ?)", [(str(item.get("manifest_id", "")), str(item.get("owner_node_id", "")), json.dumps(item, sort_keys=True)) for item in deletions])
+        self.manifests_dir.mkdir(parents=True, exist_ok=True)
+        self.file_deletions_path.write_text(
+            json.dumps(deletions, sort_keys=True, indent=2),
+            encoding="utf-8",
+        )
 
     def add_file_deletion(self, deletion: dict[str, Any], target_node_ids: list[str] | None = None) -> None:
         """Persist a signed file-delete tombstone and optional delivery targets."""
@@ -706,14 +585,12 @@ class ManifestStore:
         return removed
 
     def load(self, manifest_id: str) -> FileManifest:
-        resolved_manifest_id = self.resolve_manifest_id(manifest_id)
-        with self._connect() as conn:
-            row = conn.execute("SELECT data FROM manifests WHERE manifest_id = ?", (resolved_manifest_id,)).fetchone()
-        if row is None:
+        path = self.path_for(manifest_id)
+        if not path.exists():
             raise StorageError(f"Manifest {manifest_id} not found")
-        manifest = FileManifest.from_dict(json.loads(str(row["data"])))
+        manifest = FileManifest.from_dict(json.loads(path.read_text(encoding="utf-8")))
         if not self.verify(manifest):
-            raise StorageError(f"Manifest signature verification failed for {resolved_manifest_id}")
+            raise StorageError(f"Manifest signature verification failed for {manifest_id}")
         return manifest
 
     def verify(self, manifest: FileManifest) -> bool:
@@ -731,8 +608,8 @@ class ManifestStore:
 
     def delete(self, manifest_id: str, *, delete_unreferenced_chunks: bool = True) -> None:
         manifest = self.load(manifest_id)
-        with self._connect() as conn:
-            conn.execute("DELETE FROM manifests WHERE manifest_id = ?", (manifest.manifest_id,))
+        manifest_path = self.path_for(manifest_id)
+        manifest_path.unlink(missing_ok=True)
 
         if not delete_unreferenced_chunks:
             return

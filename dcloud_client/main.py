@@ -7,6 +7,7 @@ import logging
 import socket
 import sys
 import threading
+import time
 from contextlib import closing
 from pathlib import Path
 
@@ -22,8 +23,6 @@ from .identity import IdentityManager
 from .manifests import DEFAULT_FOLDER, ManifestStore, sanitize_folder_path
 from .network.peers import InMemoryPeerProvider
 from .network.smb_server import EmbeddedSmbServer
-from .network.p2p_storage import P2PStorageClient, distribute_file_chunks
-from .network.http_relay import RELAY_HOST
 from .network.udp_discovery import UdpDiscoveryTransport
 from .storage import ChunkStore
 from .web.app import create_app
@@ -136,46 +135,6 @@ def main() -> None:
         smb_status["port"] = int(smb_server.actual_port)
         smb_status["last_error"] = smb_server.last_error
 
-        p2p_client = P2PStorageClient(default_web_port=config.web.port)
-
-        def _store_smb_file_with_peer_distribution(source: Path, *, file_name: str, folder_path: str) -> None:
-            storage_peers = peer_provider.list_peers()
-            uses_relay_storage = any(getattr(peer, "host", "") == RELAY_HOST for peer in storage_peers)
-            relay_safe_chunk_size = int(getattr(config.network, "relay_chunk_size_bytes", 512 * 1024))
-            effective_chunk_size = min(chunk_store.chunk_size, relay_safe_chunk_size) if uses_relay_storage else chunk_store.chunk_size
-            upload_result = distribute_file_chunks(
-                source_path=source,
-                chunk_store=chunk_store,
-                local_node_id=identity.node_id,
-                peers=storage_peers,
-                p2p_client=p2p_client,
-                chunk_size_bytes=effective_chunk_size,
-                max_in_flight_chunks=getattr(config.network, "relay_max_in_flight_chunks", 4),
-            )
-            placement = {
-                "strategy": "distributed_direct_first_chunks",
-                "target_count": len(upload_result.targets),
-                "targets": upload_result.targets,
-                "transfer_status": upload_result.transfer_status,
-                "remote_successes": upload_result.remote_successes,
-                "remote_failures": upload_result.remote_failures,
-                "local_chunks": upload_result.local_chunks,
-                "compressed_chunks": upload_result.compressed_chunks,
-                "desired_replicas": upload_result.desired_replicas,
-                "replicated_chunks": upload_result.replicated_chunks,
-                "under_replicated_chunks": upload_result.under_replicated_chunks,
-                "raw_bytes": upload_result.raw_bytes,
-                "stored_bytes": upload_result.stored_bytes,
-            }
-            manifest_store.create_from_chunk_entries(
-                file_name=file_name,
-                file_size=source.stat().st_size,
-                chunk_entries=upload_result.chunks,
-                identity=identity,
-                folder_path=folder_path,
-                placement=placement,
-            )
-
         def sync_smb_virtual_view() -> None:
             previous_expected: set[Path] = set()
             previous_expected_dirs: set[Path] = {smb_root.resolve()}
@@ -252,31 +211,17 @@ def main() -> None:
                             rel = resolved.relative_to(smb_root.resolve())
                             folder_path = sanitize_folder_path(str(rel.parent).replace("\\", "/"))
                             try:
-                                _store_smb_file_with_peer_distribution(existing, file_name=existing.name, folder_path=folder_path or DEFAULT_FOLDER)
+                                manifest_store.create_for_file(existing, identity, folder_path=folder_path or DEFAULT_FOLDER)
                             except Exception:
                                 LOG.debug("SMB-View Sync: Import fehlgeschlagen für %s", existing, exc_info=True)
                             continue
                         if existing.stat().st_size != int(manifest.file_size):
                             # Datei via SMB geändert -> altes Manifest ersetzen
                             try:
+                                manifest_store.delete(manifest.manifest_id, delete_unreferenced_chunks=True)
                                 rel = resolved.relative_to(smb_root.resolve())
                                 folder_path = sanitize_folder_path(str(rel.parent).replace("\\", "/"))
-                                upload_result = chunk_store.store_file(existing)
-                                placement = {
-                                    "strategy": "distributed_direct_first_chunks",
-                                    "target_count": 1,
-                                    "targets": [identity.node_id],
-                                    "transfer_status": "local_only",
-                                }
-                                manifest_store.update_from_chunk_entries(
-                                    manifest.manifest_id,
-                                    file_name=existing.name,
-                                    file_size=existing.stat().st_size,
-                                    chunk_entries=upload_result.chunks,
-                                    identity=identity,
-                                    folder_path=folder_path or DEFAULT_FOLDER,
-                                    placement=placement,
-                                )
+                                manifest_store.create_for_file(existing, identity, folder_path=folder_path or DEFAULT_FOLDER)
                             except Exception:
                                 LOG.debug("SMB-View Sync: Update fehlgeschlagen für %s", existing, exc_info=True)
                     # Neue Ordner via SMB angelegt -> als virtuelle Ordner persistieren

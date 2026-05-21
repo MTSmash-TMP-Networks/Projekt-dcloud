@@ -353,12 +353,10 @@ class HttpRelayClient:
         last_error: Exception | None = None
         while time.monotonic() < deadline:
             try:
-                # Use longer long-poll windows to reduce tiny poll loops that can
-                # look like request floods on shared hosting access logs.
-                wait_seconds = min(0.5, max(0.1, deadline - time.monotonic()))
+                wait_seconds = min(3.0, max(0.5, deadline - time.monotonic()))
                 payload = self._post_json(
                     {"action": "poll_response", "request_id": request_id, "relay_request_id": request_id, "wait_seconds": wait_seconds},
-                    timeout=max(self.timeout, wait_seconds + 1.0),
+                    timeout=max(self.timeout, wait_seconds + 2.0),
                 )
                 if payload.get("ready"):
                     response = payload.get("response", {})
@@ -377,9 +375,7 @@ class HttpRelayClient:
                     )
             except RelayError as exc:
                 last_error = exc
-            # Backoff only after relay/protocol errors. Successful long-poll
-            # responses already block server-side and should not add client spin.
-            time.sleep(0.4)
+            time.sleep(0.1)
         if last_error is not None:
             raise RelayError(f"Relay-Transfer ohne Antwort: {last_error}") from last_error
         raise RelayError("Relay-Transfer ohne Antwort")
@@ -466,7 +462,7 @@ class HttpRelayTransport:
         # slow PHP/FastCGI hosts a response POST can stall for several seconds;
         # handling envelopes in small worker threads keeps the receiver polling
         # and prevents uploads from freezing mid-file.
-        self.max_request_workers = 12
+        self.max_request_workers = 4
         self._worker_lock = threading.Lock()
         self._worker_slots = threading.BoundedSemaphore(self.max_request_workers)
         self._stop_event = threading.Event()
@@ -582,7 +578,7 @@ class HttpRelayTransport:
                 pass
 
     def _poll_and_process_requests(self) -> None:
-        for envelope in self.relay_client.poll_requests(max_requests=64, wait_seconds=10.0):
+        for envelope in self.relay_client.poll_requests(max_requests=16, wait_seconds=5.0):
             request_id = str(envelope.get("request_id", ""))
             if not request_id:
                 continue

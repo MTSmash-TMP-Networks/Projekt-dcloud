@@ -5,13 +5,12 @@ from __future__ import annotations
 from pathlib import Path
 import tempfile
 from typing import Any, Protocol
+from io import BytesIO
 import threading
 from uuid import uuid4
 import atexit
 import base64
 import socket
-import time
-from urllib import request as request_module
 
 from flask import Flask, Response, abort, flash, jsonify, redirect, render_template, request, send_file, url_for
 from werkzeug.utils import secure_filename
@@ -67,16 +66,9 @@ def build_folder_tree(manifests: list[FileManifest], folders: list[str] | None =
     grouped: dict[str, list[FileManifest]] = {folder: [] for folder in (folders or [DEFAULT_FOLDER])}
     for manifest in manifests:
         grouped.setdefault(manifest.folder_path, []).append(manifest)
-    folder_names = set(grouped)
-    visible_items: list[tuple[str, list[FileManifest]]] = []
-    for folder, files in grouped.items():
-        has_child_folder = any(other != folder and other.startswith(f"{folder}/") for other in folder_names)
-        if folder != DEFAULT_FOLDER and not files and has_child_folder:
-            continue
-        visible_items.append((folder, files))
     return [
         {"name": folder, "files": sorted(files, key=lambda item: item.file_name.lower())}
-        for folder, files in sorted(visible_items, key=lambda item: item[0].lower())
+        for folder, files in sorted(grouped.items(), key=lambda item: item[0].lower())
     ]
 
 
@@ -95,29 +87,8 @@ def create_app(
     relay_clients: dict[str, HttpRelayClient] = {}
     relay_transports: dict[str, HttpRelayTransport] = {}
     relay_lock = threading.RLock()
-    p2p_client = P2PStorageClient(default_web_port=config.web.port, peer_provider=peer_provider)
+    p2p_client = P2PStorageClient(default_web_port=config.web.port)
     upload_progress = UploadProgressTracker()
-    synced_share_peer_ids: set[str] = set()
-    last_full_share_sync_monotonic: float = 0.0
-    full_share_sync_interval_seconds = 20.0
-
-    def _is_loopback_request() -> bool:
-        remote = (request.remote_addr or "").strip()
-        if remote in {"127.0.0.1", "::1"}:
-            return True
-        if remote.startswith("::ffff:"):
-            return remote.removeprefix("::ffff:") == "127.0.0.1"
-        return False
-
-    @app.before_request
-    def _block_public_web_ui() -> Response | None:
-        # If users expose the parent node's web port for NAT parent-proxy
-        # forwarding, the full dashboard/settings UI must still stay local-only.
-        if _is_loopback_request():
-            return None
-        if request.path.startswith("/api/p2p/"):
-            return None
-        return jsonify({"ok": False, "message": "Web UI ist nur lokal erreichbar"}), 403
 
     def _is_ajax_request() -> bool:
         return request.headers.get("X-Requested-With") == "XMLHttpRequest" or request.accept_mimetypes.best == "application/json"
@@ -185,36 +156,8 @@ def create_app(
             peer_connector.prune_stale_peers()
         return peer_provider.list_peers()
 
-
-    def _display_peers(peers: list[Any] | None = None) -> list[Any]:
-        """Return a UI-stable peer list while preserving distinct devices.
-
-        We only collapse clear duplicates for the *same* node identity.
-        Different nodes are always kept visible even if they share names or
-        transient relay endpoints.
-        """
-        source = peers if peers is not None else _list_active_peers()
-        by_key: dict[tuple[str, ...], Any] = {}
-        for peer in source:
-            node_id = str(getattr(peer, "node_id", "") or "").strip()
-            if node_id:
-                key: tuple[str, ...] = ("node-id", node_id)
-            else:
-                # Fallback for malformed announcements without node_id:
-                # keep endpoint-based dedupe, but avoid collapsing legitimate
-                # nodes that happen to share a display name.
-                host = str(getattr(peer, "host", "") or "")
-                udp_port = str(int(getattr(peer, "udp_port", 0) or 0))
-                web_port = str(int(getattr(peer, "web_port", 0) or 0))
-                client_type = str(getattr(peer, "client_type", "") or "")
-                name = (getattr(peer, "name", "") or "").strip().lower()
-                key = ("endpoint", host, udp_port, web_port, client_type, name)
-            existing = by_key.get(key)
-            if existing is None or getattr(peer, "last_seen", 0) >= getattr(existing, "last_seen", 0):
-                by_key[key] = peer
-        return list(by_key.values())
-
     def stats_payload(stats: StorageStats) -> dict[str, int | str]:
+        smb_root_path = str(app.config.get("DCLOUD_SMB_ROOT") or config.storage.path)
         return {
             "path": str(stats.path),
             "limitBytes": stats.limit_bytes,
@@ -230,33 +173,28 @@ def create_app(
     def _accepts_peer_storage(peers: list[Any]) -> bool:
         if config.node.client_type == "server":
             return True
-        return _pc_peer_count(peers) > 0
+        return _pc_peer_count(peers) >= 1
 
     def _storage_policy_message(peers: list[Any]) -> str:
         if config.node.client_type == "server":
             return "Server-Modus: Dieser Client darf als dauerhafter Speicherziel-Knoten für P2P-Daten genutzt werden."
-        if _pc_peer_count(peers) > 0:
-            return "PC-Modus: Speicherfreigabe ist aktiv, weil mindestens ein weiterer PC im Netzwerk sichtbar ist; als Upload-Ziele werden weiterhin Server-Knoten bevorzugt."
-        return "PC-Modus: Speicherfreigabe wird aktiviert, sobald mindestens ein weiterer PC sichtbar ist; Upload-Speicherziele bleiben Server-Knoten."
-
-    def _is_local_peer_endpoint(peer: Any) -> bool:
-        host = str(getattr(peer, "host", "") or "").strip().lower()
-        web_port = int(getattr(peer, "web_port", 0) or 0)
-        if web_port != int(config.web.port):
-            return False
-        return host in {"127.0.0.1", "localhost", "::1"}
+        if _accepts_peer_storage(peers):
+            return "PC-Modus: P2P-Ablage ist aktiv, weil mindestens ein weiterer PC erreichbar ist."
+        return "PC-Modus: Keine P2P-Ablage auf diesem Client, bis ein weiterer PC erreichbar ist."
 
     def _eligible_storage_peers(peers: list[Any] | None = None) -> list[Any]:
         peers = peers if peers is not None else _list_active_peers()
+        pc_peers = [peer for peer in peers if getattr(peer, "client_type", None) == "pc"]
         targets: list[Any] = []
         for peer in peers:
-            if getattr(peer, "node_id", None) == identity.node_id:
-                continue
-            if _is_local_peer_endpoint(peer):
-                continue
             peer_type = getattr(peer, "client_type", None)
             accepts_peer_storage = bool(getattr(peer, "accepts_peer_storage", False))
-            if peer_type == "server" and accepts_peer_storage:
+            if peer_type == "server" or accepts_peer_storage:
+                targets.append(peer)
+            elif peer_type == "pc" and (config.node.client_type == "pc" or len(pc_peers) >= 2):
+                targets.append(peer)
+            elif peer_type is None:
+                # Backwards-compatible fallback for older peers that do not yet advertise a role.
                 targets.append(peer)
         seen: set[str] = set()
         unique: list[Any] = []
@@ -315,8 +253,6 @@ def create_app(
             "additionalRelayUrls": extra_relay_urls(config.network.relay_urls),
             "additionalRelayUrlsText": "\n".join(extra_relay_urls(config.network.relay_urls)),
             "relayEnabled": bool(config.network.relay_urls),
-            "relayBuiltinEnabled": bool(getattr(config.network, "relay_builtin_enabled", True)),
-            "relayChildren": bool(getattr(config.network, "relay_children", False)),
             "relaySecret": "",
             "relaySecretSet": False,
             "relayTokenMode": "automatic-daily",
@@ -333,7 +269,7 @@ def create_app(
         }
 
     def _relay_url_list() -> list[str]:
-        return normalize_relay_urls(getattr(config.network, "relay_urls", [config.network.relay_url]), include_default=bool(getattr(config.network, "relay_builtin_enabled", True)))
+        return normalize_relay_urls(getattr(config.network, "relay_urls", [config.network.relay_url]), include_default=True)
 
     def _relay_statuses() -> list[dict[str, Any]]:
         statuses: list[dict[str, Any]] = []
@@ -471,10 +407,7 @@ def create_app(
         except Exception:
             # Keep the discovered relays at least for the current runtime if the
             # config file cannot be updated.
-            config.network.relay_urls = normalize_relay_urls(
-                [config.network.relay_urls, new_urls],
-                include_default=bool(getattr(config.network, "relay_builtin_enabled", False)),
-            )
+            config.network.relay_urls = normalize_relay_urls([config.network.relay_urls, new_urls], include_default=True)
             config.network.relay_url = config.network.relay_urls[0]
         _configure_relay_transport()
         _sync_peer_connector_settings()
@@ -601,32 +534,6 @@ def create_app(
                     failed += 1
         return delivered, failed
 
-    def _sync_shared_manifests(peers: list[Any] | None = None, *, only_node_ids: set[str] | None = None) -> tuple[int, int]:
-        """Send owned shared manifests to selected active peers.
-
-        ``only_node_ids`` can be used to only sync newly seen peers once, which
-        avoids repetitive manifest upserts on every dashboard state poll.
-        """
-        active_peers = peers if peers is not None else _list_active_peers()
-        peers_by_id = {str(peer.node_id): peer for peer in active_peers if getattr(peer, "node_id", None)}
-        delivered = 0
-        failed = 0
-        for manifest in manifest_store.list_manifests():
-            if manifest.owner_node_id != identity.node_id or not manifest_store.is_shared(manifest):
-                continue
-            access = manifest.access or {}
-            targets = [str(node_id) for node_id in access.get("shared_with", []) if str(node_id)] or ["*"]
-            target_peers = active_peers if "*" in targets else [peers_by_id[node_id] for node_id in targets if node_id in peers_by_id]
-            if only_node_ids is not None:
-                target_peers = [peer for peer in target_peers if str(peer.node_id) in only_node_ids]
-            for peer in target_peers:
-                result = p2p_client.post_manifest(peer, manifest)
-                if result.ok:
-                    delivered += 1
-                else:
-                    failed += 1
-        return delivered, failed
-
     def _delete_owned_manifest_with_peer_cleanup(manifest: FileManifest) -> dict[str, int]:
         """Delete an owned manifest locally and ask peers to remove copies/chunks."""
         if manifest.owner_node_id != identity.node_id:
@@ -693,22 +600,11 @@ def create_app(
         return payload
 
     def state_payload() -> dict[str, Any]:
-        nonlocal synced_share_peer_ids, last_full_share_sync_monotonic
         _sync_peer_connector_settings()
         stats = chunk_store.stats()
         peers = _list_active_peers()
         _deliver_pending_share_revocations(peers)
         _deliver_pending_file_deletions(peers)
-        active_peer_ids = {str(peer.node_id) for peer in peers if getattr(peer, "node_id", None)}
-        new_peer_ids = active_peer_ids - synced_share_peer_ids
-        now = time.monotonic()
-        needs_full_resync = (now - last_full_share_sync_monotonic) >= full_share_sync_interval_seconds
-        if needs_full_resync:
-            _sync_shared_manifests(peers)
-            last_full_share_sync_monotonic = now
-        elif new_peer_ids:
-            _sync_shared_manifests(peers, only_node_ids=new_peer_ids)
-        synced_share_peer_ids = active_peer_ids
         manifests = manifest_store.list_visible_for_node(identity.node_id)
         folders = manifest_store.list_folders_for_node(identity.node_id)
         tree = build_folder_tree(manifests, folders)
@@ -718,7 +614,7 @@ def create_app(
             "settings": settings_payload(stats, peers),
             "network": network_payload(),
             "networkCapacity": _network_storage_capacity(stats, peers),
-            "peers": [peer.to_dict() for peer in _display_peers(peers)],
+            "peers": [peer.to_dict() for peer in peers],
             "fileCount": len(manifests),
             "folders": folders,
             "folderTree": folder_tree_json(tree),
@@ -736,8 +632,8 @@ def create_app(
             identity=identity,
             stats=stats,
             stats_json=stats_payload(stats),
-            peers=_display_peers(),
-            peers_json=[peer.to_dict() for peer in _display_peers()],
+            peers=_list_active_peers(),
+            peers_json=[peer.to_dict() for peer in _list_active_peers()],
             settings_json=settings_payload(stats),
             network_json=network_payload(),
             manifests=manifests,
@@ -789,8 +685,8 @@ def create_app(
         uses_relay_storage = any(getattr(peer, "host", "") == RELAY_HOST for peer in storage_peers)
         relay_safe_chunk_size = int(getattr(config.network, "relay_chunk_size_bytes", 512 * 1024))
         effective_chunk_size = min(chunk_store.chunk_size, relay_safe_chunk_size) if uses_relay_storage else chunk_store.chunk_size
-        upload_result = distribute_file_chunks(source_path=temp_path, chunk_store=chunk_store, local_node_id=identity.node_id, peers=storage_peers, p2p_client=p2p_client, progress_callback=_upload_server_progress(upload_id), chunk_size_bytes=effective_chunk_size, max_in_flight_chunks=getattr(config.network, "relay_max_in_flight_chunks", 4))
-        placement = {"strategy": "distributed_direct_first_chunks", "target_count": len(upload_result.targets), "targets": upload_result.targets, "transfer_status": upload_result.transfer_status, "remote_successes": upload_result.remote_successes, "remote_failures": upload_result.remote_failures, "local_chunks": upload_result.local_chunks, "compressed_chunks": upload_result.compressed_chunks, "desired_replicas": upload_result.desired_replicas, "replicated_chunks": upload_result.replicated_chunks, "under_replicated_chunks": upload_result.under_replicated_chunks, "raw_bytes": upload_result.raw_bytes, "stored_bytes": upload_result.stored_bytes}
+        upload_result = distribute_file_chunks(source_path=temp_path, chunk_store=chunk_store, local_node_id=identity.node_id, peers=storage_peers, p2p_client=p2p_client, progress_callback=_upload_server_progress(upload_id), chunk_size_bytes=effective_chunk_size)
+        placement = {"strategy": "distributed_round_robin_chunks", "target_count": len(upload_result.targets), "targets": upload_result.targets, "transfer_status": upload_result.transfer_status, "remote_successes": upload_result.remote_successes, "remote_failures": upload_result.remote_failures, "local_chunks": upload_result.local_chunks, "compressed_chunks": upload_result.compressed_chunks, "desired_replicas": upload_result.desired_replicas, "replicated_chunks": upload_result.replicated_chunks, "under_replicated_chunks": upload_result.under_replicated_chunks, "raw_bytes": upload_result.raw_bytes, "stored_bytes": upload_result.stored_bytes}
         manifest = manifest_store.create_from_chunk_entries(file_name=safe_name, file_size=file_size, chunk_entries=upload_result.chunks, identity=identity, folder_path=folder_path, placement=placement)
         return True, {"manifest": manifest, "upload_result": upload_result}, file_size
 
@@ -905,10 +801,9 @@ def create_app(
                 p2p_client=p2p_client,
                 progress_callback=_upload_server_progress(upload_id),
                 chunk_size_bytes=effective_chunk_size,
-                max_in_flight_chunks=getattr(config.network, "relay_max_in_flight_chunks", 4),
             )
             placement = {
-                "strategy": "distributed_direct_first_chunks",
+                "strategy": "distributed_round_robin_chunks",
                 "target_count": len(upload_result.targets),
                 "targets": upload_result.targets,
                 "transfer_status": upload_result.transfer_status,
@@ -1086,21 +981,10 @@ def create_app(
                 previous_targets = [
                     str(item) for item in (old_manifest.access or {}).get("shared_with", []) if str(item)
                 ] or ["*"]
-                revocation = build_manifest_revocation(old_manifest, identity)
+                revocation = build_manifest_revocation(old_manifest.manifest_id, identity)
                 manifest_store.add_share_revocation(revocation, previous_targets)
 
             manifest = manifest_store.set_shared(manifest_id, shared, identity, shared_with=shared_with or None)
-            if shared:
-                manifest_store.clear_share_revocation(manifest.manifest_id, identity.node_id)
-
-                old_targets = [
-                    str(item) for item in (old_manifest.access or {}).get("shared_with", []) if str(item)
-                ] or ["*"]
-                if manifest.manifest_id != old_manifest.manifest_id and manifest_store.is_shared(old_manifest):
-                    # Access/target changes rekey manifests. Revoke the old id on previous
-                    # recipients so peers do not oscillate between old/new share entries.
-                    revocation = build_manifest_revocation(old_manifest, identity)
-                    manifest_store.add_share_revocation(revocation, old_targets)
 
             delivered = 0
             failed = 0
@@ -1153,17 +1037,14 @@ def create_app(
                 shared_storage_gb=request.form.get("shared_storage_gb", bytes_to_gib(config.storage.limit_bytes)),
                 relay_server_url=request.form.get("relay_server_url"),
                 relay_server_urls=request.form.get("relay_server_urls", request.form.get("relay_server_url", "\n".join(extra_relay_urls(config.network.relay_urls)))),
-                relay_builtin_enabled=request.form.get("relay_builtin_enabled") == "on",
-                relay_children=request.form.get("relay_children") == "on",
                 smb_enabled=request.form.get("smb_enabled") == "on",
-                auto_discovery_enabled=request.form.get("auto_discovery_enabled") == "on",
                 smb_username=request.form.get("smb_username", config.smb.username),
                 smb_password=request.form.get("smb_password", config.smb.password),
             )
             chunk_store.limit_bytes = config.storage.limit_bytes
             _configure_relay_transport()
             _sync_peer_connector_settings()
-            relay_note = f", {len(config.network.relay_urls)} Relay(s) aktiv" if config.network.relay_urls else ", Relay deaktiviert"
+            relay_note = f", {len(config.network.relay_urls)} PHP-Relay(s) aktiv"
             message = (
                 f"Einstellungen gespeichert: {client_type_label(config.node.client_type)}, "
                 f"{bytes_to_gib(config.storage.limit_bytes):g} GB freigegeben{relay_note}, "
@@ -1242,11 +1123,6 @@ def create_app(
                     continue
                 tried.add(node_id)
                 peer = peers_by_id.get(node_id)
-                if peer is None and peer_provider is not None:
-                    # Shared manifests can reference peers that are currently not
-                    # listed as "active" yet (e.g. relay timing). Try known peers
-                    # by node id before giving up.
-                    peer = peer_provider.get_peer(node_id)
                 if peer is None:
                     continue
                 try:
@@ -1305,42 +1181,6 @@ def create_app(
         except (ValueError, StorageError) as exc:
             return jsonify({"ok": False, "message": str(exc), "state": state_payload()}), 400
 
-    @app.route("/api/p2p/forward/<target_node_id>/<path:subpath>", methods=["GET", "POST"])
-    def api_p2p_forward(target_node_id: str, subpath: str) -> Response:
-        target = peer_provider.get_peer(str(target_node_id))
-        if target is None or target.route_via_node_id != identity.node_id:
-            abort(404)
-        if not target.host or target.host == "__relay__":
-            abort(400, "Forward target is not directly reachable by parent")
-        target_path = f"/api/p2p/{subpath}"
-        query = request.query_string.decode("utf-8", errors="ignore")
-        if query:
-            target_path = f"{target_path}?{query}"
-        host = target.host
-        if host in {"0.0.0.0", "::", ""}:
-            host = "127.0.0.1"
-        if ":" in host and not host.startswith("["):
-            host = f"[{host}]"
-        port = int(target.web_port or config.web.port)
-        target_url = f"http://{host}:{port}{target_path}"
-        allowed_headers = {
-            "Content-Type": request.headers.get("Content-Type"),
-            "Accept": request.headers.get("Accept", "application/json"),
-            "X-DCloud-Chunk-Original-Size": request.headers.get("X-DCloud-Chunk-Original-Size"),
-            "X-DCloud-Chunk-Stored-Size": request.headers.get("X-DCloud-Chunk-Stored-Size"),
-            "X-DCloud-Chunk-Index": request.headers.get("X-DCloud-Chunk-Index"),
-            "X-DCloud-Chunk-Compression": request.headers.get("X-DCloud-Chunk-Compression"),
-        }
-        clean_headers = {k: v for k, v in allowed_headers.items() if v}
-        req = request_module.Request(target_url, data=request.get_data(), headers=clean_headers, method=request.method)
-        try:
-            with request_module.urlopen(req, timeout=8.0) as upstream:
-                body = upstream.read()
-                response_headers = {"Content-Type": upstream.headers.get("Content-Type", "application/octet-stream")}
-                return Response(body, status=upstream.status, headers=response_headers)
-        except Exception as exc:
-            return jsonify({"ok": False, "message": f"Forwarding failed: {exc}"}), 502
-
     @app.post("/api/p2p/manifests/revoke")
     def api_p2p_revoke_manifest() -> Response:
         try:
@@ -1349,32 +1189,17 @@ def create_app(
                 raise StorageError("Revocation payload must be a JSON object")
             owner_node_id = verify_manifest_revocation(data)
             manifest_id = str(data["manifest_id"])
+            manifest_store.add_share_revocation(data, [])
             removed = False
             try:
                 manifest = manifest_store.load(manifest_id)
             except StorageError:
-                manifest_store.add_share_revocation(data, [])
                 return jsonify({"ok": True, "manifest_id": manifest_id, "removed": False, "state": state_payload()})
             if manifest.owner_node_id != owner_node_id:
                 raise StorageError("Revocation owner does not match manifest owner")
             if manifest.owner_node_id == identity.node_id:
                 raise StorageError("Own manifests cannot be revoked through the peer API")
-
-            revoked_signature = str(data.get("revoked_manifest_signature", "") or "")
-            if revoked_signature and manifest.signature != revoked_signature:
-                # A delayed relay revocation for an older manifest version arrived after a
-                # newer share was already imported. Keep the current manifest visible and
-                # do not persist a tombstone for this stale revocation.
-                return jsonify({
-                    "ok": True,
-                    "manifest_id": manifest_id,
-                    "removed": False,
-                    "ignored_stale_revocation": True,
-                    "state": state_payload(),
-                })
-
-            manifest_store.add_share_revocation(data, [])
-            manifest_store.delete(manifest.manifest_id, delete_unreferenced_chunks=False)
+            manifest_store.delete(manifest_id, delete_unreferenced_chunks=False)
             removed = True
             return jsonify({"ok": True, "manifest_id": manifest_id, "removed": removed, "state": state_payload()})
         except (ValueError, TypeError, StorageError) as exc:
@@ -1426,27 +1251,9 @@ def create_app(
             if not manifest_store.may_access(manifest, identity.node_id):
                 raise StorageError("Manifest is not shared with this node")
             if manifest_store.is_share_revoked(manifest.manifest_id, manifest.owner_node_id):
-                # A newer share for the same manifest_id re-enables access; remove stale tombstone.
-                manifest_store.clear_share_revocation(manifest.manifest_id, manifest.owner_node_id)
+                raise StorageError("Manifest share has already been revoked")
             if manifest_store.is_file_deleted(manifest.manifest_id, manifest.owner_node_id):
                 raise StorageError("Manifest has already been deleted by its owner")
-
-            existing_manifest = None
-            try:
-                existing_manifest = manifest_store.load(manifest.manifest_id)
-            except StorageError:
-                existing_manifest = None
-
-            if existing_manifest is not None and existing_manifest.signature == manifest.signature:
-                # Identical share payloads are delivered periodically to keep peers in sync.
-                # Skip redundant SQLite writes so the client list does not flap on no-op updates.
-                return jsonify({
-                    "ok": True,
-                    "manifest_id": manifest.manifest_id,
-                    "unchanged": True,
-                    "state": state_payload(),
-                })
-
             manifest_store.save_imported(manifest)
             return jsonify({"ok": True, "manifest_id": manifest.manifest_id, "state": state_payload()})
         except (ValueError, TypeError, StorageError) as exc:

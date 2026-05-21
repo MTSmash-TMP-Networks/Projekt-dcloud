@@ -17,15 +17,13 @@ declare(strict_types=1);
  * upload_max_filesize and memory_limit on the webserver.
  */
 
-const DCLOUD_RELAY_VERSION = '1.3.0';
+const DCLOUD_RELAY_VERSION = '1.2.9';
 const DCLOUD_RELAY_TOKEN_ROTATION_SECONDS = 86400;
 const DCLOUD_PEER_TTL_SECONDS = 45;
 const DCLOUD_MESSAGE_TTL_SECONDS = 900;
-const DCLOUD_MAX_REQUESTS_PER_POLL = 64;
+const DCLOUD_MAX_REQUESTS_PER_POLL = 16;
 const DCLOUD_MAX_ENCODED_BODY_BYTES = 268435456; // 256 MiB base64 payload
 const DCLOUD_CLEANUP_INTERVAL_SECONDS = 30;
-const DCLOUD_EXTERNAL_BODY_THRESHOLD_BYTES = 262144; // 256 KiB
-const DCLOUD_EXTERNAL_BODY_COMPRESS_MIN_BYTES = 65536; // 64 KiB
 
 header('Content-Type: application/json; charset=utf-8');
 header('Cache-Control: no-store');
@@ -317,77 +315,6 @@ function dcloud_response_file(string $requestId): string {
     return dcloud_storage_dir() . DIRECTORY_SEPARATOR . 'responses' . DIRECTORY_SEPARATOR . dcloud_safe_filename($requestId) . '.json';
 }
 
-function dcloud_body_store_dir(): string {
-    $dir = dcloud_storage_dir() . DIRECTORY_SEPARATOR . 'bodies';
-    if (!is_dir($dir) && !@mkdir($dir, 0700, true) && !is_dir($dir)) {
-        dcloud_fail('Relay-Body-Verzeichnis konnte nicht erstellt werden', 500);
-    }
-    return $dir;
-}
-
-function dcloud_write_external_body(string $base64Body): string {
-    $id = bin2hex(random_bytes(12));
-    $payload = $base64Body;
-    $suffix = '.b64';
-    if (strlen($base64Body) >= DCLOUD_EXTERNAL_BODY_COMPRESS_MIN_BYTES && function_exists('gzencode')) {
-        $compressed = @gzencode($base64Body, 4);
-        if (is_string($compressed) && $compressed !== '') {
-            $payload = $compressed;
-            $suffix = '.b64z';
-        }
-    }
-    $path = dcloud_body_store_dir() . DIRECTORY_SEPARATOR . $id . $suffix;
-    if (file_put_contents($path, $payload, LOCK_EX) === false) {
-        dcloud_fail('Relay konnte Body-Datei nicht schreiben', 500);
-    }
-    return basename($path);
-}
-
-function dcloud_read_external_body(string $name): string {
-    $safe = preg_replace('/[^A-Za-z0-9_.-]/', '', $name);
-    if ($safe === '') {
-        return '';
-    }
-    $isCompressed = substr($safe, -5) === '.b64z';
-    $isPlain = substr($safe, -4) === '.b64';
-    if (!$isCompressed && !$isPlain) {
-        return '';
-    }
-    $path = dcloud_body_store_dir() . DIRECTORY_SEPARATOR . $safe;
-    $raw = @file_get_contents($path);
-    if ($raw === false) {
-        return '';
-    }
-    @unlink($path);
-    if ($isCompressed) {
-        if (!function_exists('gzdecode')) {
-            return '';
-        }
-        $decoded = @gzdecode($raw);
-        if (!is_string($decoded)) {
-            return '';
-        }
-        return $decoded;
-    }
-    return $raw;
-}
-
-function dcloud_try_delete_external_body($name): void {
-    if (!is_string($name) || $name === '') {
-        return;
-    }
-    $safe = preg_replace('/[^A-Za-z0-9_.-]/', '', $name);
-    if ($safe === '') {
-        return;
-    }
-    $isCompressed = substr($safe, -5) === '.b64z';
-    $isPlain = substr($safe, -4) === '.b64';
-    if (!$isCompressed && !$isPlain) {
-        return;
-    }
-    @unlink(dcloud_body_store_dir() . DIRECTORY_SEPARATOR . $safe);
-}
-
 function dcloud_read_json_file(string $path, array $fallback): array {
     if (!file_exists($path)) {
         return $fallback;
@@ -448,9 +375,6 @@ function dcloud_cleanup(): void {
     foreach (glob($queueBase . DIRECTORY_SEPARATOR . '*' . DIRECTORY_SEPARATOR . '*.json') ?: [] as $file) {
         $expired = filemtime($file) !== false && $now - filemtime($file) > DCLOUD_MESSAGE_TTL_SECONDS;
         $payload = dcloud_read_json_file($file, []);
-        if (is_array($payload) && isset($payload['body_file'])) {
-            dcloud_try_delete_external_body($payload['body_file']);
-        }
         if ($expired || !$payload || !dcloud_envelope_is_valid($payload)) {
             @unlink($file);
         }
@@ -467,9 +391,6 @@ function dcloud_cleanup(): void {
     foreach ($responseFiles as $file) {
         $expired = filemtime($file) !== false && $now - filemtime($file) > DCLOUD_MESSAGE_TTL_SECONDS;
         $payload = dcloud_read_json_file($file, []);
-        if (is_array($payload) && isset($payload['body_file'])) {
-            dcloud_try_delete_external_body($payload['body_file']);
-        }
         if ($expired || !$payload || !dcloud_response_payload_is_valid($payload)) {
             @unlink($file);
         }
@@ -634,13 +555,8 @@ function dcloud_register(array $input): void {
         // stop treating this peer as a valid storage target.
         foreach (['public_key', 'client_type', 'shared_storage_bytes', 'free_storage_bytes', 'accepts_peer_storage', 'relay_url', 'relay_urls', 'relay_tokens', 'web_port', 'udp_port'] as $key) {
             $newValue = $sanitized[$key] ?? null;
-            // Preserve old metadata only when the current register payload did
-            // not provide that key at all (e.g. minimal heartbeat/probe).
-            // Explicit values like 0 or false are valid updates and must not be
-            // overwritten, otherwise PC mode/storage-off toggles get reverted.
-            $providedInRegister = is_array($peer) && array_key_exists($key, $peer);
-            $emptyNewValue = $newValue === null || $newValue === '' || $newValue === [];
-            if (!$providedInRegister && $emptyNewValue && array_key_exists($key, $existing)) {
+            $emptyNewValue = $newValue === null || $newValue === '' || $newValue === [] || $newValue === 0 || $newValue === false;
+            if ($emptyNewValue && array_key_exists($key, $existing)) {
                 $sanitized[$key] = $existing[$key];
             }
         }
@@ -658,13 +574,6 @@ function dcloud_register(array $input): void {
         }
     }
     dcloud_json_response(array_merge(['ok' => true, 'version' => DCLOUD_RELAY_VERSION, 'peers' => $peers, 'relay_urls' => $relayUrls], dcloud_current_relay_token()));
-}
-
-function dcloud_is_order_sensitive_request(array $payload): bool {
-    $path = (string)($payload['path'] ?? '');
-    return $path === '/api/p2p/manifests'
-        || $path === '/api/p2p/manifests/revoke'
-        || $path === '/api/p2p/files/delete';
 }
 
 function dcloud_enqueue_request(array $input): void {
@@ -703,17 +612,7 @@ function dcloud_enqueue_request(array $input): void {
         'body_base64' => $bodyBase64,
         'created_at' => time(),
     ];
-    if (strlen($bodyBase64) >= DCLOUD_EXTERNAL_BODY_THRESHOLD_BYTES) {
-        $envelope['body_file'] = dcloud_write_external_body($bodyBase64);
-        $envelope['body_base64'] = '';
-    }
-
-    // Use a microsecond timestamp prefix instead of time(). With second-level
-    // timestamps, a revoke and a fresh share in the same second can be sorted by
-    // random request_id and arrive in the wrong order.
-    $sequence = sprintf('%016d', (int)floor(microtime(true) * 1000000));
-    $file = dcloud_queue_dir($toNodeId) . DIRECTORY_SEPARATOR . $sequence . '-' . dcloud_safe_filename($requestId) . '.json';
-
+    $file = dcloud_queue_dir($toNodeId) . DIRECTORY_SEPARATOR . time() . '-' . dcloud_safe_filename($requestId) . '.json';
     dcloud_write_json_file($file, $envelope);
     dcloud_json_response(['ok' => true, 'request_id' => $requestId, 'to_node_id' => $toNodeId]);
 }
@@ -721,61 +620,25 @@ function dcloud_enqueue_request(array $input): void {
 function dcloud_poll_requests(array $input): void {
     $nodeId = dcloud_safe_id((string)($input['node_id'] ?? ''), 'node_id');
     $max = max(1, min(DCLOUD_MAX_REQUESTS_PER_POLL, (int)($input['max_requests'] ?? DCLOUD_MAX_REQUESTS_PER_POLL)));
-    $waitUntil = microtime(true) + max(0.0, min(15.0, (float)($input['wait_seconds'] ?? 0)));
-
+    $waitUntil = microtime(true) + max(0.0, min(5.0, (float)($input['wait_seconds'] ?? 0)));
     do {
         $files = glob(dcloud_queue_dir($nodeId) . DIRECTORY_SEPARATOR . '*.json') ?: [];
-
-        // Queue files are prefixed with microsecond timestamps. Lexicographic
-        // ordering now matches enqueue order much more reliably than time().
+        // Queue files are prefixed with unix timestamps, so lexicographic
+        // ordering already matches creation order without costly filemtime().
         sort($files, SORT_STRING);
-
         $requests = [];
-
-        foreach ($files as $file) {
-            if (count($requests) >= $max) {
-                break;
-            }
-
+        foreach (array_slice($files, 0, $max) as $file) {
             $payload = dcloud_read_json_file($file, []);
-
-            if (is_array($payload) && isset($payload['body_file']) && is_string($payload['body_file'])) {
-                $payload['body_base64'] = dcloud_read_external_body($payload['body_file']);
-                unset($payload['body_file']);
-            }
-
-            if (!$payload || !dcloud_envelope_is_valid($payload)) {
-                @unlink($file);
-                dcloud_log_event('warning', [
-                    'message' => 'Ungueltiger Queue-Eintrag wurde verworfen',
-                    'file' => basename($file),
-                ]);
-                continue;
-            }
-
-            $isOrderSensitive = dcloud_is_order_sensitive_request($payload);
-
-            // Critical fix:
-            // Manifest share/revoke/delete requests must not be delivered in the
-            // same batch as other control requests. The Python receiver processes
-            // relay envelopes in worker threads, so batching can reorder revoke
-            // and re-share operations. Chunks may still be batched normally.
-            if ($isOrderSensitive) {
-                if (count($requests) === 0) {
-                    @unlink($file);
-                    $requests[] = $payload;
-                }
-                break;
-            }
-
             @unlink($file);
-            $requests[] = $payload;
+            if ($payload && dcloud_envelope_is_valid($payload)) {
+                $requests[] = $payload;
+            } else {
+                dcloud_log_event('warning', ['message' => 'Ungueltiger Queue-Eintrag wurde verworfen', 'file' => basename($file)]);
+            }
         }
-
         if ($requests || microtime(true) >= $waitUntil) {
             dcloud_json_response(['ok' => true, 'requests' => $requests]);
         }
-
         usleep(200000);
     } while (true);
 }
@@ -797,26 +660,18 @@ function dcloud_post_response(array $input): void {
         'body_base64' => $bodyBase64,
         'created_at' => time(),
     ];
-    if (strlen($bodyBase64) >= DCLOUD_EXTERNAL_BODY_THRESHOLD_BYTES) {
-        $response['body_file'] = dcloud_write_external_body($bodyBase64);
-        $response['body_base64'] = '';
-    }
     dcloud_write_json_file(dcloud_response_file($requestId), $response);
     dcloud_json_response(['ok' => true, 'request_id' => $requestId]);
 }
 
 function dcloud_poll_response(array $input): void {
     $requestId = dcloud_safe_id(dcloud_first_string_value($input, ['request_id', 'id', 'relay_request_id']), 'request_id');
-    $waitUntil = microtime(true) + max(0.0, min(15.0, (float)($input['wait_seconds'] ?? 0)));
+    $waitUntil = microtime(true) + max(0.0, min(5.0, (float)($input['wait_seconds'] ?? 0)));
     $file = dcloud_response_file($requestId);
     do {
         if (file_exists($file)) {
             $response = dcloud_read_json_file($file, []);
             @unlink($file);
-            if (is_array($response) && isset($response['body_file']) && is_string($response['body_file'])) {
-                $response['body_base64'] = dcloud_read_external_body($response['body_file']);
-                unset($response['body_file']);
-            }
             if (!$response || !dcloud_response_payload_is_valid($response) || (string)($response['request_id'] ?? '') !== $requestId) {
                 dcloud_log_event('warning', ['message' => 'Ungueltige Relay-Antwort wurde verworfen', 'request_id' => $requestId]);
                 dcloud_json_response(['ok' => true, 'ready' => false]);
@@ -865,10 +720,7 @@ try {
     $action = dcloud_normalize_action((string)($input['action'] ?? ''));
     // Polling actions are latency-sensitive and can run very frequently.
     // Avoid a full relay filesystem sweep on every long-poll cycle.
-    if ($action === 'health') {
-        dcloud_cleanup();
-        @file_put_contents(dcloud_storage_dir() . DIRECTORY_SEPARATOR . 'cleanup.last', (string)time(), LOCK_EX);
-    } elseif (!in_array($action, ['poll_requests', 'poll_response'], true)) {
+    if (!in_array($action, ['poll_requests', 'poll_response'], true)) {
         dcloud_cleanup_if_due();
     }
     $input['action'] = $action;

@@ -1,0 +1,47 @@
+node:
+  name: dcloud-node
+  identity_path: ./storage/identity
+  client_type: server
+storage:
+  path: ./storage
+  limit_bytes: 53687091200
+  min_free_bytes: 1073741824
+  chunk_size_bytes: 4194304
+web:
+  host: 0.0.0.0
+  port: 8787
+network:
+  udp_host: 0.0.0.0
+  udp_port: 6881
+  udp_port_range:
+    start: 6881
+    end: 6891
+  bootstrap_nodes: []
+  tree_parent_nodes: []
+  relay_children: false
+  discovery_interval_seconds: 10
+  auto_discovery_enabled: true
+  auto_discovery_ports:
+  - 6881
+  auto_discovery_hosts:
+  - 255.255.255.255
+  startup_discovery_seconds: 12
+  startup_discovery_interval_seconds: 2
+  peer_timeout_seconds: 35
+  peer_cleanup_interval_seconds: 5
+  relay_url: https://support.tmp-networks.de/dcstorage/dcloud_relay.php
+  relay_urls:
+  - https://support.tmp-networks.de/dcstorage/dcloud_relay.php
+  relay_secret: ''
+  relay_poll_interval_seconds: 1
+  relay_request_timeout_seconds: 180
+  relay_chunk_size_bytes: 524288
+security:
+  protocol_magic: DCLOUD1
+smb:
+  enabled: true
+  host: 0.0.0.0
+  port: 445
+  share_name: DCLOUD
+  username: admin
+  password: admin
