@@ -125,7 +125,6 @@ function dcloud_relay_token_is_valid(string $provided): bool {
 }
 
 function dcloud_render_landing_page(): void {
-    $status = dcloud_current_relay_token();
     $peersPath = dcloud_storage_dir() . DIRECTORY_SEPARATOR . 'peers.json';
     $peers = dcloud_read_json_file($peersPath, []);
     $now = time();
@@ -140,19 +139,12 @@ function dcloud_render_landing_page(): void {
         }
     }
 
-    $expiresIn = max(0, (int)$status['relay_token_expires_at'] - $now);
     $html = '<!doctype html><html lang="de"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">'
-        . '<title>dcloud Relay Status</title><style>body{font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;background:#0f172a;color:#e2e8f0;margin:0;padding:2rem}main{max-width:720px;margin:0 auto;background:#111827;border:1px solid #1f2937;border-radius:14px;padding:1.5rem}h1{margin-top:0}dl{display:grid;grid-template-columns:max-content 1fr;gap:.5rem 1rem}dt{color:#94a3b8}dd{margin:0}.ok{color:#22c55e;font-weight:600}.hint{margin-top:1rem;color:#cbd5e1}</style></head><body><main>'
+        . '<title>dcloud Relay</title><style>body{font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;background:#0f172a;color:#e2e8f0;margin:0;padding:2rem}main{max-width:640px;margin:0 auto;background:#111827;border:1px solid #1f2937;border-radius:14px;padding:1.5rem}h1{margin-top:0}.ok{color:#22c55e;font-weight:600}.muted{color:#94a3b8}</style></head><body><main>'
         . '<h1>dcloud Relay aktiv</h1>'
-        . '<p class="ok">Der Endpoint ist erreichbar. Browser-Aufrufe zeigen diese Statusseite statt JSON.</p>'
-        . '<dl>'
-        . '<dt>Version</dt><dd>' . htmlspecialchars(DCLOUD_RELAY_VERSION, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') . '</dd>'
-        . '<dt>Aktive Peers</dt><dd>' . (string)$activePeers . '</dd>'
-        . '<dt>Token-Rotation</dt><dd>' . (string)DCLOUD_RELAY_TOKEN_ROTATION_SECONDS . ' Sekunden</dd>'
-        . '<dt>Token gueltig bis</dt><dd>' . gmdate('Y-m-d H:i:s', (int)$status['relay_token_expires_at']) . ' UTC</dd>'
-        . '<dt>Restlaufzeit</dt><dd>' . (string)$expiresIn . ' Sekunden</dd>'
-        . '</dl>'
-        . '<p class="hint">Peer-Clients nutzen weiter POST+JSON (action=health/register/send/poll/...</p>'
+        . '<p class="ok">Endpoint erreichbar.</p>'
+        . '<p>Aktive Peers: <strong>' . (string)$activePeers . '</strong></p>'
+        . '<p class="muted">Fuer Clients weiter per POST+JSON nutzen.</p>'
         . '</main></body></html>';
 
     while (ob_get_level() > 0) {
@@ -168,6 +160,7 @@ function dcloud_render_landing_page(): void {
     flush();
     exit;
 }
+
 
 function dcloud_json_response(array $payload, int $status = 200): void {
     // Guarantee a single JSON document per HTTP request. This also removes any
