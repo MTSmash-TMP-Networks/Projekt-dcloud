@@ -12,6 +12,7 @@ import atexit
 import base64
 import socket
 import time
+import subprocess
 
 from flask import Flask, Response, abort, flash, jsonify, redirect, render_template, request, send_file, url_for
 from werkzeug.utils import secure_filename
@@ -60,6 +61,16 @@ def human_bytes(value: int) -> str:
         amount /= 1024
     return f"{value} B"
 
+
+
+
+def current_git_revision() -> str:
+    try:
+        result = subprocess.run(["git", "rev-parse", "--short", "HEAD"], capture_output=True, text=True, check=True)
+        revision = result.stdout.strip()
+        return revision or "unbekannt"
+    except Exception:
+        return "unbekannt"
 
 
 def build_folder_tree(manifests: list[FileManifest], folders: list[str] | None = None) -> list[dict[str, object]]:
@@ -660,6 +671,7 @@ def create_app(
             "fileCount": len(manifests),
             "folders": folders,
             "folderTree": folder_tree_json(tree),
+            "gitRevision": current_git_revision(),
         }
 
     @app.get("/")
@@ -683,6 +695,7 @@ def create_app(
             folder_tree_json=folder_tree_json(tree),
             folders=folders,
             default_folder=DEFAULT_FOLDER,
+            git_revision=current_git_revision(),
         )
 
     @app.get("/files")

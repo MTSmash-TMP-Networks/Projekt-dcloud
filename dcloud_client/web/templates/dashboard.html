@@ -651,6 +651,7 @@
           <section class="status-card"><h3>Gespeicherte Dateien</h3><div class="status-kpi" id="status-file-count">0</div><div class="status-sub">Sichtbar in deinem Explorer</div></section>
           <section class="status-card"><h3>Verwendeter Speicher</h3><div class="status-kpi" id="status-storage-used">0 B</div><div class="status-sub">Lokale Chunks + Manifeste</div></section>
           <section class="status-card"><h3>Verbund-Kapazität</h3><div class="status-kpi" id="status-network-capacity">0 B</div><div class="status-sub" id="status-network-capacity-sub">0 aktive Speicher-Peers</div></section>
+          <section class="status-card"><h3>GitHub-Stand</h3><div class="status-kpi" id="status-git-revision">-</div><div class="status-sub">Lokaler Git Commit (short SHA)</div></section>
         </div>
       </div>
     </section>
@@ -849,7 +850,8 @@
       peers: {{ peers_json | tojson }},
       fileCount: {{ manifests | length | tojson }},
       folders: {{ folders | tojson }},
-      folderTree: {{ folder_tree_json | tojson }}
+      folderTree: {{ folder_tree_json | tojson }},
+      gitRevision: {{ git_revision | tojson }}
     };
     const DEFAULT_FOLDER = {{ default_folder | tojson }};
 
@@ -1069,6 +1071,7 @@
         document.getElementById("status-storage-used").textContent = formatBytes(appState.stats.usedBytes);
         document.getElementById("status-network-capacity").textContent = formatBytes(capacity.networkLimitBytes || settings.networkLimitBytes || appState.stats.limitBytes);
         document.getElementById("status-network-capacity-sub").textContent = `${capacity.storagePeerCount || settings.storagePeerCount || 0} aktive Speicher-Peer(s)`;
+        document.getElementById("status-git-revision").textContent = appState.gitRevision || "unbekannt";
         const ownPeerName = String(settings.nodeDisplayName || settings.nodeName || "").trim() || String(appState.nodeId || "Peer").slice(0, 12);
         if(trayPeerName) trayPeerName.textContent = `Peer: ${ownPeerName}`;
         const smbEnabled = !!settings.smbEnabled;
