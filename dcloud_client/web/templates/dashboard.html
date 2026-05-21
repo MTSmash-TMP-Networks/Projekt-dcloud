@@ -1939,11 +1939,49 @@
         openShareDialog(file);
       }
 
+      function refreshSelectedFileReference(previousId, replacement){
+        if(selectedTarget.kind !== "file" || !selectedTarget.file) return;
+        if(selectedTarget.file.id !== previousId) return;
+        if(replacement){
+          selectedTarget.file = replacement;
+        }else{
+          selectedTarget = { kind:"desktop" };
+        }
+      }
+      function findFileById(manifestId){
+        if(!manifestId) return null;
+        for(const [, node] of fsMap){
+          const hit = (node.files || []).find(file => file.id === manifestId);
+          if(hit) return hit;
+        }
+        return null;
+      }
+      function applyManifestIdentity(file, manifest){
+        if(!file || !manifest) return;
+        const nextId = manifest.manifest_id;
+        if(!nextId) return;
+        file.id = nextId;
+        file.downloadUrl = manifest.download_url || `/download/${nextId}`;
+        file.deleteUrl = manifest.delete_url || `/files/${nextId}/delete`;
+        file.shareUrl = manifest.share_url || `/files/${nextId}/share`;
+        file.offloadUrl = manifest.offload_url || `/files/${nextId}/offload`;
+      }
       async function offloadFile(file){
         if(!file.owner) throw new Error("Nur der Eigentümer kann auslagern");
         if(!confirm(`Lokale Chunk-Kopien auslagern und auf Peers verteilen?
 ${file.name}`)) return;
-        await ajaxPost(file.offloadUrl, { next:"/" });
+        const previousId = file.id;
+        const payload = await ajaxPost(file.offloadUrl, { next:"/" });
+        const nextId = payload && payload.manifest && payload.manifest.manifest_id;
+        if(nextId && nextId !== previousId){
+          const replacement = findFileById(nextId);
+          if(replacement){
+            refreshSelectedFileReference(previousId, replacement);
+          }else{
+            applyManifestIdentity(file, payload && payload.manifest);
+            refreshSelectedFileReference(previousId, file);
+          }
+        }
       }
       function openMovePeerDialog(file){
         pendingMovePeerFile = file;
@@ -1966,7 +2004,18 @@ ${file.name}`)) return;
       function closeMovePeerDialog(){ movePeerDialog.hidden = true; pendingMovePeerFile = null; }
       async function moveFileToPeer(file, targetPeerNodeId){
         if(!targetPeerNodeId) throw new Error("Bitte ein Ziel-Peer auswählen");
-        await ajaxPost(file.offloadUrl, { next:"/", target_peer_node_id: targetPeerNodeId, add_only:"1" });
+        const previousId = file.id;
+        const payload = await ajaxPost(file.offloadUrl, { next:"/", target_peer_node_id: targetPeerNodeId, add_only:"1" });
+        const nextId = payload && payload.manifest && payload.manifest.manifest_id;
+        if(nextId && nextId !== previousId){
+          const replacement = findFileById(nextId);
+          if(replacement){
+            refreshSelectedFileReference(previousId, replacement);
+          }else{
+            applyManifestIdentity(file, payload && payload.manifest);
+            refreshSelectedFileReference(previousId, file);
+          }
+        }
       }
 
       desktopArea.addEventListener("click", event => {
