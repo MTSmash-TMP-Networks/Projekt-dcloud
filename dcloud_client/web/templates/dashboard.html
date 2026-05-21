@@ -871,6 +871,9 @@
       const transferToggle = document.getElementById("transfer-toggle");
       const transferToggleLabel = document.getElementById("transfer-toggle-label");
       let pendingShareFile = null;
+      let refreshRequestSeq = 0;
+      let latestAppliedRefreshSeq = 0;
+      let lastSuccessfulUploadAt = 0;
 
       const windows = {
         explorer: document.getElementById("win-explorer"),
@@ -984,6 +987,12 @@
           const incomingVersion = Number(nextState.stateVersion || 0);
           if(incomingVersion && incomingVersion < latestStateVersion) return;
           if(incomingVersion) latestStateVersion = incomingVersion;
+          const incomingFileCount = Number(nextState.fileCount || 0);
+          const currentFileCount = Number(appState.fileCount || 0);
+          const suppressShrinkUntil = lastSuccessfulUploadAt + 15000;
+          if(incomingFileCount < currentFileCount && Date.now() < suppressShrinkUntil){
+            return;
+          }
           appState = Object.assign({}, appState, nextState);
         }
         buildFileSystem();
@@ -994,8 +1003,11 @@
         if(!windows.explorer.hidden) renderExplorer();
       }
       async function refreshState(){
+        const requestSeq = ++refreshRequestSeq;
         const response = await fetch("/api/state", { cache:"no-store", headers: { "Accept":"application/json" } });
         const data = await response.json();
+        if(requestSeq < latestAppliedRefreshSeq) return;
+        latestAppliedRefreshSeq = requestSeq;
         applyState(data);
       }
 
@@ -1600,6 +1612,7 @@
         currentUploadId = null;
         updateQueueDisplay();
         if(ok){
+          lastSuccessfulUploadAt = Date.now();
           setMiniProgress("client", 100);
           setMiniProgress("server", 100);
           setMiniProgress("peer", 100);
