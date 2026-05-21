@@ -60,7 +60,7 @@ class UdpDiscoveryTransport:
         startup_discovery_interval_seconds: int = 2,
         peer_timeout_seconds: float = 35,
         peer_cleanup_interval_seconds: float = 5,
-        client_type: str = "pc",
+        client_type: str = "server",
         shared_storage_bytes: int = 0,
         free_storage_bytes: int = 0,
         web_port: int | None = None,
@@ -346,7 +346,7 @@ class UdpDiscoveryTransport:
             udp_port=advertised_port,
             name=message.get("name"),
             route_via_node_id=str(route_via) if route_via else None,
-            client_type=str(message.get("client_type")) if message.get("client_type") in {"server", "pc"} else None,
+            client_type=str(message.get("client_type")) if message.get("client_type") in {"server"} else None,
             shared_storage_bytes=int(message["shared_storage_bytes"]) if str(message.get("shared_storage_bytes", "")).isdigit() else None,
             accepts_peer_storage=bool(message.get("accepts_peer_storage")) if "accepts_peer_storage" in message else None,
             web_port=int(message["web_port"]) if str(message.get("web_port", "")).isdigit() else None,
@@ -394,7 +394,7 @@ class UdpDiscoveryTransport:
                 udp_port=int(raw_peer["udp_port"]),
                 name=raw_peer.get("name"),
                 route_via_node_id=str(route_via) if route_via else None,
-                client_type=str(raw_peer.get("client_type")) if raw_peer.get("client_type") in {"server", "pc"} else None,
+                client_type=str(raw_peer.get("client_type")) if raw_peer.get("client_type") in {"server"} else None,
                 shared_storage_bytes=int(raw_peer["shared_storage_bytes"]) if str(raw_peer.get("shared_storage_bytes", "")).isdigit() else None,
                 accepts_peer_storage=bool(raw_peer.get("accepts_peer_storage")) if "accepts_peer_storage" in raw_peer else None,
                 web_port=int(raw_peer["web_port"]) if str(raw_peer.get("web_port", "")).isdigit() else None,
@@ -444,8 +444,7 @@ class UdpDiscoveryTransport:
     def _accepts_peer_storage(self) -> bool:
         if self.client_type == "server":
             return True
-        pc_peer_count = sum(1 for peer in self.peer_provider.list_peers() if peer.client_type == "pc")
-        return pc_peer_count >= 1
+        return True
 
     def _hello_message(
         self,

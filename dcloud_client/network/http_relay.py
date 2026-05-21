@@ -420,7 +420,7 @@ def peer_from_relay_payload(raw: object, *, relay_url: str, own_node_id: str | N
             return int(value) if value is not None and str(value) != "" else None
         except (TypeError, ValueError):
             return None
-    client_type = str(raw.get("client_type")) if raw.get("client_type") in {"server", "pc"} else None
+    client_type = str(raw.get("client_type")) if raw.get("client_type") in {"server"} else None
     return Peer(
         node_id=node_id,
         host=RELAY_HOST,
@@ -449,7 +449,7 @@ class HttpRelayTransport:
         protocol_magic: str,
         udp_port: int = 0,
         web_port: int | None = None,
-        client_type: str = "pc",
+        client_type: str = "server",
         shared_storage_bytes: int = 0,
         free_storage_bytes: int = 0,
         accepts_peer_storage: bool = False,
