@@ -825,6 +825,7 @@
       "use strict";
       const VROOT = "";
       let appState = JSON.parse(JSON.stringify(INITIAL_STATE));
+      let latestStateVersion = Number(appState.stateVersion || 0);
       let fsMap = new Map();
       let explorerPath = VROOT;
       let selectedTarget = { kind:"desktop" };
@@ -958,7 +959,12 @@
         setTimeout(()=>toast.remove(), 5200);
       }
       function applyState(nextState){
-        if(nextState){ appState = Object.assign({}, appState, nextState); }
+        if(nextState){
+          const incomingVersion = Number(nextState.stateVersion || 0);
+          if(incomingVersion && incomingVersion < latestStateVersion) return;
+          if(incomingVersion) latestStateVersion = incomingVersion;
+          appState = Object.assign({}, appState, nextState);
+        }
         buildFileSystem();
         if(explorerPath && !fsMap.has(explorerPath)) explorerPath = parentPath(explorerPath);
         renderStats();
