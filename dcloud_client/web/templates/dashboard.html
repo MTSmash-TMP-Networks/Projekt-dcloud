@@ -722,7 +722,10 @@
           <span id="settings-auto-discovery">aktiv auf Port 6881</span>
           <p class="settings-note">Beim Start sendet der Client sofort LAN-Discovery-Hellos an sichtbare dcloud-Clients auf UDP-Port 6881 und danach regelmäßig weiter.</p>
           <p class="settings-note"><strong>PHP-Relay:</strong> <span id="settings-relay-status">nicht konfiguriert</span></p>
-          <div style="margin-top:.5rem;"><button type="button" class="explorer-btn" id="settings-refresh">Netzwerksuche aktualisieren</button></div>
+          <div style="margin-top:.5rem;display:flex;gap:.5rem;flex-wrap:wrap;">
+            <button type="button" class="explorer-btn" id="settings-refresh">Netzwerksuche aktualisieren</button>
+            <button type="button" class="explorer-btn" id="settings-cleanup">Datenmüll bereinigen</button>
+          </div>
         </div>
       </div>
     </section>
@@ -2035,6 +2038,22 @@ ${file.name}`)) return;
         }
       }
       document.getElementById("settings-refresh").onclick = () => triggerDiscoveryRefresh();
+      async function triggerStorageCleanup(){
+        try{
+          const response = await fetch("/api/storage/cleanup", {
+            method:"POST",
+            headers:{ "X-Requested-With":"XMLHttpRequest", "Accept":"application/json" }
+          });
+          const payload = await response.json();
+          if(payload.state) applyState(payload.state);
+          if(!response.ok || !payload.ok) throw new Error(payload.message || "Bereinigung fehlgeschlagen");
+          showToast(payload.message || "Datenmüll bereinigt", "success");
+        }catch(error){
+          await refreshState().catch(()=>{});
+          showToast(error.message, "warning");
+        }
+      }
+      document.getElementById("settings-cleanup").onclick = () => triggerStorageCleanup();
       const settingsForm = document.getElementById("settings-form");
       if(settingsForm){
         settingsForm.addEventListener("submit", async event => {
