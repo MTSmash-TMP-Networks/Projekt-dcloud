@@ -9,6 +9,7 @@ import logging
 import json
 import os
 import tempfile
+import time
 from typing import Any
 
 from .crypto import b64decode, sha256_hex, sign_bytes, verify_signature
@@ -19,6 +20,8 @@ MANIFEST_VERSION = 1
 DEFAULT_FOLDER = "Meine Dateien"
 MANIFEST_TRASH_RETENTION = 20
 MANIFEST_LOCK_TIMEOUT_SECONDS = 10
+MANIFEST_LOCK_POLL_SECONDS = 0.1
+MANIFEST_LOCK_STALE_SECONDS = 120
 MANIFEST_META_FILES = {"folders.json", "share_revocations.json", "file_deletions.json", "manifest_audit.log"}
 LOG = logging.getLogger("dcloud.manifest_store")
 
@@ -335,7 +338,8 @@ class ManifestStore:
         updated = FileManifest.from_dict({**data, "manifest_id": new_manifest_id, "signature": signature})
         self.save(updated)
         if old_path != self.path_for(updated.manifest_id):
-            old_path.unlink(missing_ok=True)
+            self._move_to_trash(old_path)
+            self._append_audit_event("resign_old_manifest_retired", {"path": str(old_path), "new_manifest_id": updated.manifest_id})
         return updated
 
     def set_shared(
@@ -681,6 +685,8 @@ class ManifestStore:
         return True
 
     def _move_to_trash(self, path: Path) -> None:
+        if not path.exists():
+            return
         self.trash_dir.mkdir(parents=True, exist_ok=True)
         ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S")
         target = self.trash_dir / f"{ts}-{path.name}"
@@ -710,7 +716,15 @@ class ManifestStore:
                     handle.write(str(os.getpid()))
                 return
             except FileExistsError:
-                continue
+                try:
+                    age = time.time() - self.lock_file.stat().st_mtime
+                    if age > MANIFEST_LOCK_STALE_SECONDS:
+                        self._append_audit_event("lock_stale_removed", {"path": str(self.lock_file), "age_seconds": int(age)})
+                        self.lock_file.unlink(missing_ok=True)
+                        continue
+                except OSError:
+                    pass
+                time.sleep(MANIFEST_LOCK_POLL_SECONDS)
         raise StorageError("Manifest lock could not be acquired")
 
     def _release_manifest_lock(self) -> None:
