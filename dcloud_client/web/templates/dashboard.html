@@ -724,7 +724,7 @@
       </div>
     </section>
 
-    <aside class="transfer-panel" id="transfer-panel" hidden>
+    <aside class="transfer-panel" id="transfer-panel">
       <button class="transfer-toggle" id="transfer-toggle" type="button" aria-expanded="true">
         <span>📋 Upload-Status</span>
         <small id="transfer-toggle-label">Einklappen</small>
@@ -743,6 +743,7 @@
           <div class="transfer-row"><span id="transfer-name">—</span><strong id="transfer-percent">0%</strong></div>
           <div class="transfer-row"><span>Ziel:</span><span id="transfer-target">—</span></div>
           <div class="transfer-row"><span>Status:</span><span id="transfer-status">Bereit</span></div>
+          <div class="transfer-row"><span>Warteschlange:</span><span id="transfer-queue">0 wartend</span></div>
           <div class="transfer-row"><span>Browser-Transfer:</span><span id="transfer-browser">0 B / 0 B</span></div>
           <div class="transfer-row"><span>Server-Verarbeitung:</span><span id="transfer-server">wartet…</span></div>
           <div class="transfer-row"><span>Chunks:</span><span id="transfer-chunks">—</span></div>
@@ -812,7 +813,7 @@
       </form>
     </div>
 
-    <input type="file" id="desktop-upload-input" hidden>
+    <input type="file" id="desktop-upload-input" multiple hidden>
 
     <nav class="taskbar" aria-label="Taskleiste" id="taskbar">
       <button class="start" id="startBtn" type="button">Start</button>
@@ -847,6 +848,8 @@
       let currentUploadXhr = null;
       let currentUploadPoll = null;
       let currentUploadId = null;
+      const uploadQueue = [];
+      let uploadWorkerRunning = false;
       let lastTransferPercent = 0;
       let activeWindow = null;
       let z = 20;
@@ -1414,6 +1417,39 @@
         }
         return `upload_${Date.now()}_${Math.random().toString(16).slice(2)}`.replace(/[^a-zA-Z0-9_-]/g, "");
       }
+      function updateQueueDisplay(){
+        const label = document.getElementById("transfer-queue");
+        if(!label) return;
+        const waiting = uploadQueue.length;
+        if(currentUploadXhr){
+          label.textContent = `${waiting} wartend · 1 aktiv`;
+          return;
+        }
+        label.textContent = waiting ? `${waiting} wartend` : "leer";
+      }
+      function enqueueUpload(file, folder){
+        uploadQueue.push({ file, folder: normalizeFolderPath(folder || DEFAULT_FOLDER) });
+        updateQueueDisplay();
+        if(!uploadWorkerRunning) processUploadQueue();
+      }
+      function enqueueUploads(files, folder){
+        Array.from(files || []).forEach(file => enqueueUpload(file, folder));
+      }
+      function processUploadQueue(){
+        if(uploadWorkerRunning) return;
+        uploadWorkerRunning = true;
+        const runNext = () => {
+          if(currentUploadXhr) return;
+          const next = uploadQueue.shift();
+          updateQueueDisplay();
+          if(!next){
+            uploadWorkerRunning = false;
+            return;
+          }
+          uploadFile(next.file, next.folder, runNext);
+        };
+        runNext();
+      }
       function stopUploadPolling(){
         if(currentUploadPoll){
           clearInterval(currentUploadPoll);
@@ -1562,6 +1598,7 @@
         stopUploadPolling();
         currentUploadXhr = null;
         currentUploadId = null;
+        updateQueueDisplay();
         if(ok){
           setMiniProgress("client", 100);
           setMiniProgress("server", 100);
@@ -1576,7 +1613,7 @@
         cancel.disabled = false;
         refreshState().catch(() => {});
       }
-      function uploadFile(file, folder){
+      function uploadFile(file, folder, doneCallback=null){
         const targetFolder = normalizeFolderPath(folder || DEFAULT_FOLDER);
         const uploadId = makeUploadId();
         currentUploadId = uploadId;
@@ -1622,14 +1659,16 @@
             finishTransfer(payload.message || "Upload abgeschlossen", true, progress);
             showToast(payload.message || "Upload abgeschlossen", "success");
             if(targetFolder) openExplorerAt(targetFolder);
+            if(doneCallback) doneCallback();
           }else{
             const message = payload && payload.message ? payload.message : "Upload fehlgeschlagen";
             finishTransfer(message, false, progress);
             showToast(message, "error");
+            if(doneCallback) doneCallback();
           }
         };
-        xhr.onerror = () => { finishTransfer("Netzwerkfehler beim Upload", false); showToast("Netzwerkfehler beim Upload", "error"); };
-        xhr.onabort = () => { finishTransfer("Upload abgebrochen", false); showToast("Upload abgebrochen", "warning"); };
+        xhr.onerror = () => { finishTransfer("Netzwerkfehler beim Upload", false); showToast("Netzwerkfehler beim Upload", "error"); if(doneCallback) doneCallback(); };
+        xhr.onabort = () => { finishTransfer("Upload abgebrochen", false); showToast("Upload abgebrochen", "warning"); if(doneCallback) doneCallback(); };
         xhr.send(data);
       }
 
@@ -1889,8 +1928,11 @@ ${file.name}`)) return;
         createFolder(folderDialogBasePath, folderNameInput.value).catch(error => showToast(error.message, "error"));
       });
       uploadInput.addEventListener("change", () => {
-        const file = uploadInput.files && uploadInput.files[0];
-        if(file) uploadFile(file, pendingUploadTarget);
+        const files = uploadInput.files;
+        if(files && files.length){
+          enqueueUploads(files, pendingUploadTarget);
+          showToast(`${files.length} Datei(en) zur Upload-Warteschlange hinzugefügt`, "success");
+        }
       });
       document.getElementById("transfer-cancel").onclick = () => {
         if(currentUploadXhr){
@@ -1898,7 +1940,7 @@ ${file.name}`)) return;
           currentUploadXhr.abort();
           currentUploadXhr = null;
         }else{
-          if(transferPanel) transferPanel.hidden = true;
+          setTransferPanelExpanded(!transferExpanded);
         }
       };
       if(transferToggle){
@@ -1946,6 +1988,8 @@ ${file.name}`)) return;
       });
 
       applyState(appState);
+      setTransferPanelExpanded(false);
+      updateQueueDisplay();
       updateTaskbar();
       setInterval(() => { refreshState().catch(() => {}); }, 5000);
     })();
