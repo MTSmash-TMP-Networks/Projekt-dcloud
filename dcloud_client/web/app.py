@@ -168,35 +168,20 @@ def create_app(
             "minFreeBytes": stats.min_free_bytes,
         }
 
-    def _pc_peer_count(peers: list[Any]) -> int:
-        return sum(1 for peer in peers if getattr(peer, "client_type", None) == "pc")
-
     def _accepts_peer_storage(peers: list[Any]) -> bool:
-        if config.node.client_type == "server":
-            return True
-        return _pc_peer_count(peers) >= 1
+        _ = peers
+        return True
 
     def _storage_policy_message(peers: list[Any]) -> str:
-        if config.node.client_type == "server":
-            return "Server-Modus: Dieser Client darf als dauerhafter Speicherziel-Knoten für P2P-Daten genutzt werden."
-        if _accepts_peer_storage(peers):
-            return "PC-Modus: P2P-Ablage ist aktiv, weil mindestens ein weiterer PC erreichbar ist."
-        return "PC-Modus: Keine P2P-Ablage auf diesem Client, bis ein weiterer PC erreichbar ist."
+        _ = peers
+        return "Server-Modus: Dieser Client arbeitet immer als Speicherziel-Knoten für P2P-Daten."
 
     def _eligible_storage_peers(peers: list[Any] | None = None) -> list[Any]:
         peers = peers if peers is not None else _list_active_peers()
-        pc_peers = [peer for peer in peers if getattr(peer, "client_type", None) == "pc"]
         targets: list[Any] = []
         for peer in peers:
-            peer_type = getattr(peer, "client_type", None)
-            accepts_peer_storage = bool(getattr(peer, "accepts_peer_storage", False))
-            if peer_type == "server" or accepts_peer_storage:
-                targets.append(peer)
-            elif peer_type == "pc" and (config.node.client_type == "pc" or len(pc_peers) >= 2):
-                targets.append(peer)
-            elif peer_type is None:
-                # Backwards-compatible fallback for older peers that do not yet advertise a role.
-                targets.append(peer)
+            # Unified server logic: all visible peers are valid storage targets.
+            targets.append(peer)
         seen: set[str] = set()
         unique: list[Any] = []
         for peer in targets:
@@ -1035,7 +1020,7 @@ def create_app(
         try:
             update_runtime_settings(
                 config,
-                client_type=request.form.get("client_type", config.node.client_type),
+                client_type="server",
                 shared_storage_gb=request.form.get("shared_storage_gb", bytes_to_gib(config.storage.limit_bytes)),
                 relay_server_url=request.form.get("relay_server_url"),
                 relay_server_urls=request.form.get("relay_server_urls", request.form.get("relay_server_url", "\n".join(extra_relay_urls(config.network.relay_urls)))),
