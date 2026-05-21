@@ -227,9 +227,33 @@ class HttpRelayClient:
             return False
         return time.time() + self.TOKEN_REFRESH_MARGIN_SECONDS >= self.access_token_expires_at
 
+    def _relay_url_with_php_suffix(self) -> str:
+        if self.relay_url.lower().endswith('/dcloud_relay.php'):
+            return self.relay_url
+        return self.relay_url.rstrip('/') + '/dcloud_relay.php'
+
     def refresh_access_token(self) -> dict[str, Any]:
         """Fetch the current relay token from the relay health endpoint."""
-        return self._send_json({"action": "health"}, include_token=False)
+        try:
+            return self._send_json({"action": "health"}, include_token=False)
+        except RelayError as exc:
+            # Common deployment mistake: relay base URL is configured without
+            # the actual PHP endpoint filename.
+            fallback_url = self._relay_url_with_php_suffix()
+            current_url = self.relay_url
+            should_retry_with_suffix = fallback_url != current_url and any(
+                marker in str(exc).lower()
+                for marker in ("json", "404", "405", "not found")
+            )
+            if not should_retry_with_suffix:
+                raise
+            LOG.warning("Relay health failed for %s; retrying with %s", current_url, fallback_url)
+            self.relay_url = fallback_url
+            try:
+                return self._send_json({"action": "health"}, include_token=False)
+            except RelayError:
+                self.relay_url = current_url
+                raise
 
     def ensure_access_token(self) -> None:
         if self._access_token_needs_refresh():
