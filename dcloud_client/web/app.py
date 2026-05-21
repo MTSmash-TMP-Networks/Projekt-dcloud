@@ -573,6 +573,7 @@ def create_app(
             "download_url": url_for("download", manifest_id=manifest.manifest_id),
             "delete_url": url_for("delete_file", manifest_id=manifest.manifest_id),
             "share_url": url_for("share_file", manifest_id=manifest.manifest_id),
+            "offload_url": url_for("offload_file_chunks", manifest_id=manifest.manifest_id),
         }
 
     def folder_tree_json(folder_tree: list[dict[str, object]]) -> list[dict[str, object]]:
