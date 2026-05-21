@@ -17,7 +17,7 @@ from ..identity import NodeIdentity
 LOG = logging.getLogger(__name__)
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True)
 class BootstrapNode:
     host: str
     port: int

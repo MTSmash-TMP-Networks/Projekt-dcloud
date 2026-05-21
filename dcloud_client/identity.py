@@ -14,7 +14,7 @@ from .crypto import b64encode, derive_node_id, generate_private_key, private_key
 LOG = logging.getLogger(__name__)
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True)
 class NodeIdentity:
     private_key: Ed25519PrivateKey
     public_key_bytes: bytes
