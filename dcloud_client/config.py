@@ -13,8 +13,8 @@ import tempfile
 import yaml
 
 DEFAULT_CONFIG_PATH = Path(__file__).parent / "data" / "default_config.yml"
-VALID_CLIENT_TYPES = {"server", "pc"}
-DEFAULT_CLIENT_TYPE = "pc"
+VALID_CLIENT_TYPES = {"server"}
+DEFAULT_CLIENT_TYPE = "server"
 MIN_SHARED_STORAGE_GB = 5
 GIB = 1024**3
 DEFAULT_AUTO_DISCOVERY_PORTS = [6881]
@@ -140,16 +140,13 @@ def _write_yaml_atomic(path: Path, data: dict[str, Any]) -> None:
 
 
 def normalize_client_type(value: str | None) -> str:
-    candidate = (value or DEFAULT_CLIENT_TYPE).strip().lower()
-    if candidate in {"server", "srv"}:
-        return "server"
-    if candidate in {"pc", "desktop", "computer", "client"}:
-        return "pc"
-    raise ValueError("Client-Typ muss 'server' oder 'pc' sein")
+    _ = value
+    return "server"
 
 
 def client_type_label(client_type: str) -> str:
-    return "Server" if normalize_client_type(client_type) == "server" else "PC"
+    _ = client_type
+    return "Server"
 
 
 def bytes_to_gib(value: int) -> float:

@@ -636,24 +636,10 @@
       </div>
       <div class="window-content dummy-app">
         <h2>Einstellungen</h2>
-        <p>Lege fest, ob dieser Client als dauerhafter Server oder als normaler PC arbeitet, und wie viel Speicher du dem dcloud-Netzwerk freigibst.</p>
+        <p>Dieser Client arbeitet ausschließlich im Server-Modus. Hier legst du fest, wie viel Speicher du dem dcloud-Netzwerk freigibst.</p>
 
         <form method="post" action="/settings" class="settings-form" id="settings-form">
           <input type="hidden" name="next" value="/">
-          <section class="settings-panel">
-            <h3>Client-Typ</h3>
-            <div class="radio-grid">
-              <label class="radio-card">
-                <input type="radio" name="client_type" value="server" {% if config.node.client_type == 'server' %}checked{% endif %}>
-                <span><strong>Server</strong>Daten aus dem Peer-to-Peer-Netzwerk dürfen auf diesem Client abgelegt werden. Diese Option ist für Geräte gedacht, die möglichst dauerhaft online sind.</span>
-              </label>
-              <label class="radio-card">
-                <input type="radio" name="client_type" value="pc" {% if config.node.client_type == 'pc' %}checked{% endif %}>
-                <span><strong>PC</strong>Daten werden nur als P2P-Ziel genutzt, wenn mindestens ein weiterer PC erreichbar ist. So wird vermieden, dass ein oft ausgeschalteter PC die einzige Kopie hält.</span>
-              </label>
-            </div>
-            <p class="settings-note" id="settings-current-policy">{{ settings_json.storagePolicy }}</p>
-          </section>
 
           <section class="settings-panel">
             <h3>Freigegebener Speicher</h3>
@@ -825,6 +811,7 @@
       "use strict";
       const VROOT = "";
       let appState = JSON.parse(JSON.stringify(INITIAL_STATE));
+      let latestStateVersion = Number(appState.stateVersion || 0);
       let fsMap = new Map();
       let explorerPath = VROOT;
       let selectedTarget = { kind:"desktop" };
@@ -958,7 +945,12 @@
         setTimeout(()=>toast.remove(), 5200);
       }
       function applyState(nextState){
-        if(nextState){ appState = Object.assign({}, appState, nextState); }
+        if(nextState){
+          const incomingVersion = Number(nextState.stateVersion || 0);
+          if(incomingVersion && incomingVersion < latestStateVersion) return;
+          if(incomingVersion) latestStateVersion = incomingVersion;
+          appState = Object.assign({}, appState, nextState);
+        }
         buildFileSystem();
         if(explorerPath && !fsMap.has(explorerPath)) explorerPath = parentPath(explorerPath);
         renderStats();
@@ -1042,11 +1034,7 @@
             ? `${network.relayStatus || "startet"} · ${urls.length || 1} Relay(s)`
             : "nicht konfiguriert";
         }
-        const selectedType = settings.clientType || "pc";
-        document.querySelectorAll('input[name="client_type"]').forEach(input => {
-          if(document.activeElement !== input) input.checked = input.value === selectedType;
-        });
-        const smbEnabledInput = document.getElementById("settings-smb-enabled");
+                const smbEnabledInput = document.getElementById("settings-smb-enabled");
         if(smbEnabledInput && document.activeElement !== smbEnabledInput) smbEnabledInput.checked = !!settings.smbEnabled;
         const smbUserInput = document.getElementById("settings-smb-username");
         if(smbUserInput && document.activeElement !== smbUserInput) smbUserInput.value = settings.smbUsername || "";
@@ -1061,7 +1049,7 @@
           appState.peers.forEach(peer => {
             const item = document.createElement("li");
             const label = peer.display_name || peer.name || String(peer.node_id || "Peer").slice(0, 10);
-            const type = peer.client_type === "server" ? "Server" : (peer.client_type === "pc" ? "PC" : "unbekannt");
+            const type = "Server";
             const storage = peer.accepts_peer_storage ? `P2P-Speicher aktiv · frei ${formatBytes(peer.free_storage_bytes || peer.shared_storage_bytes || 0)}` : "keine P2P-Ablage";
             const api = peer.web_port ? `API :${peer.web_port}` : "API unbekannt";
             const route = peer.transport === "relay" ? "PHP-Relay" : (peer.transport === "direct+relay" ? `${peer.host}:${peer.udp_port} · Relay-Fallback` : `${peer.host}:${peer.udp_port}`);
@@ -1679,7 +1667,7 @@
         (appState.peers || []).forEach(peer => {
           const option = document.createElement("option");
           option.value = peer.node_id;
-          const type = peer.client_type === "server" ? "Server" : (peer.client_type === "pc" ? "PC" : "Peer");
+          const type = "Server";
           const route = peer.transport === "relay" ? "PHP-Relay" : `${peer.host}:${peer.udp_port}`;
           option.textContent = `${peerDisplayName(peer)} (${type}, ${route})`;
           sharePeerSelect.appendChild(option);
