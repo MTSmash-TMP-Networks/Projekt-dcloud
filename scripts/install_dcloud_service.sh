@@ -149,10 +149,19 @@ install_repo() {
 
 setup_python_venv() {
   cd "$INSTALL_DIR"
-  python3 -m venv .venv
-  . .venv/bin/activate
-  pip install --upgrade pip
-  pip install -r requirements.txt
+
+  if ! python3 -m venv .venv; then
+    echo "⚠️ python3 -m venv fehlgeschlagen, versuche virtualenv-Fallback..."
+    rm -rf .venv
+    if ! python3 -m virtualenv .venv 2>/dev/null && ! virtualenv .venv 2>/dev/null; then
+      echo "❌ Weder venv noch virtualenv konnten eine Umgebung erstellen." >&2
+      echo "   Installiere bitte python3-venv oder python3-virtualenv/py3-virtualenv." >&2
+      exit 1
+    fi
+  fi
+
+  "$INSTALL_DIR/.venv/bin/python" -m pip install --upgrade pip
+  "$INSTALL_DIR/.venv/bin/python" -m pip install -r requirements.txt
 }
 
 setup_systemd() {
