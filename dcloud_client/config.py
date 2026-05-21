@@ -28,14 +28,14 @@ DEFAULT_PUBLIC_RELAY_URL = "https://support.tmp-networks.de/dcstorage/dcloud_rel
 
 
 
-@dataclass(slots=True)
+@dataclass
 class NodeConfig:
     name: str
     identity_path: Path
     client_type: str = DEFAULT_CLIENT_TYPE
 
 
-@dataclass(slots=True)
+@dataclass
 class StorageConfig:
     path: Path
     limit_bytes: int
@@ -43,19 +43,19 @@ class StorageConfig:
     chunk_size_bytes: int
 
 
-@dataclass(slots=True)
+@dataclass
 class WebConfig:
     host: str
     port: int
 
 
-@dataclass(slots=True)
+@dataclass
 class UdpPortRange:
     start: int
     end: int
 
 
-@dataclass(slots=True)
+@dataclass
 class NetworkConfig:
     udp_host: str
     udp_port: int
@@ -79,12 +79,12 @@ class NetworkConfig:
     relay_chunk_size_bytes: int = DEFAULT_RELAY_CHUNK_SIZE_BYTES
 
 
-@dataclass(slots=True)
+@dataclass
 class SecurityConfig:
     protocol_magic: str
 
 
-@dataclass(slots=True)
+@dataclass
 class SmbConfig:
     enabled: bool = False
     host: str = "0.0.0.0"
@@ -94,7 +94,7 @@ class SmbConfig:
     password: str = ""
 
 
-@dataclass(slots=True)
+@dataclass
 class AppConfig:
     node: NodeConfig
     storage: StorageConfig

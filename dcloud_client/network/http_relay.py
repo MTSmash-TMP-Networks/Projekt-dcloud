@@ -122,7 +122,7 @@ def _decode_relay_json(raw: bytes, *, expected_action: str = "", expected_reques
     return objects[0]
 
 
-@dataclass(slots=True)
+@dataclass
 class RelayHttpResponse:
     status_code: int
     headers: dict[str, str]
