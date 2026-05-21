@@ -464,6 +464,26 @@ class P2PStorageClient:
         )
 
 
+
+
+def _rank_peers_by_speed(peers: list[Peer], p2p_client: P2PStorageClient) -> list[Peer]:
+    """Return peers sorted by fastest health-check response first."""
+    ranked: list[tuple[float, Peer]] = []
+    for peer in peers:
+        started = time.perf_counter()
+        latency = float("inf")
+        try:
+            url = f"{p2p_client.api_base(peer)}/healthz"
+            req = request.Request(url, method="GET")
+            with request.urlopen(req, timeout=max(0.75, p2p_client.timeout * 0.75)) as response:
+                if 200 <= response.status < 300:
+                    latency = time.perf_counter() - started
+        except (OSError, error.URLError, error.HTTPError):
+            pass
+        ranked.append((latency, peer))
+    ranked.sort(key=lambda item: item[0])
+    return [peer for _, peer in ranked]
+
 def _rotated_targets(targets: list[Peer | None], target_ids: list[str], start_index: int) -> list[tuple[Peer | None, str]]:
     if not targets:
         return []
@@ -503,12 +523,13 @@ def distribute_file_chunks(
         effective_chunk_size = chunk_store.chunk_size
 
     if peers:
-        # Prefer active remote storage first so even small one-chunk uploads use
-        # decentralized capacity. The local node remains in the target ring to
-        # provide a second copy when there is only one peer.
-        targets: list[Peer | None] = [*peers, None]
-        target_ids = [*[peer.node_id for peer in peers], local_node_id]
-        desired_replicas = min(max(1, int(min_replicas_with_peers)), len(targets))
+        # Prefer the fastest reachable peer first so the user-visible upload
+        # handshake is completed quickly. Additional distribution can then be
+        # handled from that peer side instead of blocking the browser upload.
+        ranked_peers = _rank_peers_by_speed(peers, p2p_client)
+        targets: list[Peer | None] = [*ranked_peers, None]
+        target_ids = [*[peer.node_id for peer in ranked_peers], local_node_id]
+        desired_replicas = min(max(1, int(min_replicas_with_peers)), 2, len(targets))
     else:
         targets = [None]
         target_ids = [local_node_id]
@@ -602,9 +623,12 @@ def distribute_file_chunks(
             )
 
             pending_batch: dict[str, list[dict[str, Any]]] = {}
+            remote_primary_stored = False
             for target, node_id in _rotated_targets(targets, target_ids, index):
                 if len(locations) >= desired_replicas:
                     break
+                if remote_primary_stored and target is not None:
+                    continue
                 if node_id in locations:
                     continue
                 if target is None:
@@ -640,6 +664,7 @@ def distribute_file_chunks(
                 if transfer.ok:
                     result.remote_successes += 1
                     locations.append(node_id)
+                    remote_primary_stored = True
                     notify(
                         phase="peer_upload_done",
                         status=f"Chunk {index + 1}/{max(total_chunks, 1)} auf {peer_name} gespeichert",
