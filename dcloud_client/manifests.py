@@ -354,6 +354,14 @@ class ManifestStore:
         access = {"visibility": "shared" if shared else "private", "shared_with": targets if shared else []}
         return self._resign_manifest(manifest, identity, {"access": access})
 
+    def move_to_folder(self, manifest_id: str, folder_path: str, identity: NodeIdentity) -> FileManifest:
+        manifest = self.load(manifest_id)
+        destination = sanitize_folder_path(folder_path)
+        if destination == sanitize_folder_path(manifest.folder_path):
+            return manifest
+        self.create_folder(destination, identity.node_id)
+        return self._resign_manifest(manifest, identity, {"folder_path": destination})
+
     def update_placement(
         self,
         manifest_id: str,
