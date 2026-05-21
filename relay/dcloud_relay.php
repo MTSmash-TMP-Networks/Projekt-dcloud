@@ -109,6 +109,28 @@ function dcloud_token_for_day(string $day): string {
     return hash_hmac('sha256', 'dcloud-relay-v1|' . $day, dcloud_relay_seed());
 }
 
+
+function dcloud_legacy_relay_secret(): string {
+    static $cached = null;
+    if ($cached !== null) return $cached;
+
+    $envSecret = trim((string)(getenv('DCLOUD_RELAY_SECRET') ?: ''));
+    if ($envSecret !== '') {
+        $cached = $envSecret;
+        return $cached;
+    }
+
+    $file = dcloud_storage_dir() . DIRECTORY_SEPARATOR . 'relay-secret.txt';
+    if (!file_exists($file)) {
+        $cached = '';
+        return $cached;
+    }
+
+    $secret = trim((string)@file_get_contents($file));
+    $cached = $secret;
+    return $cached;
+}
+
 function dcloud_current_relay_token(): array {
     $day = dcloud_token_day(0);
     $midnight = strtotime($day . ' 00:00:00 UTC');
@@ -127,12 +149,15 @@ function dcloud_relay_token_is_valid(string $provided): bool {
     if ($provided === '') {
         return false;
     }
+
     foreach ([0, -1] as $offset) {
         if (hash_equals(dcloud_token_for_day(dcloud_token_day($offset)), $provided)) {
             return true;
         }
     }
-    return false;
+
+    $legacySecret = dcloud_legacy_relay_secret();
+    return $legacySecret !== '' && hash_equals($legacySecret, $provided);
 }
 
 function dcloud_request_method(): string {
@@ -457,7 +482,7 @@ function dcloud_read_input(): array {
     if ($actionForAuth !== 'health') {
         $provided = (string)($data['relay_token'] ?? ($data['secret'] ?? ''));
         if (!dcloud_relay_token_is_valid($provided)) {
-            dcloud_fail('Relay-Tages-Token fehlt oder ist abgelaufen', 403);
+            dcloud_fail('Relay-Token fehlt oder ist abgelaufen', 403);
         }
     }
 
