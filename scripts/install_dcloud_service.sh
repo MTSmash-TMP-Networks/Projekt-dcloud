@@ -362,6 +362,36 @@ SCRIPT
   /etc/init.d/cron restart || true
 }
 
+setup_openwrt_firewall() {
+  if ! command -v uci >/dev/null 2>&1; then
+    return 0
+  fi
+
+  WEB_PORT="$(awk '/^[[:space:]]*port:[[:space:]]*[0-9]+[[:space:]]*$/ {print $2; exit}' "$INSTALL_DIR/config.yml" 2>/dev/null || true)"
+  [ -n "${WEB_PORT:-}" ] || WEB_PORT="8787"
+
+  if ! uci show firewall 2>/dev/null | grep -F "Allow-dcloud-${WEB_PORT}-from-LAN" >/dev/null 2>&1; then
+    uci add firewall rule >/dev/null
+    uci set firewall.@rule[-1].name="Allow-dcloud-${WEB_PORT}-from-LAN"
+    uci set firewall.@rule[-1].src='lan'
+    uci set firewall.@rule[-1].proto='tcp'
+    uci set firewall.@rule[-1].dest_port="$WEB_PORT"
+    uci set firewall.@rule[-1].target='ACCEPT'
+  fi
+
+  if ! uci show firewall 2>/dev/null | grep -F "Allow-dcloud-udp-6881-6891-from-LAN" >/dev/null 2>&1; then
+    uci add firewall rule >/dev/null
+    uci set firewall.@rule[-1].name='Allow-dcloud-udp-6881-6891-from-LAN'
+    uci set firewall.@rule[-1].src='lan'
+    uci set firewall.@rule[-1].proto='udp'
+    uci set firewall.@rule[-1].dest_port='6881-6891'
+    uci set firewall.@rule[-1].target='ACCEPT'
+  fi
+
+  uci commit firewall || true
+  /etc/init.d/firewall restart || true
+}
+
 setup_windows_bootstrap() {
   BOOTSTRAP="$INSTALL_DIR/install_windows_service.ps1"
   cat > "$BOOTSTRAP" <<PS
@@ -403,6 +433,7 @@ case "$TARGET_OS" in
     install_repo
     setup_python_venv
     write_config "$INSTALL_DIR/config.yml"
+    setup_openwrt_firewall
     setup_openwrt_init
     setup_openwrt_auto_update
     ;;
