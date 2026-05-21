@@ -11,6 +11,7 @@ from uuid import uuid4
 import atexit
 import base64
 import socket
+import time
 
 from flask import Flask, Response, abort, flash, jsonify, redirect, render_template, request, send_file, url_for
 from werkzeug.utils import secure_filename
@@ -609,6 +610,7 @@ def create_app(
         folders = manifest_store.list_folders_for_node(identity.node_id)
         tree = build_folder_tree(manifests, folders)
         return {
+            "stateVersion": time.time_ns(),
             "nodeId": identity.node_id,
             "stats": stats_payload(stats),
             "settings": settings_payload(stats, peers),
