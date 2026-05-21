@@ -10,6 +10,8 @@ status window for large files.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import json
+from pathlib import Path
 import time
 from threading import RLock
 from typing import Any
@@ -80,15 +82,92 @@ class UploadProgress:
 class UploadProgressTracker:
     """Thread-safe process-local upload progress registry."""
 
-    def __init__(self, *, ttl_seconds: int = 900) -> None:
+    def __init__(
+        self,
+        *,
+        ttl_seconds: int = 900,
+        persist_dir: str | Path | None = None,
+        active_stall_seconds: int = 120,
+    ) -> None:
         self.ttl_seconds = int(ttl_seconds)
+        self.active_stall_seconds = max(15, int(active_stall_seconds))
         self._items: dict[str, UploadProgress] = {}
         self._lock = RLock()
+        self._persist_dir = Path(persist_dir).expanduser() if persist_dir else None
+        if self._persist_dir is not None:
+            self._persist_dir.mkdir(parents=True, exist_ok=True)
+
+    def _persist_path(self, upload_id: str) -> Path | None:
+        if self._persist_dir is None:
+            return None
+        safe_id = "".join(char for char in upload_id if char.isalnum() or char in "-_")[:80]
+        if not safe_id:
+            return None
+        return self._persist_dir / f"{safe_id}.json"
+
+    def _save_item(self, item: UploadProgress) -> None:
+        path = self._persist_path(item.upload_id)
+        if path is None:
+            return
+        payload = item.to_dict()
+        tmp = path.with_suffix(".tmp")
+        try:
+            tmp.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+            tmp.replace(path)
+        except OSError:
+            pass
+
+    def _load_item(self, upload_id: str) -> UploadProgress | None:
+        path = self._persist_path(upload_id)
+        if path is None or not path.exists():
+            return None
+        try:
+            raw = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError, TypeError):
+            return None
+        try:
+            item = UploadProgress(
+                upload_id=upload_id,
+                known=bool(raw.get("known", True)),
+                active=bool(raw.get("active", True)),
+                ok=raw.get("ok"),
+                phase=str(raw.get("phase") or "waiting"),
+                status=str(raw.get("status") or "Upload wartet auf Serververarbeitung…"),
+                message=str(raw.get("message") or ""),
+                file_name=str(raw.get("fileName") or ""),
+                folder_path=str(raw.get("folderPath") or ""),
+                percent=float(raw.get("percent") or 0.0),
+                server_percent=float(raw.get("serverPercent") or 0.0),
+                total_bytes=int(raw.get("totalBytes") or 0),
+                raw_bytes_processed=int(raw.get("rawBytesProcessed") or 0),
+                stored_bytes=int(raw.get("storedBytes") or 0),
+                current_chunk=int(raw.get("currentChunk") or 0),
+                total_chunks=int(raw.get("totalChunks") or 0),
+                compressed_chunks=int(raw.get("compressedChunks") or 0),
+                local_chunks=int(raw.get("localChunks") or 0),
+                remote_successes=int(raw.get("remoteSuccesses") or 0),
+                remote_failures=int(raw.get("remoteFailures") or 0),
+                desired_replicas=int(raw.get("desiredReplicas") or 1),
+                target_count=int(raw.get("targetCount") or 0),
+                current_peer=str(raw.get("currentPeer") or ""),
+                started_at=float(raw.get("startedAt") or time.time()),
+                updated_at=float(raw.get("updatedAt") or time.time()),
+                finished_at=float(raw["finishedAt"]) if raw.get("finishedAt") else None,
+                details=dict(raw.get("details") or {}),
+            )
+            return item
+        except (TypeError, ValueError):
+            return None
 
     def get(self, upload_id: str) -> dict[str, Any]:
         self.cleanup()
         with self._lock:
             item = self._items.get(upload_id)
+            if item is None:
+                loaded = self._load_item(upload_id)
+                if loaded is not None:
+                    self._items[upload_id] = loaded
+                    item = loaded
             if item is None:
                 return {
                     "uploadId": upload_id,
@@ -116,6 +195,53 @@ class UploadProgressTracker:
                 }
             return item.to_dict()
 
+    def list_recent(self, *, include_finished: bool = True, limit: int = 12) -> list[dict[str, Any]]:
+        self.cleanup()
+        with self._lock:
+            if self._persist_dir is not None:
+                for path in sorted(self._persist_dir.glob("*.json")):
+                    upload_id = path.stem
+                    if upload_id not in self._items:
+                        loaded = self._load_item(upload_id)
+                        if loaded is not None:
+                            self._items[upload_id] = loaded
+            items = list(self._items.values())
+            items.sort(key=lambda item: float(item.updated_at or item.started_at or 0), reverse=True)
+            rows: list[dict[str, Any]] = []
+            for item in items:
+                if not include_finished and not item.active:
+                    continue
+                rows.append(item.to_dict())
+                if len(rows) >= max(1, int(limit)):
+                    break
+            return rows
+
+    def _mark_stalled_locked(self, now: float | None = None) -> None:
+        now = now or time.time()
+        stall_cutoff = now - self.active_stall_seconds
+        browser_bound_phases = {"receiving", "saving_temp"}
+        for item in self._items.values():
+            if not item.active:
+                continue
+            if float(item.updated_at or 0.0) >= stall_cutoff:
+                continue
+            # Only treat early upload phases as connection-bound to the browser.
+            # After temp-file save, processing is server-side and must continue
+            # independently from browser lifetime.
+            if str(item.phase or "") not in browser_bound_phases:
+                continue
+            item.active = False
+            item.ok = False
+            item.phase = "failed"
+            item.status = "Fehlgeschlagen"
+            item.message = (
+                "Upload wurde unterbrochen (Browser/Verbindung geschlossen). "
+                "Bitte Upload erneut starten."
+            )
+            item.finished_at = now
+            item.updated_at = now
+            self._save_item(item)
+
     def start(self, upload_id: str, *, file_name: str = "", folder_path: str = "", total_bytes: int = 0) -> None:
         now = time.time()
         with self._lock:
@@ -131,6 +257,7 @@ class UploadProgressTracker:
                 percent=35.0,
                 server_percent=0.0,
             )
+            self._save_item(self._items[upload_id])
 
     def update(self, upload_id: str, **fields: Any) -> None:
         with self._lock:
@@ -162,6 +289,7 @@ class UploadProgressTracker:
             if details:
                 item.details.update(details)
             item.updated_at = time.time()
+            self._save_item(item)
 
     def finish(self, upload_id: str, *, ok: bool, message: str = "", details: dict[str, Any] | None = None) -> None:
         now = time.time()
@@ -181,9 +309,13 @@ class UploadProgressTracker:
             item.updated_at = now
             if details:
                 item.details.update(details)
+            self._save_item(item)
 
     def cleanup(self) -> None:
-        cutoff = time.time() - self.ttl_seconds
+        now = time.time()
+        with self._lock:
+            self._mark_stalled_locked(now)
+        cutoff = now - self.ttl_seconds
         with self._lock:
             stale = [
                 upload_id
@@ -192,3 +324,6 @@ class UploadProgressTracker:
             ]
             for upload_id in stale:
                 self._items.pop(upload_id, None)
+                path = self._persist_path(upload_id)
+                if path is not None:
+                    path.unlink(missing_ok=True)
