@@ -628,10 +628,12 @@ class ManifestStore:
             else:
                 self._append_audit_event("read_missing", {"manifest_id": manifest_id})
                 raise StorageError(f"Manifest {manifest_id} not found")
-        manifest = FileManifest.from_dict(json.loads(path.read_text(encoding="utf-8")))
-        if not self.verify(manifest):
+        raw_data = json.loads(path.read_text(encoding="utf-8"))
+        if not self.verify_raw(raw_data):
             self._append_audit_event("signature_invalid", {"manifest_id": manifest_id, "path": str(path)})
+            self._quarantine_invalid_manifest(path, manifest_id)
             raise StorageError(f"Manifest signature verification failed for {manifest_id}")
+        manifest = FileManifest.from_dict(raw_data)
         return manifest
 
     def verify(self, manifest: FileManifest) -> bool:
@@ -639,6 +641,18 @@ class ManifestStore:
             b64decode(manifest.owner_public_key),
             canonical_manifest_bytes(manifest.to_dict()),
             manifest.signature,
+        )
+
+    def verify_raw(self, raw_manifest: dict[str, Any]) -> bool:
+        """Verify signature against the persisted JSON payload without normalization side effects."""
+        signature = str(raw_manifest.get("signature", ""))
+        public_key = raw_manifest.get("owner_public_key")
+        if not signature or not isinstance(public_key, str):
+            return False
+        return verify_signature(
+            b64decode(public_key),
+            canonical_manifest_bytes(raw_manifest),
+            signature,
         )
 
     def restore(self, manifest_id: str, target: Path | None = None) -> Path:
@@ -697,6 +711,34 @@ class ManifestStore:
             backup_path = path.with_suffix(f"{path.suffix}.bak")
             path.replace(backup_path)
             self._append_audit_event("backup", {"source": str(path), "backup": str(backup_path)})
+
+    def _quarantine_invalid_manifest(self, path: Path, manifest_id: str) -> None:
+        """Move invalid manifests out of the active directory to avoid endless re-validation loops."""
+        if not path.exists():
+            return
+        self._acquire_manifest_lock()
+        try:
+            invalid_dir = self.manifests_dir / ".invalid"
+            invalid_dir.mkdir(parents=True, exist_ok=True)
+            timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S")
+            target = invalid_dir / f"{manifest_id}-{timestamp}.json"
+            suffix = 1
+            while target.exists():
+                target = invalid_dir / f"{manifest_id}-{timestamp}-{suffix}.json"
+                suffix += 1
+            path.replace(target)
+            self._append_audit_event(
+                "signature_invalid_quarantined",
+                {"manifest_id": manifest_id, "source": str(path), "target": str(target)},
+            )
+        except Exception as exc:
+            LOG.warning("Ungültiges Manifest konnte nicht quarantined werden: %s", path, exc_info=True)
+            self._append_audit_event(
+                "signature_invalid_quarantine_failed",
+                {"manifest_id": manifest_id, "path": str(path), "error": str(exc)},
+            )
+        finally:
+            self._release_manifest_lock()
 
     def _restore_from_backup(self, path: Path) -> bool:
         backup_path = path.with_suffix(f"{path.suffix}.bak")

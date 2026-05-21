@@ -298,7 +298,12 @@ def create_app(
                             manifest_changed = True
                             break
                 if manifest_changed:
-                    manifest_store.save(manifest)
+                    manifest_store.update_placement(
+                        manifest.manifest_id,
+                        identity,
+                        chunks=manifest.chunks,
+                        placement=dict(manifest.placement or {}),
+                    )
         finally:
             replication_repair_lock.release()
 
