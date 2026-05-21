@@ -73,6 +73,15 @@ def current_git_revision() -> str:
     except Exception:
         return "unbekannt"
 
+def _tail_text_file(path: Path, *, max_lines: int = 120, max_chars: int = 12000) -> str:
+    try:
+        with path.open("r", encoding="utf-8", errors="replace") as handle:
+            lines = handle.readlines()
+        text = "".join(lines[-max_lines:])
+        return text[-max_chars:] if len(text) > max_chars else text
+    except Exception:
+        return ""
+
 
 def build_folder_tree(manifests: list[FileManifest], folders: list[str] | None = None) -> list[dict[str, object]]:
     """Group manifests into user-created virtual folders."""
@@ -769,6 +778,20 @@ def create_app(
         response.headers["Pragma"] = "no-cache"
         response.headers["Expires"] = "0"
         return response
+
+    @app.get("/api/logs")
+    def api_logs() -> Response:
+        manifest_log_path = manifest_store.audit_log_path
+        manifest_log = _tail_text_file(manifest_log_path)
+        if not manifest_log:
+            manifest_log = "Keine Audit-Logs gefunden."
+        return jsonify(
+            {
+                "manifestAuditPath": str(manifest_log_path),
+                "manifestAuditLog": manifest_log,
+                "updatedAt": datetime.now(timezone.utc).isoformat(),
+            }
+        )
 
     @app.get("/api/uploads/<upload_id>")
     def api_upload_progress(upload_id: str) -> Response:
