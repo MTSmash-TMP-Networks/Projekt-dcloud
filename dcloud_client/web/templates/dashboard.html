@@ -147,6 +147,17 @@
     #win-network{ left:260px; top:98px; width:690px; height:490px; }
     #win-status{ left:310px; top:126px; width:680px; height:450px; }
     #win-settings{ left:360px; top:154px; width:720px; height:620px; }
+    #win-chat{ left:420px; top:90px; width:640px; height:520px; }
+    .chat-shell{ display:grid; grid-template-columns:220px minmax(0, 1fr); min-height:0; height:100%; }
+    .chat-peer-list{ border-right:1px solid var(--line); background:#edf4fd; overflow:auto; padding:10px; }
+    .chat-peer-btn{ width:100%; border:0; border-radius:10px; padding:.5rem; text-align:left; margin-bottom:6px; }
+    .chat-peer-btn.active, .chat-peer-btn:hover{ background:#dbeaff; }
+    .chat-main{ display:flex; flex-direction:column; min-height:0; }
+    .chat-messages{ flex:1; overflow:auto; padding:12px; background:#f8fbff; }
+    .chat-msg{ margin-bottom:10px; max-width:78%; padding:8px 10px; border-radius:10px; background:#fff; border:1px solid #d8e4f6; }
+    .chat-msg.out{ margin-left:auto; background:#e8f2ff; }
+    .chat-form{ display:flex; gap:8px; border-top:1px solid var(--line); padding:10px; }
+    .chat-input{ flex:1; border:1px solid #aebbd0; border-radius:10px; padding:.5rem; }
     @keyframes pop{ from{ opacity:.35; transform:scale(.982); } to{ opacity:1; transform:none; } }
 
     .titlebar{
@@ -583,6 +594,9 @@
       <button class="desk-item app-icon" data-app="settings" type="button">
         <span class="glyph">⚙️</span><span class="label">Einstellungen</span>
       </button>
+      <button class="desk-item app-icon" data-app="chat" type="button">
+        <span class="glyph">💬</span><span class="label">Peer-Chat</span>
+      </button>
     </div>
 
     <div class="notifications" id="notifications">
@@ -746,6 +760,29 @@
           <div style="margin-top:.5rem;display:flex;gap:.5rem;flex-wrap:wrap;">
             <button type="button" class="explorer-btn" id="settings-refresh">Netzwerksuche aktualisieren</button>
             <button type="button" class="explorer-btn" id="settings-cleanup">Datenmüll bereinigen</button>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="window" id="win-chat" hidden>
+      <div class="titlebar" data-app="chat">
+        <span class="title"><span>💬</span><span>Peer-Chat</span></span>
+        <div class="window-controls">
+          <button type="button" data-action="min" aria-label="Minimieren">–</button>
+          <button type="button" data-action="max" aria-label="Maximieren">□</button>
+          <button type="button" data-action="close" aria-label="Schließen">×</button>
+        </div>
+      </div>
+      <div class="window-content">
+        <div class="chat-shell">
+          <aside class="chat-peer-list" id="chat-peer-list"></aside>
+          <div class="chat-main">
+            <div class="chat-messages" id="chat-messages"></div>
+            <form class="chat-form" id="chat-form">
+              <input class="chat-input" id="chat-input" placeholder="Nachricht eingeben..." />
+              <button class="explorer-btn" type="submit">Senden</button>
+            </form>
           </div>
         </div>
       </div>
@@ -930,14 +967,17 @@
         explorer: document.getElementById("win-explorer"),
         network: document.getElementById("win-network"),
         status: document.getElementById("win-status"),
-        settings: document.getElementById("win-settings")
+        settings: document.getElementById("win-settings"),
+        chat: document.getElementById("win-chat")
       };
       const appLabels = {
         explorer:"📁 Datei-Explorer",
         network:"🌐 Netzwerk",
         status:"🖥️ Status",
-        settings:"⚙️ Einstellungen"
+        settings:"⚙️ Einstellungen",
+        chat:"💬 Peer-Chat"
       };
+      let activeChatPeerId = "";
       let transferExpanded = true;
 
       function normalizeFolderPath(value){
@@ -1206,6 +1246,40 @@
             peerList.appendChild(item);
           });
         }
+        renderChatPeers();
+      }
+
+      function renderChatPeers(){
+        const list = document.getElementById("chat-peer-list");
+        if(!list) return;
+        const peers = appState.peers || [];
+        list.innerHTML = "";
+        if(!peers.length){ list.textContent = "Keine aktiven Peers."; return; }
+        if(!activeChatPeerId || !peers.some(peer => peer.node_id === activeChatPeerId)) activeChatPeerId = peers[0].node_id;
+        peers.forEach(peer => {
+          const btn = document.createElement("button");
+          btn.type = "button";
+          btn.className = "chat-peer-btn" + (activeChatPeerId === peer.node_id ? " active" : "");
+          btn.textContent = peer.display_name || peer.name || String(peer.node_id || "Peer").slice(0, 12);
+          btn.onclick = () => { activeChatPeerId = peer.node_id; renderChatPeers(); loadChatMessages(); };
+          list.appendChild(btn);
+        });
+      }
+
+      async function loadChatMessages(){
+        if(!activeChatPeerId) return;
+        const box = document.getElementById("chat-messages");
+        const response = await fetch(`/api/chat?peer_id=${encodeURIComponent(activeChatPeerId)}`, { cache:"no-store" });
+        const data = await response.json();
+        if(!data.ok || !box) return;
+        box.innerHTML = "";
+        (data.messages || []).forEach(msg => {
+          const bubble = document.createElement("div");
+          bubble.className = "chat-msg" + (msg.direction === "out" ? " out" : "");
+          bubble.textContent = msg.text || "";
+          box.appendChild(bubble);
+        });
+        box.scrollTop = box.scrollHeight;
       }
 
       function makeDesktopItem({glyph, label, app, folder}){
@@ -1372,6 +1446,7 @@
         focusWindow(app);
         if(!openOrder.includes(app)) openOrder.push(app);
         if(app === "explorer") renderExplorer();
+        if(app === "chat"){ renderChatPeers(); loadChatMessages().catch(() => {}); }
         updateTaskbar();
       }
       function showTransferPanel(){
@@ -2160,6 +2235,24 @@ ${file.name}`)) return;
         }
       }
       document.getElementById("settings-cleanup").onclick = () => triggerStorageCleanup();
+      document.getElementById("chat-form").addEventListener("submit", async event => {
+        event.preventDefault();
+        const input = document.getElementById("chat-input");
+        const text = String(input.value || "").trim();
+        if(!text || !activeChatPeerId) return;
+        const response = await fetch("/api/chat/send", {
+          method:"POST",
+          headers:{ "Content-Type":"application/json", "Accept":"application/json" },
+          body: JSON.stringify({ peer_id: activeChatPeerId, text })
+        });
+        const payload = await response.json();
+        if(!response.ok || !payload.ok){
+          showToast(payload.message || "Nachricht konnte nicht gesendet werden", "error");
+          return;
+        }
+        input.value = "";
+        await loadChatMessages();
+      });
       const settingsForm = document.getElementById("settings-form");
       if(settingsForm){
         settingsForm.addEventListener("submit", async event => {
@@ -2292,7 +2385,7 @@ ${file.name}`)) return;
       updateQueueDisplay();
       updateTaskbar();
       restorePersistedUploads().catch(() => {});
-      setInterval(() => { refreshState().catch(() => {}); }, 5000);
+      setInterval(() => { refreshState().catch(() => {}); if(!windows.chat.hidden) loadChatMessages().catch(() => {}); }, 5000);
       setInterval(() => { refreshLogs().catch(() => {}); }, 15000);
     })();
   </script>

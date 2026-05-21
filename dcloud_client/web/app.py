@@ -7,6 +7,7 @@ import tempfile
 from typing import Any, Protocol
 from io import BytesIO
 import threading
+from collections import defaultdict, deque
 from datetime import datetime, timezone
 from uuid import uuid4
 import atexit
@@ -111,6 +112,7 @@ def create_app(
     relay_lock = threading.RLock()
     p2p_client = P2PStorageClient(default_web_port=config.web.port)
     upload_progress = UploadProgressTracker(persist_dir=chunk_store.tmp_dir / "upload_progress")
+    chat_messages: dict[str, deque[dict[str, Any]]] = defaultdict(lambda: deque(maxlen=120))
     replication_repair_lock = threading.Lock()
     last_replication_repair_at = 0.0
 
@@ -806,6 +808,39 @@ def create_app(
         except ValueError:
             limit = 12
         return jsonify({"uploads": upload_progress.list_recent(include_finished=include_finished, limit=limit)})
+
+    @app.get("/api/chat")
+    def api_chat_list() -> Response:
+        peer_id = str(request.args.get("peer_id", "")).strip()
+        if not peer_id:
+            return jsonify({"ok": False, "message": "peer_id fehlt"}), 400
+        return jsonify({"ok": True, "peerId": peer_id, "messages": list(chat_messages.get(peer_id, []))})
+
+    @app.post("/api/chat/send")
+    def api_chat_send() -> Response:
+        payload = request.get_json(silent=True) or {}
+        peer_id = str(payload.get("peer_id", "")).strip()
+        text = str(payload.get("text", "")).strip()
+        if not peer_id or not text:
+            return jsonify({"ok": False, "message": "peer_id und text sind erforderlich"}), 400
+        peers = _list_active_peers()
+        peer = next((item for item in peers if item.node_id == peer_id), None)
+        if peer is None:
+            return jsonify({"ok": False, "message": "Peer ist nicht aktiv erreichbar"}), 404
+        now = datetime.now(timezone.utc).isoformat()
+        outgoing = {"from_node_id": identity.node_id, "to_node_id": peer_id, "text": text, "created_at": now}
+        transfer = p2p_client._post_json_to_peer(  # noqa: SLF001
+            peer,
+            path="/api/p2p/chat",
+            payload=outgoing,
+            success_message="chat delivered",
+            log_message="Chat message to peer %s failed",
+        )
+        if not transfer.ok:
+            return jsonify({"ok": False, "message": transfer.message or "Chat konnte nicht zugestellt werden"}), 502
+        local_event = {**outgoing, "direction": "out"}
+        chat_messages[peer_id].append(local_event)
+        return jsonify({"ok": True, "message": local_event})
 
     def _requested_storage_peers() -> list[Any]:
         available_peers = _eligible_storage_peers()
@@ -1593,6 +1628,26 @@ def create_app(
             return jsonify({"ok": True, "manifest_id": manifest.manifest_id, "state": state_payload()})
         except (ValueError, TypeError, StorageError) as exc:
             return jsonify({"ok": False, "message": str(exc), "state": state_payload()}), 400
+
+    @app.post("/api/p2p/chat")
+    def p2p_chat_message() -> Response:
+        payload = request.get_json(silent=True) or {}
+        from_node_id = str(payload.get("from_node_id", "")).strip()
+        to_node_id = str(payload.get("to_node_id", "")).strip()
+        text = str(payload.get("text", "")).strip()
+        if not from_node_id or not to_node_id or not text:
+            return jsonify({"ok": False, "message": "Ungültige Chat-Nachricht"}), 400
+        if to_node_id != identity.node_id:
+            return jsonify({"ok": False, "message": "Nachricht war nicht für diesen Peer bestimmt"}), 400
+        event = {
+            "from_node_id": from_node_id,
+            "to_node_id": to_node_id,
+            "text": text,
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "direction": "in",
+        }
+        chat_messages[from_node_id].append(event)
+        return jsonify({"ok": True})
 
     @app.post("/files/<manifest_id>/delete")
     def delete_file(manifest_id: str) -> Response | str:
