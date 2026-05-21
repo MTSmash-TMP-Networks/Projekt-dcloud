@@ -172,7 +172,15 @@ setup_python_venv() {
   fi
 
   "$INSTALL_DIR/.venv/bin/python" -m pip install --upgrade pip
-  "$INSTALL_DIR/.venv/bin/python" -m pip install -r requirements.txt
+  if [ "${TARGET_OS:-}" = "openwrt" ]; then
+    # OpenWrt nutzt bereits opkg-Pakete (u.a. cryptography/cffi/pyyaml).
+    # Diese Wheels werden auf OpenWrt oft nicht bereitgestellt und ein Source-Build
+    # scheitert regelmaessig (Rust/Build-Toolchain fehlt). Deshalb installieren wir
+    # nur die fehlenden Python-Userland-Abhaengigkeiten via pip.
+    "$INSTALL_DIR/.venv/bin/python" -m pip install --no-cache-dir --prefer-binary "Flask>=3.0,<4.0"
+  else
+    "$INSTALL_DIR/.venv/bin/python" -m pip install -r requirements.txt
+  fi
 }
 
 setup_systemd() {
