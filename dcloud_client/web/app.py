@@ -101,7 +101,7 @@ def create_app(
     relay_transports: dict[str, HttpRelayTransport] = {}
     relay_lock = threading.RLock()
     p2p_client = P2PStorageClient(default_web_port=config.web.port)
-    upload_progress = UploadProgressTracker()
+    upload_progress = UploadProgressTracker(persist_dir=chunk_store.tmp_dir / "upload_progress")
     replication_repair_lock = threading.Lock()
     last_replication_repair_at = 0.0
 
@@ -768,6 +768,16 @@ def create_app(
     @app.get("/api/uploads/<upload_id>")
     def api_upload_progress(upload_id: str) -> Response:
         return jsonify(upload_progress.get(_safe_upload_id(upload_id)))
+
+    @app.get("/api/uploads")
+    def api_upload_progress_list() -> Response:
+        include_finished = request.args.get("include_finished", "1").strip() != "0"
+        limit_raw = request.args.get("limit", "12").strip()
+        try:
+            limit = max(1, min(50, int(limit_raw or "12")))
+        except ValueError:
+            limit = 12
+        return jsonify({"uploads": upload_progress.list_recent(include_finished=include_finished, limit=limit)})
 
     def _requested_storage_peers() -> list[Any]:
         available_peers = _eligible_storage_peers()
