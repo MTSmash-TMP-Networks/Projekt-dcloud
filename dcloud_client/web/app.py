@@ -7,6 +7,7 @@ import tempfile
 from typing import Any, Protocol
 from io import BytesIO
 import threading
+from datetime import datetime, timezone
 from uuid import uuid4
 import atexit
 import base64
@@ -110,6 +111,51 @@ def create_app(
     def _safe_upload_id(value: str | None) -> str:
         cleaned = "".join(char for char in (value or "") if char.isalnum() or char in "-_")[:80]
         return cleaned or uuid4().hex
+
+    def _cleanup_storage_garbage(*, stale_tmp_age_seconds: int = 900) -> dict[str, int]:
+        referenced_chunks = {
+            str(chunk["hash"])
+            for manifest in manifest_store.list_manifests()
+            for chunk in manifest.chunks
+        }
+        removed_unreferenced_chunks = 0
+        removed_stale_tmp_files = 0
+        removed_empty_chunk_dirs = 0
+        now = datetime.now(timezone.utc).timestamp()
+
+        for chunk_path in chunk_store.chunks_dir.glob("*/*.chunk"):
+            digest = chunk_path.stem
+            if digest in referenced_chunks:
+                continue
+            chunk_path.unlink(missing_ok=True)
+            removed_unreferenced_chunks += 1
+
+        for tmp_path in chunk_store.tmp_dir.glob("*"):
+            if not tmp_path.is_file():
+                continue
+            try:
+                age_seconds = now - tmp_path.stat().st_mtime
+            except OSError:
+                continue
+            if age_seconds < stale_tmp_age_seconds:
+                continue
+            tmp_path.unlink(missing_ok=True)
+            removed_stale_tmp_files += 1
+
+        for chunk_dir in chunk_store.chunks_dir.glob("*"):
+            if not chunk_dir.is_dir():
+                continue
+            try:
+                chunk_dir.rmdir()
+                removed_empty_chunk_dirs += 1
+            except OSError:
+                continue
+
+        return {
+            "removed_unreferenced_chunks": removed_unreferenced_chunks,
+            "removed_stale_tmp_files": removed_stale_tmp_files,
+            "removed_empty_chunk_dirs": removed_empty_chunk_dirs,
+        }
 
     def _upload_server_progress(upload_id: str):
         def handle(event: dict[str, Any]) -> None:
@@ -1265,6 +1311,24 @@ def create_app(
             return jsonify({"ok": True, "message": f"Netzwerksuche gestartet{suffix}", "state": state_payload()})
         message = "; ".join(errors) if errors else "Peer-Discovery ist nicht verfügbar"
         return jsonify({"ok": False, "message": f"Netzwerksuche fehlgeschlagen: {message}", "state": state_payload()}), 503
+
+    @app.post("/api/storage/cleanup")
+    def api_storage_cleanup() -> Response:
+        cleanup = _cleanup_storage_garbage()
+        total_removed = (
+            cleanup["removed_unreferenced_chunks"]
+            + cleanup["removed_stale_tmp_files"]
+            + cleanup["removed_empty_chunk_dirs"]
+        )
+        if total_removed:
+            message = (
+                f"Datenmüll bereinigt: {cleanup['removed_unreferenced_chunks']} unreferenzierte Chunk(s), "
+                f"{cleanup['removed_stale_tmp_files']} alte Temp-Datei(en), "
+                f"{cleanup['removed_empty_chunk_dirs']} leere Chunk-Ordner."
+            )
+        else:
+            message = "Keine bereinigbaren Daten gefunden."
+        return jsonify({"ok": True, "message": message, "cleanup": cleanup, "state": state_payload()})
 
 
     @app.post("/peers")
