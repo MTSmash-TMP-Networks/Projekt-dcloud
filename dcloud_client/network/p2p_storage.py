@@ -467,7 +467,7 @@ class P2PStorageClient:
 
 
 def _rank_peers_by_speed(peers: list[Peer], p2p_client: P2PStorageClient) -> list[Peer]:
-    """Return peers sorted by fastest health-check response first."""
+    """Return only reachable peers sorted by fastest health-check response first."""
     ranked: list[tuple[float, Peer]] = []
     for peer in peers:
         started = time.perf_counter()
@@ -480,7 +480,10 @@ def _rank_peers_by_speed(peers: list[Peer], p2p_client: P2PStorageClient) -> lis
                     latency = time.perf_counter() - started
         except (OSError, error.URLError, error.HTTPError):
             pass
-        ranked.append((latency, peer))
+        # Exclude non-responsive peers so stale network ghosts do not block
+        # chunk uploads with repeated connection timeouts.
+        if latency != float("inf"):
+            ranked.append((latency, peer))
     ranked.sort(key=lambda item: item[0])
     return [peer for _, peer in ranked]
 
