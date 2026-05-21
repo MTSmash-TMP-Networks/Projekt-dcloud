@@ -8,6 +8,7 @@ larger than one safe UDP datagram.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import base64
 import json
 import logging
 import time
@@ -25,6 +26,7 @@ LOG = logging.getLogger(__name__)
 REVOCATION_ACTION = "revoke_share"
 FILE_DELETE_ACTION = "delete_file"
 DEFAULT_MIN_REPLICAS_WITH_PEERS = 2
+DEFAULT_CHUNK_BATCH_SIZE = 8
 
 
 @dataclass(slots=True)
@@ -321,6 +323,61 @@ class P2PStorageClient:
             return PeerTransferResult(peer.node_id, False, last_error or "Relay-Chunktransfer fehlgeschlagen")
         return PeerTransferResult(peer.node_id, False, "Keine erreichbare Peer-Route")
 
+    def put_chunks_batch(self, peer: Peer, *, chunks: list[dict[str, Any]]) -> list[PeerTransferResult]:
+        if not chunks:
+            return []
+        path = "/api/p2p/chunks/batch"
+        payload = {
+            "chunks": [
+                {
+                    "digest": str(item["digest"]),
+                    "stored_data_b64": base64.b64encode(bytes(item["stored_data"])).decode("ascii"),
+                    "original_size": int(item["original_size"]),
+                    "stored_size": int(item["stored_size"]),
+                    "index": int(item["index"]),
+                    "compression": str(item["compression"]) if item.get("compression") else None,
+                }
+                for item in chunks
+            ]
+        }
+        data = json.dumps(payload, separators=(",", ":"), sort_keys=True).encode("utf-8")
+        headers = {"Content-Type": "application/json", "Accept": "application/json"}
+        response_payload: dict[str, Any] = {}
+        if peer.host != RELAY_HOST:
+            url = f"{self.api_base(peer)}{path}"
+            req = request.Request(url, data=data, headers=headers, method="POST")
+            try:
+                with request.urlopen(req, timeout=max(self.timeout, 45.0)) as response:
+                    if 200 <= response.status < 300:
+                        response_payload = json.loads(response.read().decode("utf-8", errors="replace"))
+                    else:
+                        return [PeerTransferResult(peer.node_id, False, f"HTTP {response.status}") for _ in chunks]
+            except (OSError, error.URLError, error.HTTPError) as exc:
+                LOG.debug("Batch chunk upload to peer %s failed", peer.node_id, exc_info=True)
+                if not self._relay_available(peer):
+                    return [PeerTransferResult(peer.node_id, False, str(exc)) for _ in chunks]
+        if not response_payload and self._relay_available(peer):
+            try:
+                relay_response = self._forward_via_relay(peer, method="POST", path=path, headers=headers, body=data, timeout=45.0)
+                if 200 <= relay_response.status_code < 300:
+                    response_payload = json.loads(relay_response.body.decode("utf-8", errors="replace"))
+                else:
+                    message = _relay_http_message(relay_response)
+                    return [PeerTransferResult(peer.node_id, False, message) for _ in chunks]
+            except RelayError as exc:
+                LOG.debug("Relay batch chunk upload to peer %s failed", peer.node_id, exc_info=True)
+                return [PeerTransferResult(peer.node_id, False, str(exc)) for _ in chunks]
+        stored = response_payload.get("stored", []) if isinstance(response_payload, dict) else []
+        stored_digests = {str(digest) for digest in stored if isinstance(digest, str)}
+        results: list[PeerTransferResult] = []
+        for item in chunks:
+            digest = str(item["digest"])
+            if digest in stored_digests:
+                results.append(PeerTransferResult(peer.node_id, True, "stored via batch"))
+            else:
+                results.append(PeerTransferResult(peer.node_id, False, f"chunk {digest[:12]} not acknowledged"))
+        return results
+
     def get_chunk(self, peer: Peer, *, digest: str) -> bytes:
         path = f"/api/p2p/chunks/{parse.quote(digest)}"
         url = f"{self.api_base(peer)}{path}"
@@ -544,6 +601,7 @@ def distribute_file_chunks(
                 compressed_chunks=result.compressed_chunks + (1 if compression else 0),
             )
 
+            pending_batch: dict[str, list[dict[str, Any]]] = {}
             for target, node_id in _rotated_targets(targets, target_ids, index):
                 if len(locations) >= desired_replicas:
                     break
@@ -558,6 +616,17 @@ def distribute_file_chunks(
                     status=f"Chunk {index + 1}/{max(total_chunks, 1)} wird an {peer_name} übertragen…",
                     current_chunk=index + 1,
                     current_peer=peer_name,
+                )
+                peer_batch = pending_batch.setdefault(node_id, [])
+                peer_batch.append(
+                    {
+                        "digest": digest,
+                        "stored_data": stored_data,
+                        "original_size": len(raw),
+                        "stored_size": len(stored_data),
+                        "index": index,
+                        "compression": compression,
+                    }
                 )
                 transfer = p2p_client.put_chunk(
                     target,
