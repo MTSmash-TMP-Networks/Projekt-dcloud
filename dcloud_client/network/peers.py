@@ -153,6 +153,9 @@ class InMemoryPeerProvider:
                     peer.route_via_node_id = existing.route_via_node_id
                 elif existing.relay_url and not peer.relay_url:
                     peer.relay_url = existing.relay_url
+                # Once we have a direct endpoint, prefer relay only as bootstrap.
+                if peer.host != "__relay__":
+                    peer.relay_url = None
 
             endpoint_key = peer.endpoint_key()
             duplicate_ids = [
