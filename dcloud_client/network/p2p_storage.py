@@ -202,12 +202,14 @@ class P2PStorageClient:
         preferred_tunnel_ports: list[int] | None = None,
         relay_client: HttpRelayClient | None = None,
         relay_clients: Mapping[str, HttpRelayClient] | None = None,
+        peer_recovery_callback: Callable[[Peer], Peer | None] | None = None,
     ) -> None:
         self.timeout = float(timeout)
         self.default_web_port = int(default_web_port)
         self.preferred_tunnel_ports = [int(port) for port in (preferred_tunnel_ports or []) if 1 <= int(port) <= 65535]
         self.relay_client = relay_client
         self.relay_clients: dict[str, HttpRelayClient] = {}
+        self.peer_recovery_callback = peer_recovery_callback
         if relay_clients:
             self.set_relay_clients(relay_clients)
         elif relay_client is not None:
@@ -261,6 +263,19 @@ class P2PStorageClient:
 
     def _relay_available(self, peer: Peer) -> bool:
         return self._relay_client_for(peer) is not None
+
+    def _recover_peer_if_possible(self, peer: Peer) -> Peer:
+        """Try to refresh a stale/lost peer via relay discovery before giving up."""
+        if self.peer_recovery_callback is None:
+            return peer
+        try:
+            recovered = self.peer_recovery_callback(peer)
+        except Exception:
+            LOG.debug("Peer recovery callback failed for %s", peer.node_id, exc_info=True)
+            return peer
+        if recovered is not None:
+            return recovered
+        return peer
 
     def _forward_via_relay(
         self,
@@ -317,6 +332,7 @@ class P2PStorageClient:
                     continue
             LOG.debug("Chunk upload to peer %s failed", peer.node_id, exc_info=True)
             if not self._relay_available(peer):
+                peer = self._recover_peer_if_possible(peer)
                 return PeerTransferResult(peer.node_id, False, str(direct_exc or "direct failed"))
         if self._relay_available(peer):
             last_error = ""
@@ -410,6 +426,8 @@ class P2PStorageClient:
                     direct_error = exc
                     continue
             LOG.debug("Direct chunk download from peer %s failed", peer.node_id, exc_info=True)
+            if not self._relay_available(peer):
+                peer = self._recover_peer_if_possible(peer)
         if self._relay_available(peer):
             last_error: Exception | None = None
             for attempt in range(3):
@@ -442,6 +460,7 @@ class P2PStorageClient:
             except (OSError, error.URLError, error.HTTPError) as exc:
                 LOG.debug(log_message, peer.node_id, exc_info=True)
                 if not self._relay_available(peer):
+                    peer = self._recover_peer_if_possible(peer)
                     return PeerTransferResult(peer.node_id, False, str(exc))
         if self._relay_available(peer):
             try:

@@ -18,8 +18,8 @@ network:
     end: 6891
   bootstrap_nodes: []
   randomize_udp_port: true
-  upnp_enabled: false
-  nat_pmp_enabled: false
+  upnp_enabled: true
+  nat_pmp_enabled: true
   preferred_tunnel_ports:
   - 443
   - 80

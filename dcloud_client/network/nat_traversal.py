@@ -30,10 +30,13 @@ def _default_gateway_linux() -> str | None:
     return None
 
 
-def _soap_add_mapping(control_url: str, service: str, local_ip: str, port: int, lease_seconds: int = 3600) -> bool:
+def _soap_add_mapping(control_url: str, service: str, local_ip: str, port: int, protocol: str, lease_seconds: int = 3600) -> bool:
+    proto = protocol.strip().upper()
+    if proto not in {"UDP", "TCP"}:
+        return False
     body = f"""<?xml version=\"1.0\"?>
 <s:Envelope xmlns:s=\"http://schemas.xmlsoap.org/soap/envelope/\" s:encodingStyle=\"http://schemas.xmlsoap.org/soap/encoding/\">
-<s:Body><u:AddPortMapping xmlns:u=\"{service}\"><NewRemoteHost></NewRemoteHost><NewExternalPort>{port}</NewExternalPort><NewProtocol>UDP</NewProtocol><NewInternalPort>{port}</NewInternalPort><NewInternalClient>{local_ip}</NewInternalClient><NewEnabled>1</NewEnabled><NewPortMappingDescription>dcloud</NewPortMappingDescription><NewLeaseDuration>{lease_seconds}</NewLeaseDuration></u:AddPortMapping></s:Body>
+<s:Body><u:AddPortMapping xmlns:u=\"{service}\"><NewRemoteHost></NewRemoteHost><NewExternalPort>{port}</NewExternalPort><NewProtocol>{proto}</NewProtocol><NewInternalPort>{port}</NewInternalPort><NewInternalClient>{local_ip}</NewInternalClient><NewEnabled>1</NewEnabled><NewPortMappingDescription>dcloud</NewPortMappingDescription><NewLeaseDuration>{lease_seconds}</NewLeaseDuration></u:AddPortMapping></s:Body>
 </s:Envelope>""".encode('utf-8')
     req = request.Request(control_url, data=body, method='POST')
     req.add_header('Content-Type', 'text/xml; charset="utf-8"')
@@ -45,7 +48,21 @@ def _soap_add_mapping(control_url: str, service: str, local_ip: str, port: int, 
         return False
 
 
-def try_upnp_port_mapping(port: int) -> bool:
+def _local_ip_for_gateway_probe() -> str:
+    try:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        sock.connect(("8.8.8.8", 80))
+        return sock.getsockname()[0]
+    except OSError:
+        return socket.gethostbyname(socket.gethostname()) or "127.0.0.1"
+    finally:
+        try:
+            sock.close()
+        except Exception:
+            pass
+
+
+def try_upnp_port_mapping(port: int, *, protocol: str = "UDP", lease_seconds: int = 3600) -> bool:
     msg = "\r\n".join([
         'M-SEARCH * HTTP/1.1',
         'HOST:239.255.255.250:1900',
@@ -91,24 +108,29 @@ def try_upnp_port_mapping(port: int) -> bool:
                 break
     if not control_url or not service_type:
         return False
-    local_ip = socket.gethostbyname(socket.gethostname()) or '127.0.0.1'
-    return _soap_add_mapping(control_url, service_type, local_ip, port)
+    local_ip = _local_ip_for_gateway_probe()
+    return _soap_add_mapping(control_url, service_type, local_ip, port, protocol, lease_seconds)
 
 
-def try_nat_pmp_port_mapping(port: int, lifetime_seconds: int = 3600) -> bool:
+def try_nat_pmp_port_mapping(port: int, *, protocol: str = "UDP", lifetime_seconds: int = 3600) -> bool:
     gw = _default_gateway_linux()
     if not gw:
         return False
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     sock.settimeout(2.0)
     try:
-        packet = struct.pack('!BBHHI', 0, 1, port, port, lifetime_seconds)
+        proto = protocol.strip().upper()
+        op_request = 1 if proto == "UDP" else 2 if proto == "TCP" else 0
+        if op_request == 0:
+            return False
+        packet = struct.pack('!BBHHI', 0, op_request, port, port, lifetime_seconds)
         sock.sendto(packet, (gw, 5351))
         data, _ = sock.recvfrom(32)
         if len(data) < 16:
             return False
         version, op, result = data[0], data[1], struct.unpack('!H', data[2:4])[0]
-        return version == 0 and op == 129 and result == 0
+        op_response = 128 + op_request
+        return version == 0 and op == op_response and result == 0
     except OSError:
         return False
     finally:

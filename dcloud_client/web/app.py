@@ -122,6 +122,22 @@ def create_app(
     replication_repair_lock = threading.Lock()
     last_replication_repair_at = 0.0
 
+    def _recover_peer_via_relay(stale_peer: Peer) -> Peer | None:
+        """If a peer dropped from active list, refresh relay view and return it again."""
+        with relay_lock:
+            transports = list(relay_transports.values())
+        for transport in transports:
+            try:
+                transport._register_and_ingest_peers()  # noqa: SLF001 - intentional best-effort recovery hook
+            except Exception:
+                continue
+            recovered = peer_provider.get_peer(stale_peer.node_id)
+            if recovered is not None:
+                return recovered
+        return peer_provider.get_peer(stale_peer.node_id)
+
+    p2p_client.peer_recovery_callback = _recover_peer_via_relay
+
     def _is_ajax_request() -> bool:
         return request.headers.get("X-Requested-With") == "XMLHttpRequest" or request.accept_mimetypes.best == "application/json"
 
