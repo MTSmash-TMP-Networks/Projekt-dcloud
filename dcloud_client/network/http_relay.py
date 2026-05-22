@@ -421,6 +421,12 @@ def peer_from_relay_payload(raw: object, *, relay_url: str, own_node_id: str | N
         except (TypeError, ValueError):
             return None
     client_type = str(raw.get("client_type")) if raw.get("client_type") in {"server"} else None
+    external_ip = ""
+    for key in ("external_ip", "public_ip", "ip", "public_host", "host"):
+        value = str(raw.get(key, "")).strip()
+        if value and value != RELAY_HOST:
+            external_ip = value
+            break
     return Peer(
         node_id=node_id,
         host=RELAY_HOST,
@@ -432,6 +438,7 @@ def peer_from_relay_payload(raw: object, *, relay_url: str, own_node_id: str | N
         web_port=optional_int("web_port"),
         free_storage_bytes=optional_int("free_storage_bytes"),
         relay_url=relay_url.rstrip("/"),
+        external_ip=external_ip or None,
     )
 
 

@@ -1322,7 +1322,10 @@
             const type = "Server";
             const storage = peer.accepts_peer_storage ? `P2P-Speicher aktiv · frei ${formatBytes(peer.free_storage_bytes || peer.shared_storage_bytes || 0)}` : "keine P2P-Ablage";
             const api = peer.web_port ? `API :${peer.web_port}` : "API unbekannt";
-            const route = peer.transport === "relay" ? "PHP-Relay" : (peer.transport === "direct+relay" ? `${peer.host}:${peer.udp_port} · Relay-Fallback` : `${peer.host}:${peer.udp_port}`);
+            const relayExternal = peer.external_ip ? `${peer.external_ip}:${peer.udp_port}` : "externe IP unbekannt";
+            const route = peer.transport === "relay"
+              ? `via PHP-Relay · extern ${relayExternal}`
+              : (peer.transport === "direct+relay" ? `${peer.host}:${peer.udp_port} · Relay-Fallback` : `${peer.host}:${peer.udp_port}`);
             const age = Number(peer.last_seen_age_seconds || 0);
             const seen = age < 2 ? "gerade aktiv" : `vor ${Math.round(age)}s gesehen`;
             item.textContent = `${label} · ${type} · ${route} · ${api} · ${storage} · ${seen}`;

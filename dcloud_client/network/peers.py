@@ -49,6 +49,7 @@ class Peer:
     web_port: int | None = None
     free_storage_bytes: int | None = None
     relay_url: str | None = None
+    external_ip: str | None = None
     last_seen: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 
     def endpoint_key(self) -> tuple[str, int, str | None]:
@@ -76,6 +77,7 @@ class Peer:
             "web_port": self.web_port,
             "free_storage_bytes": self.free_storage_bytes,
             "relay_url": self.relay_url,
+            "external_ip": self.external_ip,
             "transport": "relay" if self.host == "__relay__" else ("direct+relay" if self.relay_url else "direct"),
             "display_name": display_name_for_peer(self.node_id, self.name),
             "last_seen": self.last_seen.isoformat(),
