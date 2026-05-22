@@ -281,6 +281,17 @@ def load_config(config_path: str | Path = "config.yml", *, create_if_missing: bo
     if udp_range.start > udp_range.end:
         raise ValueError("network.udp_port_range.start must be <= end")
 
+    relay_urls_key_present = "relay_urls" in network_raw
+    relay_url_key_present = "relay_url" in network_raw
+    relay_values_raw = [network_raw.get("relay_urls", []), network_raw.get("relay_url", "")]
+    relay_urls_loaded = normalize_relay_urls(
+        relay_values_raw,
+        include_default=not (relay_urls_key_present or relay_url_key_present),
+    )
+    if relay_url_key_present and not relay_urls_key_present and not relay_urls_loaded:
+        relay_urls_loaded = normalize_relay_urls(network_raw.get("relay_url", ""), include_default=False)
+    relay_primary_url = relay_urls_loaded[0] if relay_urls_loaded else DEFAULT_PUBLIC_RELAY_URL
+
     return AppConfig(
         node=NodeConfig(
             name=str(node_raw.get("name", "dcloud-node")),
@@ -304,8 +315,8 @@ def load_config(config_path: str | Path = "config.yml", *, create_if_missing: bo
             startup_discovery_interval_seconds=max(1, int(network_raw.get("startup_discovery_interval_seconds", 2))),
             peer_timeout_seconds=max(5, int(network_raw.get("peer_timeout_seconds", DEFAULT_PEER_TIMEOUT_SECONDS))),
             peer_cleanup_interval_seconds=max(1, int(network_raw.get("peer_cleanup_interval_seconds", DEFAULT_PEER_CLEANUP_INTERVAL_SECONDS))),
-            relay_url=normalize_relay_urls([network_raw.get("relay_urls", []), network_raw.get("relay_url", "")], include_default=True)[0],
-            relay_urls=normalize_relay_urls([network_raw.get("relay_urls", []), network_raw.get("relay_url", "")], include_default=True),
+            relay_url=relay_primary_url,
+            relay_urls=relay_urls_loaded,
             relay_secret=normalize_relay_secret(str(network_raw.get("relay_secret", ""))),
             relay_poll_interval_seconds=max(0.2, float(network_raw.get("relay_poll_interval_seconds", DEFAULT_RELAY_POLL_INTERVAL_SECONDS))),
             relay_request_timeout_seconds=max(30, int(network_raw.get("relay_request_timeout_seconds", DEFAULT_RELAY_REQUEST_TIMEOUT_SECONDS))),
@@ -346,6 +357,7 @@ def update_runtime_settings(
     shared_storage_gb: float | int | str,
     relay_server_url: str | None = None,
     relay_server_urls: Any | None = None,
+    relay_enabled: bool | str | int | None = None,
     relay_secret: str | None = None,
     smb_enabled: bool | str | int | None = None,
     smb_username: str | None = None,
@@ -355,10 +367,11 @@ def update_runtime_settings(
     normalized_type = normalize_client_type(client_type)
     storage_limit_bytes = validate_shared_storage_bytes(gib_to_bytes(shared_storage_gb))
     relay_values = relay_server_urls if relay_server_urls is not None else relay_server_url
+    relay_is_enabled = bool(relay_enabled) if relay_enabled is not None else bool(config.network.relay_urls)
     normalized_relay_urls = (
-        normalize_relay_urls(relay_values, include_default=True)
+        normalize_relay_urls(relay_values, include_default=relay_is_enabled)
         if relay_values is not None
-        else normalize_relay_urls(config.network.relay_urls, include_default=True)
+        else normalize_relay_urls(config.network.relay_urls, include_default=relay_is_enabled)
     )
     # Relay access tokens are generated automatically by each PHP relay and
     # refreshed daily by the client. Manual relay_secret values from older
@@ -387,7 +400,7 @@ def update_runtime_settings(
 
     config.node.client_type = normalized_type
     config.storage.limit_bytes = storage_limit_bytes
-    config.network.relay_url = normalized_relay_urls[0]
+    config.network.relay_url = normalized_relay_urls[0] if normalized_relay_urls else DEFAULT_PUBLIC_RELAY_URL
     config.network.relay_urls = normalized_relay_urls
     config.network.relay_secret = normalized_relay_secret
     config.smb.enabled = bool(smb_enabled) if smb_enabled is not None else config.smb.enabled
