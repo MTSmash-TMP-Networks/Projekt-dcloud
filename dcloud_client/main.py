@@ -84,7 +84,11 @@ def main() -> None:
     if config.network.dht_enabled:
         LOG.info("DHT-Modus aktiviert (Kademlia-Phase 1): derzeit nur Konfigurationsflag gesetzt, Routing folgt in naechstem Schritt")
     if config.network.upnp_enabled or config.network.nat_pmp_enabled:
-        LOG.info("Automatische Portfreigabe angefordert (UPnP=%s, NAT-PMP=%s), aktuell noch als Planungs-Flag", config.network.upnp_enabled, config.network.nat_pmp_enabled)
+        LOG.info(
+            "Automatische Portfreigabe aktiv (UPnP=%s, NAT-PMP=%s)",
+            config.network.upnp_enabled,
+            config.network.nat_pmp_enabled,
+        )
     discovery = UdpDiscoveryTransport(
         host=config.network.udp_host,
         port=udp_port,
@@ -112,12 +116,15 @@ def main() -> None:
         dht_k=config.network.dht_k,
     )
     discovery.start()
+    web_port = int(config.web.port)
     if config.network.upnp_enabled:
-        ok = try_upnp_port_mapping(udp_port)
-        LOG.info("UPnP UDP port mapping %s for port %s", "ok" if ok else "failed", udp_port)
+        for protocol, port in (("UDP", int(udp_port)), ("TCP", web_port)):
+            ok = try_upnp_port_mapping(port, protocol=protocol)
+            LOG.info("UPnP %s port mapping %s for port %s", protocol, "ok" if ok else "failed", port)
     if config.network.nat_pmp_enabled:
-        ok = try_nat_pmp_port_mapping(udp_port)
-        LOG.info("NAT-PMP UDP port mapping %s for port %s", "ok" if ok else "failed", udp_port)
+        for protocol, port in (("UDP", int(udp_port)), ("TCP", web_port)):
+            ok = try_nat_pmp_port_mapping(port, protocol=protocol)
+            LOG.info("NAT-PMP %s port mapping %s for port %s", protocol, "ok" if ok else "failed", port)
 
     smb_server = None
     smb_thread = None
