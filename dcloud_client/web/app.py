@@ -601,6 +601,11 @@ def create_app(
                     peer_timeout_seconds=getattr(config.network, "peer_timeout_seconds", 35),
                     relay_urls=desired_urls,
                     relay_discovery_callback=_learn_relay_urls,
+                    metadata_provider=lambda: {
+                        "shared_storage_bytes": config.storage.limit_bytes,
+                        "free_storage_bytes": chunk_store.stats().free_limit_bytes,
+                        "accepts_peer_storage": _accepts_peer_storage(_list_active_peers()),
+                    },
                 )
                 relay_clients[desired_url] = relay_client
                 relay_transports[desired_url] = relay_transport
