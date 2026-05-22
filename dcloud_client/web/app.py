@@ -375,6 +375,12 @@ def create_app(
             "relaySecretSet": False,
             "relayTokenMode": "automatic-daily",
             "relayTokenLabel": "Automatisch, tägliche Rotation",
+            "dhtEnabled": bool(getattr(config.network, "dht_enabled", False)),
+            "dhtK": int(getattr(config.network, "dht_k", 20)),
+            "randomizeUdpPort": bool(getattr(config.network, "randomize_udp_port", True)),
+            "upnpEnabled": bool(getattr(config.network, "upnp_enabled", False)),
+            "natPmpEnabled": bool(getattr(config.network, "nat_pmp_enabled", False)),
+            "preferredTunnelPortsText": ", ".join(str(port) for port in getattr(config.network, "preferred_tunnel_ports", [443, 80])),
             "smbEnabled": bool(config.smb.enabled),
             "smbHost": config.smb.host,
             "smbPort": runtime_smb_port,
@@ -452,6 +458,12 @@ def create_app(
             "relayLastError": relay_error,
             "relayStatuses": relay_statuses,
             "relayTokenMode": "automatic-daily",
+            "dhtEnabled": bool(getattr(config.network, "dht_enabled", False)),
+            "dhtK": int(getattr(config.network, "dht_k", 20)),
+            "randomizeUdpPort": bool(getattr(config.network, "randomize_udp_port", True)),
+            "upnpEnabled": bool(getattr(config.network, "upnp_enabled", False)),
+            "natPmpEnabled": bool(getattr(config.network, "nat_pmp_enabled", False)),
+            "preferredTunnelPorts": list(getattr(config.network, "preferred_tunnel_ports", [443, 80])),
         }
 
     def _sync_peer_connector_settings() -> None:
@@ -1389,6 +1401,12 @@ def create_app(
                 smb_enabled=request.form.get("smb_enabled") == "on",
                 smb_username=request.form.get("smb_username", config.smb.username),
                 smb_password=request.form.get("smb_password", config.smb.password),
+                dht_enabled=request.form.get("dht_enabled") == "on",
+                dht_k=request.form.get("dht_k", getattr(config.network, "dht_k", 20)),
+                randomize_udp_port=request.form.get("randomize_udp_port") == "on",
+                upnp_enabled=request.form.get("upnp_enabled") == "on",
+                nat_pmp_enabled=request.form.get("nat_pmp_enabled") == "on",
+                preferred_tunnel_ports=request.form.get("preferred_tunnel_ports", ",".join(str(port) for port in getattr(config.network, "preferred_tunnel_ports", [443, 80]))),
             )
             chunk_store.limit_bytes = config.storage.limit_bytes
             _configure_relay_transport()
