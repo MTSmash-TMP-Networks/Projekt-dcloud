@@ -194,15 +194,14 @@ setup_python_venv() {
   fi
 
   "$INSTALL_DIR/.venv/bin/python" -m pip install --upgrade pip
+
+  REQUIREMENTS_FILE="requirements.txt"
   if [ "${TARGET_OS:-}" = "openwrt" ]; then
-    # OpenWrt soll Flask primaer aus opkg nutzen (python3-flask).
-    # Fallback auf pip nur falls das Paket im Feed nicht vorhanden ist.
-    if ! "$INSTALL_DIR/.venv/bin/python" -c "import flask" >/dev/null 2>&1; then
-      "$INSTALL_DIR/.venv/bin/python" -m pip install --no-cache-dir --prefer-binary "Flask>=3.0,<4.0"
-    fi
-  else
-    "$INSTALL_DIR/.venv/bin/python" -m pip install -r requirements.txt
+    REQUIREMENTS_FILE=".requirements-openwrt.txt"
+    grep -v -E '^(cryptography|PyYAML)([<>=!~].*)?$' requirements.txt > "$REQUIREMENTS_FILE"
   fi
+
+  "$INSTALL_DIR/.venv/bin/python" -m pip install -r "$REQUIREMENTS_FILE"
 }
 
 setup_systemd() {
