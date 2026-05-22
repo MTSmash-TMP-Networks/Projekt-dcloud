@@ -10,6 +10,7 @@ import time
 from dataclasses import dataclass
 from typing import Any, Callable
 
+from .dht import DhtIndex
 from .http_relay import normalize_relay_urls
 from .peers import Peer, PeerProvider
 from ..identity import NodeIdentity
@@ -66,6 +67,8 @@ class UdpDiscoveryTransport:
         web_port: int | None = None,
         relay_urls: list[str] | None = None,
         relay_discovery_callback: Callable[[list[str]], None] | None = None,
+        dht_enabled: bool = False,
+        dht_k: int = 20,
     ) -> None:
         self.host = host
         self.port = port
@@ -90,6 +93,8 @@ class UdpDiscoveryTransport:
         self.web_port = web_port
         self.relay_urls = normalize_relay_urls(relay_urls or [])
         self.relay_discovery_callback = relay_discovery_callback
+        self.dht_enabled = bool(dht_enabled)
+        self.dht_index = DhtIndex(k=dht_k)
         self.accepts_peer_storage = False
         self._child_node_ids: set[str] = set()
         self._socket: socket.socket | None = None
@@ -97,6 +102,7 @@ class UdpDiscoveryTransport:
         self._thread: threading.Thread | None = None
         self._announce_thread: threading.Thread | None = None
         self._cleanup_thread: threading.Thread | None = None
+        self._last_dht_probe_at = 0.0
 
     @staticmethod
     def _normalize_ports(raw_ports: list[int] | list[str]) -> list[int]:
@@ -153,6 +159,8 @@ class UdpDiscoveryTransport:
         self.send_control(host, port, self._hello_message(wants_relay_parent=use_as_tree_parent))
 
     def send_control(self, host: str, port: int, message: dict[str, object]) -> None:
+        if self.dht_enabled and message.get("type") in {"hello", "hello_ack"}:
+            message = {**message, "dht_table": self.dht_index.export()}
         payload = {"magic": self.protocol_magic, **message}
         data = json.dumps(payload, separators=(",", ":")).encode("utf-8")
         temp_sock: socket.socket | None = None
@@ -205,6 +213,20 @@ class UdpDiscoveryTransport:
             self._safe_send_control(node.host, node.port, self._hello_message())
         for peer in self.peer_provider.list_peers():
             self.send_control_to_peer(peer, self._hello_message())
+        self._maybe_probe_dht_peers()
+
+    def _maybe_probe_dht_peers(self) -> None:
+        if not self.dht_enabled:
+            return
+        now = time.monotonic()
+        if now - self._last_dht_probe_at < max(2.0, self.discovery_interval_seconds * 0.5):
+            return
+        self._last_dht_probe_at = now
+        known = {peer.node_id for peer in self.peer_provider.list_peers()}
+        for entry in self.dht_index.nearest(self.identity.node_id):
+            if entry.node_id == self.identity.node_id or entry.node_id in known:
+                continue
+            self._safe_send_control(entry.host, int(entry.udp_port), self._hello_message())
 
     def _announce_loop(self) -> None:
         started_at = time.monotonic()
@@ -288,13 +310,33 @@ class UdpDiscoveryTransport:
         if message_type == "relay":
             self._handle_relay(message, address)
             return
+        if message_type == "dht_find_node":
+            target = str(message.get("target_node_id", "")).strip()
+            nearest = [
+                {"node_id": item.node_id, "host": item.host, "udp_port": item.udp_port}
+                for item in self.dht_index.nearest(target or self.identity.node_id)
+            ] if self.dht_enabled else []
+            self.send_control(address[0], address[1], {"type": "dht_find_node_result", "target_node_id": target, "nodes": nearest})
+            return
+        if message_type == "dht_find_node_result":
+            if self.dht_enabled:
+                nodes = message.get("nodes")
+                if isinstance(nodes, list):
+                    self.dht_index.ingest(item for item in nodes if isinstance(item, dict))
+            return
         if message_type not in {"hello", "hello_ack", "peer_list"}:
             return
+        if self.dht_enabled:
+            table = message.get("dht_table")
+            if isinstance(table, list):
+                self.dht_index.ingest(item for item in table if isinstance(item, dict))
 
         sender = self._peer_from_message(message, address)
         if sender is None:
             return
         self.peer_provider.add_or_update(sender)
+        if self.dht_enabled:
+            self.dht_index.upsert(sender.node_id, sender.host, sender.udp_port)
         self._ingest_relay_urls(message.get("relay_urls"))
         self._ingest_relay_urls(message.get("relay_url"))
         if self.relay_children and bool(message.get("wants_relay_parent")):
@@ -319,6 +361,8 @@ class UdpDiscoveryTransport:
         sender = self._peer_from_message(message, address)
         if sender is not None:
             self.peer_provider.add_or_update(sender)
+            if self.dht_enabled:
+                self.dht_index.upsert(sender.node_id, sender.host, sender.udp_port)
         target_node_id = str(message.get("target_node_id", ""))
         payload = message.get("payload")
         if not target_node_id or not isinstance(payload, dict):
