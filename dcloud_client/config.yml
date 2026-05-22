@@ -25,6 +25,7 @@ network:
   - 80
   dht_enabled: false
   dht_k: 20
+  outgoing_only: false
   tree_parent_nodes: []
   relay_children: false
   discovery_interval_seconds: 10
