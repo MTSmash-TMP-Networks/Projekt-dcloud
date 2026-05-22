@@ -346,6 +346,7 @@ def update_runtime_settings(
     shared_storage_gb: float | int | str,
     relay_server_url: str | None = None,
     relay_server_urls: Any | None = None,
+    relay_enabled: bool | str | int | None = None,
     relay_secret: str | None = None,
     smb_enabled: bool | str | int | None = None,
     smb_username: str | None = None,
@@ -355,10 +356,11 @@ def update_runtime_settings(
     normalized_type = normalize_client_type(client_type)
     storage_limit_bytes = validate_shared_storage_bytes(gib_to_bytes(shared_storage_gb))
     relay_values = relay_server_urls if relay_server_urls is not None else relay_server_url
+    relay_is_enabled = bool(relay_enabled) if relay_enabled is not None else bool(config.network.relay_urls)
     normalized_relay_urls = (
-        normalize_relay_urls(relay_values, include_default=True)
+        normalize_relay_urls(relay_values, include_default=relay_is_enabled)
         if relay_values is not None
-        else normalize_relay_urls(config.network.relay_urls, include_default=True)
+        else normalize_relay_urls(config.network.relay_urls, include_default=relay_is_enabled)
     )
     # Relay access tokens are generated automatically by each PHP relay and
     # refreshed daily by the client. Manual relay_secret values from older
@@ -387,7 +389,7 @@ def update_runtime_settings(
 
     config.node.client_type = normalized_type
     config.storage.limit_bytes = storage_limit_bytes
-    config.network.relay_url = normalized_relay_urls[0]
+    config.network.relay_url = normalized_relay_urls[0] if normalized_relay_urls else DEFAULT_PUBLIC_RELAY_URL
     config.network.relay_urls = normalized_relay_urls
     config.network.relay_secret = normalized_relay_secret
     config.smb.enabled = bool(smb_enabled) if smb_enabled is not None else config.smb.enabled

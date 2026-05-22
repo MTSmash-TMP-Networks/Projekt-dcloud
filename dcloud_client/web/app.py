@@ -1379,6 +1379,7 @@ def create_app(
                 shared_storage_gb=request.form.get("shared_storage_gb", bytes_to_gib(config.storage.limit_bytes)),
                 relay_server_url=request.form.get("relay_server_url"),
                 relay_server_urls=request.form.get("relay_server_urls", request.form.get("relay_server_url", "\n".join(extra_relay_urls(config.network.relay_urls)))),
+                relay_enabled=request.form.get("relay_enabled") == "on",
                 smb_enabled=request.form.get("smb_enabled") == "on",
                 smb_username=request.form.get("smb_username", config.smb.username),
                 smb_password=request.form.get("smb_password", config.smb.password),
@@ -1386,7 +1387,7 @@ def create_app(
             chunk_store.limit_bytes = config.storage.limit_bytes
             _configure_relay_transport()
             _sync_peer_connector_settings()
-            relay_note = f", {len(config.network.relay_urls)} PHP-Relay(s) aktiv"
+            relay_note = ", PHP-Relay deaktiviert" if not config.network.relay_urls else f", {len(config.network.relay_urls)} PHP-Relay(s) aktiv"
             message = (
                 f"Einstellungen gespeichert: {client_type_label(config.node.client_type)}, "
                 f"{bytes_to_gib(config.storage.limit_bytes):g} GB freigegeben{relay_note}, "
