@@ -1561,6 +1561,9 @@ def create_app(
 
     @app.get("/api/p2p/chunks/<digest>")
     def api_p2p_get_chunk(digest: str) -> Response:
+        blocked = _reject_if_outgoing_only()
+        if blocked is not None:
+            return blocked
         try:
             data = chunk_store.read_stored_chunk(digest)
         except StorageError:

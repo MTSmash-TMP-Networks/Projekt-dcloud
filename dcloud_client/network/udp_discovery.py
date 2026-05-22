@@ -102,6 +102,7 @@ class UdpDiscoveryTransport:
         self._thread: threading.Thread | None = None
         self._announce_thread: threading.Thread | None = None
         self._cleanup_thread: threading.Thread | None = None
+        self._last_dht_probe_at = 0.0
 
     @staticmethod
     def _normalize_ports(raw_ports: list[int] | list[str]) -> list[int]:
@@ -212,6 +213,20 @@ class UdpDiscoveryTransport:
             self._safe_send_control(node.host, node.port, self._hello_message())
         for peer in self.peer_provider.list_peers():
             self.send_control_to_peer(peer, self._hello_message())
+        self._maybe_probe_dht_peers()
+
+    def _maybe_probe_dht_peers(self) -> None:
+        if not self.dht_enabled:
+            return
+        now = time.monotonic()
+        if now - self._last_dht_probe_at < max(2.0, self.discovery_interval_seconds * 0.5):
+            return
+        self._last_dht_probe_at = now
+        known = {peer.node_id for peer in self.peer_provider.list_peers()}
+        for entry in self.dht_index.nearest(self.identity.node_id):
+            if entry.node_id == self.identity.node_id or entry.node_id in known:
+                continue
+            self._safe_send_control(entry.host, int(entry.udp_port), self._hello_message())
 
     def _announce_loop(self) -> None:
         started_at = time.monotonic()
@@ -294,6 +309,20 @@ class UdpDiscoveryTransport:
         message_type = message.get("type")
         if message_type == "relay":
             self._handle_relay(message, address)
+            return
+        if message_type == "dht_find_node":
+            target = str(message.get("target_node_id", "")).strip()
+            nearest = [
+                {"node_id": item.node_id, "host": item.host, "udp_port": item.udp_port}
+                for item in self.dht_index.nearest(target or self.identity.node_id)
+            ] if self.dht_enabled else []
+            self.send_control(address[0], address[1], {"type": "dht_find_node_result", "target_node_id": target, "nodes": nearest})
+            return
+        if message_type == "dht_find_node_result":
+            if self.dht_enabled:
+                nodes = message.get("nodes")
+                if isinstance(nodes, list):
+                    self.dht_index.ingest(item for item in nodes if isinstance(item, dict))
             return
         if message_type not in {"hello", "hello_ack", "peer_list"}:
             return
