@@ -746,6 +746,9 @@
             <label style="display:flex;align-items:center;gap:.45rem;">
               <input id="settings-nat-pmp-enabled" type="checkbox" name="nat_pmp_enabled" {% if settings_json.natPmpEnabled %}checked{% endif %}> NAT-PMP Portfreigabe versuchen
             </label>
+            <label style="display:flex;align-items:center;gap:.45rem;">
+              <input id="settings-outgoing-only" type="checkbox" name="outgoing_only" {% if settings_json.outgoingOnly %}checked{% endif %}> Outgoing-Only (keine eingehenden Peer-Verbindungen)
+            </label>
             <label for="settings-preferred-tunnel-ports">Bevorzugte Fallback-Ports (z. B. 443,80)</label>
             <input id="settings-preferred-tunnel-ports" type="text" name="preferred_tunnel_ports" value="{{ settings_json.preferredTunnelPortsText }}" placeholder="443,80">
             <p class="settings-note">Diese Optionen steuern den Betrieb nach der ersten Einwahl: Peer-Suche per DHT, automatische NAT-Lochbohrung und direkte HTTP-Port-Fallbacks vor Relay.</p>
@@ -1194,13 +1197,14 @@
           const directCount = Number(network.directPeerCount || 0);
           const relayRouteCount = Number(network.relayRoutePeerCount || 0);
           const relayBootstrapOnly = !!network.relayBootstrapOnly;
+          const outgoingOnly = !!(network.outgoingOnly ?? settings.outgoingOnly);
           relaySubEl.textContent = network.relayEnabled
             ? (
                 network.relayLastError
                   ? `Relay-Fehler: ${network.relayLastError}`
                   : relayBootstrapOnly
-                    ? `Direktverbindungen aktiv (${directCount}) · Relay nur Standby für Wiederfinden bei IP-Änderung`
-                    : `${relayNames} · direkte Peers: ${directCount} · Relay-Routen: ${relayRouteCount}`
+                    ? `Direktverbindungen aktiv (${directCount}) · Relay nur Standby für Wiederfinden bei IP-Änderung${outgoingOnly ? " · Outgoing-Only aktiv" : ""}`
+                    : `${relayNames} · direkte Peers: ${directCount} · Relay-Routen: ${relayRouteCount}${outgoingOnly ? " · Outgoing-Only aktiv" : ""}`
               )
             : "Nur LAN-Verbindungen";
         }
@@ -1267,6 +1271,8 @@
         if(upnpInput && document.activeElement !== upnpInput) upnpInput.checked = !!settings.upnpEnabled;
         const natPmpInput = document.getElementById("settings-nat-pmp-enabled");
         if(natPmpInput && document.activeElement !== natPmpInput) natPmpInput.checked = !!settings.natPmpEnabled;
+        const outgoingOnlyInput = document.getElementById("settings-outgoing-only");
+        if(outgoingOnlyInput && document.activeElement !== outgoingOnlyInput) outgoingOnlyInput.checked = !!settings.outgoingOnly;
         const tunnelPortsInput = document.getElementById("settings-preferred-tunnel-ports");
         if(tunnelPortsInput && document.activeElement !== tunnelPortsInput) tunnelPortsInput.value = settings.preferredTunnelPortsText || "443, 80";
 

@@ -66,6 +66,7 @@ class NetworkConfig:
     preferred_tunnel_ports: list[int] = field(default_factory=lambda: [443, 80])
     dht_enabled: bool = False
     dht_k: int = 20
+    outgoing_only: bool = False
     bootstrap_nodes: list[str] = field(default_factory=list)
     tree_parent_nodes: list[str] = field(default_factory=list)
     relay_children: bool = False
@@ -325,6 +326,7 @@ def load_config(config_path: str | Path = "config.yml", *, create_if_missing: bo
             preferred_tunnel_ports=normalize_ports(network_raw.get("preferred_tunnel_ports"), [443, 80]),
             dht_enabled=bool(network_raw.get("dht_enabled", False)),
             dht_k=max(8, int(network_raw.get("dht_k", 20))),
+            outgoing_only=bool(network_raw.get("outgoing_only", False)),
             tree_parent_nodes=list(network_raw.get("tree_parent_nodes", [])),
             relay_children=bool(network_raw.get("relay_children", False)),
             discovery_interval_seconds=max(1, int(network_raw.get("discovery_interval_seconds", 10))),
@@ -388,6 +390,7 @@ def update_runtime_settings(
     upnp_enabled: bool | None = None,
     nat_pmp_enabled: bool | None = None,
     preferred_tunnel_ports: Any | None = None,
+    outgoing_only: bool | None = None,
 ) -> AppConfig:
     """Persist editable desktop settings and update the live config object."""
     normalized_type = normalize_client_type(client_type)
@@ -428,6 +431,7 @@ def update_runtime_settings(
         preferred_tunnel_ports if preferred_tunnel_ports is not None else getattr(config.network, "preferred_tunnel_ports", [443, 80]),
         [443, 80],
     )
+    raw["network"]["outgoing_only"] = bool(outgoing_only) if outgoing_only is not None else bool(getattr(config.network, "outgoing_only", False))
     raw["smb"]["enabled"] = bool(smb_enabled) if smb_enabled is not None else config.smb.enabled
     raw["smb"]["username"] = (smb_username if smb_username is not None else config.smb.username).strip()
     raw["smb"]["password"] = smb_password if smb_password is not None else config.smb.password
@@ -444,6 +448,7 @@ def update_runtime_settings(
     config.network.upnp_enabled = bool(raw["network"]["upnp_enabled"])
     config.network.nat_pmp_enabled = bool(raw["network"]["nat_pmp_enabled"])
     config.network.preferred_tunnel_ports = [int(port) for port in raw["network"]["preferred_tunnel_ports"]]
+    config.network.outgoing_only = bool(raw["network"]["outgoing_only"])
     config.smb.enabled = bool(smb_enabled) if smb_enabled is not None else config.smb.enabled
     config.smb.username = (smb_username if smb_username is not None else config.smb.username).strip()
     config.smb.password = smb_password if smb_password is not None else config.smb.password
