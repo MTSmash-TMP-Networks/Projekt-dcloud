@@ -427,9 +427,12 @@ def peer_from_relay_payload(raw: object, *, relay_url: str, own_node_id: str | N
         if value and value != RELAY_HOST:
             external_ip = value
             break
+    # Prefer a direct endpoint whenever the relay reports an external address.
+    # This allows the client to try direct UDP first and keep relay as fallback.
+    direct_host = external_ip if external_ip else RELAY_HOST
     return Peer(
         node_id=node_id,
-        host=RELAY_HOST,
+        host=direct_host,
         udp_port=udp_port,
         name=str(raw.get("name")) if raw.get("name") else None,
         client_type=client_type,
