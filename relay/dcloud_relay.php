@@ -416,6 +416,41 @@ function dcloud_log_event(string $type, array $payload): void {
     }
 }
 
+function dcloud_request_remote_addr(): string {
+    $candidates = [];
+    $forwardedFor = (string)($_SERVER['HTTP_X_FORWARDED_FOR'] ?? '');
+    if ($forwardedFor !== '') {
+        foreach (explode(',', $forwardedFor) as $part) {
+            $part = trim($part);
+            if ($part !== '') {
+                $candidates[] = $part;
+            }
+        }
+    }
+    $forwarded = (string)($_SERVER['HTTP_FORWARDED'] ?? '');
+    if ($forwarded !== '' && preg_match('/for="?\\[?([^;,"\]]+)\\]?"?/i', $forwarded, $matches) === 1) {
+        $candidate = trim((string)($matches[1] ?? ''));
+        if ($candidate !== '') {
+            $candidates[] = $candidate;
+        }
+    }
+    $realIp = trim((string)($_SERVER['HTTP_X_REAL_IP'] ?? ''));
+    if ($realIp !== '') {
+        $candidates[] = $realIp;
+    }
+    $remoteAddr = trim((string)($_SERVER['REMOTE_ADDR'] ?? ''));
+    if ($remoteAddr !== '') {
+        $candidates[] = $remoteAddr;
+    }
+    foreach ($candidates as $candidate) {
+        $normalized = trim($candidate, "[] \t\n\r\0\x0B\"");
+        if ($normalized !== '') {
+            return substr($normalized, 0, 128);
+        }
+    }
+    return '';
+}
+
 function dcloud_read_input(): array {
     $method = dcloud_request_method();
 
@@ -463,6 +498,7 @@ function dcloud_read_input(): array {
     }
 
     $data = $decoded;
+    $data['remote_addr'] = dcloud_request_remote_addr();
     $GLOBALS['DCLOUD_CURRENT_INPUT'] = $data;
 
     if (($data['protocol'] ?? '') !== 'dcloud-relay-v1') {
