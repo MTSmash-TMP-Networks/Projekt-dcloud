@@ -514,6 +514,9 @@ def create_app(
             app.config["DCLOUD_RELAY_TRANSPORTS"] = {}
 
     def _learn_relay_urls(urls: list[str]) -> None:
+        if not config.network.relay_urls:
+            # User has explicitly disabled PHP relay usage in settings.
+            return
         new_urls = [url for url in normalize_relay_urls(urls, include_default=False) if url not in config.network.relay_urls]
         if not new_urls:
             return
@@ -523,7 +526,7 @@ def create_app(
             # Keep the discovered relays at least for the current runtime if the
             # config file cannot be updated.
             config.network.relay_urls = normalize_relay_urls([config.network.relay_urls, new_urls], include_default=True)
-            config.network.relay_url = config.network.relay_urls[0]
+            config.network.relay_url = config.network.relay_urls[0] if config.network.relay_urls else DEFAULT_PUBLIC_RELAY_URL
         _configure_relay_transport()
         _sync_peer_connector_settings()
 
