@@ -198,7 +198,10 @@ setup_python_venv() {
   REQUIREMENTS_FILE="requirements.txt"
   if [ "${TARGET_OS:-}" = "openwrt" ]; then
     REQUIREMENTS_FILE=".requirements-openwrt.txt"
-    grep -v -E '^(cryptography|PyYAML)([<>=!~].*)?$' requirements.txt > "$REQUIREMENTS_FILE"
+    # OpenWrt nutzt bevorzugt opkg-Pakete fuer kryptographische Abhaengigkeiten.
+    # impacket zieht ueber pyOpenSSL oft neuere cryptography-Versionen nach,
+    # die auf vielen OpenWrt/Python3.9-Systemen nur als Source-Build verfuegbar sind.
+    grep -v -E '^(cryptography|PyYAML|impacket|pyOpenSSL)([<>=!~].*)?$' requirements.txt > "$REQUIREMENTS_FILE"
   fi
 
   "$INSTALL_DIR/.venv/bin/python" -m pip install -r "$REQUIREMENTS_FILE"

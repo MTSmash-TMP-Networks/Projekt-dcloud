@@ -326,5 +326,6 @@ Hinweise:
 
 - `--target linux` richtet einen `systemd`-Service ein.
 - `--target openwrt` richtet einen `/etc/init.d`-Service ein.
+- Bei `--target openwrt` werden `cryptography`, `PyYAML` und `impacket` aus `requirements.txt` herausgefiltert, da diese Abhaengigkeiten dort ueber `opkg` bzw. optional installiert werden sollten.
 - `--target windows` erzeugt ein PowerShell-Bootstrap-Skript für eine geplante Aufgabe beim Systemstart (als Dienst-Ersatz).
 - Mindestwert für `--storage-gb` ist `5`.
