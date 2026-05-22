@@ -132,6 +132,17 @@ Standardmäßig sucht jeder Client ohne manuelle Konfiguration nach anderen dclo
 
 Für normale LANs reicht der Broadcast `255.255.255.255`. Falls ein Netzwerk gerichtete Broadcast-Adressen benötigt, können weitere Ziele unter `network.auto_discovery_hosts` ergänzt werden. Die Firewall muss eingehende/ausgehende UDP-Pakete auf Port 6881 erlauben.
 
+### Vorbereitung auf relay-freien Betrieb (DHT + NAT-Umgehung)
+
+Der aktuelle Stand enthält jetzt Konfigurationsschalter für einen schrittweisen Ausbau ohne Pflicht-Relay:
+
+- `network.dht_enabled` und `network.dht_k`: reservierte Flags für eine kommende Kademlia-DHT (Tracker-freies Peer-/Content-Routing).
+- `network.randomize_udp_port`: wählt beim Start bevorzugt einen freien Port aus `udp_port_range` statt immer 6881 zuerst zu erzwingen.
+- `network.upnp_enabled` und `network.nat_pmp_enabled`: Flags für automatische Router-Portfreigaben (Lochbohrung), aktuell als vorbereitende Runtime-Option.
+- `network.preferred_tunnel_ports`: Reserve-Portliste (z. B. 443/80) für restriktive Umgebungen.
+
+Damit ist die Konfiguration bereits kompatibel mit genau den Verfahren, die du beschrieben hast; die eigentliche DHT-Routing-Logik und aktive UPnP/NAT-PMP-Portmappings sind der nächste Implementierungsschritt.
+
 ## PHP-Relay / Proxy für Peers außerhalb des LANs
 
 Für Peers in unterschiedlichen Heimnetzwerken wird ein PHP-Webserver als Relay genutzt. Das ist kein echter UDP-TURN-Server wie bei WebRTC, sondern eine HTTP-Mailbox: Jeder Client registriert sich regelmäßig beim PHP-Skript, fragt neue Peer-Metadaten ab, holt eingehende P2P-API-Anfragen aus seiner Queue und schreibt Antworten zurück. Dadurch können Manifest-Freigaben, Revocations, Datei-Löschungen und Chunk-Transfers auch dann laufen, wenn kein direkter eingehender Port erreichbar ist.
