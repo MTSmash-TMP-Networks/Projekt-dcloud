@@ -731,6 +731,30 @@
           </section>
 
           <section class="settings-panel">
+            <h3>DHT / NAT / Port-Fallback</h3>
+            <label style="display:flex;align-items:center;gap:.45rem;">
+              <input id="settings-dht-enabled" type="checkbox" name="dht_enabled" {% if settings_json.dhtEnabled %}checked{% endif %}> DHT (Kademlia-ähnlich) aktivieren
+            </label>
+            <label for="settings-dht-k">DHT Bucket-Größe (k)</label>
+            <input id="settings-dht-k" type="number" name="dht_k" min="8" step="1" value="{{ settings_json.dhtK }}">
+            <label style="display:flex;align-items:center;gap:.45rem;">
+              <input id="settings-randomize-udp-port" type="checkbox" name="randomize_udp_port" {% if settings_json.randomizeUdpPort %}checked{% endif %}> UDP-Port zufällig aus Portbereich wählen
+            </label>
+            <label style="display:flex;align-items:center;gap:.45rem;">
+              <input id="settings-upnp-enabled" type="checkbox" name="upnp_enabled" {% if settings_json.upnpEnabled %}checked{% endif %}> UPnP Portfreigabe versuchen
+            </label>
+            <label style="display:flex;align-items:center;gap:.45rem;">
+              <input id="settings-nat-pmp-enabled" type="checkbox" name="nat_pmp_enabled" {% if settings_json.natPmpEnabled %}checked{% endif %}> NAT-PMP Portfreigabe versuchen
+            </label>
+            <label style="display:flex;align-items:center;gap:.45rem;">
+              <input id="settings-outgoing-only" type="checkbox" name="outgoing_only" {% if settings_json.outgoingOnly %}checked{% endif %}> Outgoing-Only (keine eingehenden Peer-Verbindungen)
+            </label>
+            <label for="settings-preferred-tunnel-ports">Bevorzugte Fallback-Ports (z. B. 443,80)</label>
+            <input id="settings-preferred-tunnel-ports" type="text" name="preferred_tunnel_ports" value="{{ settings_json.preferredTunnelPortsText }}" placeholder="443,80">
+            <p class="settings-note">Diese Optionen steuern den Betrieb nach der ersten Einwahl: Peer-Suche per DHT, automatische NAT-Lochbohrung und direkte HTTP-Port-Fallbacks vor Relay.</p>
+          </section>
+
+          <section class="settings-panel">
             <h3>SMB-Server</h3>
             <label style="display:flex;align-items:center;gap:.45rem;">
               <input id="settings-smb-enabled" type="checkbox" name="smb_enabled" {% if settings_json.smbEnabled %}checked{% endif %}> SMB-Server aktivieren
@@ -1146,12 +1170,21 @@
         const autoSub = network.autoDiscoveryEnabled === false
           ? "Automatische LAN-Suche ist deaktiviert"
           : `Sucht sofort sichtbare Clients auf UDP-Port ${autoPorts.join(", ")} · Offline-Timeout ${network.peerTimeoutSeconds || 35}s`;
+        const dhtOn = !!(network.dhtEnabled ?? settings.dhtEnabled);
+        const dhtK = Number(network.dhtK ?? settings.dhtK ?? 20);
+        const randomUdp = !!(network.randomizeUdpPort ?? settings.randomizeUdpPort);
+        const upnp = !!(network.upnpEnabled ?? settings.upnpEnabled);
+        const natPmp = !!(network.natPmpEnabled ?? settings.natPmpEnabled);
+        const tunnelPorts = Array.isArray(network.preferredTunnelPorts)
+          ? network.preferredTunnelPorts
+          : String(settings.preferredTunnelPortsText || "443,80").split(/[\\s,;]+/).filter(Boolean).map(Number).filter(Number.isFinite);
+        const modeFlags = `DHT ${dhtOn ? `an (k=${dhtK})` : "aus"} · UDP ${randomUdp ? "zufällig" : "fix"} · UPnP ${upnp ? "an" : "aus"} · NAT-PMP ${natPmp ? "an" : "aus"} · Fallback-Ports ${tunnelPorts.join(", ") || "443,80"}`;
         const capacity = appState.networkCapacity || settings || {};
         document.getElementById("network-peer-count").textContent = String((appState.peers || []).length);
         document.getElementById("network-storage-limit").textContent = formatBytes(capacity.networkLimitBytes || settings.networkLimitBytes || appState.stats.limitBytes);
         document.getElementById("network-storage-free").textContent = formatBytes(capacity.networkFreeBytes || settings.networkFreeBytes || appState.stats.freeLimitBytes);
         document.getElementById("network-auto-discovery").textContent = autoText;
-        document.getElementById("network-auto-discovery-sub").textContent = autoSub;
+        document.getElementById("network-auto-discovery-sub").textContent = `${autoSub} · ${modeFlags}`;
         document.getElementById("status-node-id").textContent = appState.nodeId.slice(0, 12) + "…";
         document.getElementById("status-discovery-port").textContent = String(network.udpPort || 6881);
         const relayUrls = Array.isArray(network.relayUrls) ? network.relayUrls : (network.relayUrl ? [network.relayUrl] : []);
@@ -1161,8 +1194,18 @@
         if(relayStateEl) relayStateEl.textContent = network.relayEnabled ? (relayState === "verbunden" ? "Aktiv" : relayState === "fehler" ? "Fehler" : "Startet") : "Aus";
         if(relaySubEl){
           const relayNames = relayUrls.length ? `${relayUrls.length} Relay(s): ${relayUrls.slice(0,2).join(", ")}${relayUrls.length > 2 ? " …" : ""}` : "Nur LAN-Verbindungen";
+          const directCount = Number(network.directPeerCount || 0);
+          const relayRouteCount = Number(network.relayRoutePeerCount || 0);
+          const relayBootstrapOnly = !!network.relayBootstrapOnly;
+          const outgoingOnly = !!(network.outgoingOnly ?? settings.outgoingOnly);
           relaySubEl.textContent = network.relayEnabled
-            ? (network.relayLastError ? `Relay-Fehler: ${network.relayLastError}` : relayNames)
+            ? (
+                network.relayLastError
+                  ? `Relay-Fehler: ${network.relayLastError}`
+                  : relayBootstrapOnly
+                    ? `Direktverbindungen aktiv (${directCount}) · Relay nur Standby für Wiederfinden bei IP-Änderung${outgoingOnly ? " · Outgoing-Only aktiv" : ""}`
+                    : `${relayNames} · direkte Peers: ${directCount} · Relay-Routen: ${relayRouteCount}${outgoingOnly ? " · Outgoing-Only aktiv" : ""}`
+              )
             : "Nur LAN-Verbindungen";
         }
         document.getElementById("status-client-type").textContent = settings.clientTypeLabel || ("Server");
@@ -1218,6 +1261,20 @@
         if(smbEnabledInput && document.activeElement !== smbEnabledInput) smbEnabledInput.checked = !!settings.smbEnabled;
         const smbUserInput = document.getElementById("settings-smb-username");
         if(smbUserInput && document.activeElement !== smbUserInput) smbUserInput.value = settings.smbUsername || "";
+        const dhtEnabledInput = document.getElementById("settings-dht-enabled");
+        if(dhtEnabledInput && document.activeElement !== dhtEnabledInput) dhtEnabledInput.checked = !!settings.dhtEnabled;
+        const dhtKInput = document.getElementById("settings-dht-k");
+        if(dhtKInput && document.activeElement !== dhtKInput) dhtKInput.value = String(settings.dhtK || 20);
+        const randomUdpInput = document.getElementById("settings-randomize-udp-port");
+        if(randomUdpInput && document.activeElement !== randomUdpInput) randomUdpInput.checked = !!settings.randomizeUdpPort;
+        const upnpInput = document.getElementById("settings-upnp-enabled");
+        if(upnpInput && document.activeElement !== upnpInput) upnpInput.checked = !!settings.upnpEnabled;
+        const natPmpInput = document.getElementById("settings-nat-pmp-enabled");
+        if(natPmpInput && document.activeElement !== natPmpInput) natPmpInput.checked = !!settings.natPmpEnabled;
+        const outgoingOnlyInput = document.getElementById("settings-outgoing-only");
+        if(outgoingOnlyInput && document.activeElement !== outgoingOnlyInput) outgoingOnlyInput.checked = !!settings.outgoingOnly;
+        const tunnelPortsInput = document.getElementById("settings-preferred-tunnel-ports");
+        if(tunnelPortsInput && document.activeElement !== tunnelPortsInput) tunnelPortsInput.value = settings.preferredTunnelPortsText || "443, 80";
 
         const peers = appState.peers || [];
         const activeIds = new Set(peers.map(peer => String(peer.node_id || "")));
@@ -1265,7 +1322,10 @@
             const type = "Server";
             const storage = peer.accepts_peer_storage ? `P2P-Speicher aktiv · frei ${formatBytes(peer.free_storage_bytes || peer.shared_storage_bytes || 0)}` : "keine P2P-Ablage";
             const api = peer.web_port ? `API :${peer.web_port}` : "API unbekannt";
-            const route = peer.transport === "relay" ? "PHP-Relay" : (peer.transport === "direct+relay" ? `${peer.host}:${peer.udp_port} · Relay-Fallback` : `${peer.host}:${peer.udp_port}`);
+            const relayExternal = peer.external_ip ? `${peer.external_ip}:${peer.udp_port}` : "externe IP unbekannt";
+            const route = peer.transport === "relay"
+              ? `via PHP-Relay · extern ${relayExternal}`
+              : (peer.transport === "direct+relay" ? `${peer.host}:${peer.udp_port} · Relay-Fallback` : `${peer.host}:${peer.udp_port}`);
             const age = Number(peer.last_seen_age_seconds || 0);
             const seen = age < 2 ? "gerade aktiv" : `vor ${Math.round(age)}s gesehen`;
             item.textContent = `${label} · ${type} · ${route} · ${api} · ${storage} · ${seen}`;
