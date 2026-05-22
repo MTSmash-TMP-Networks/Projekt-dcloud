@@ -18,7 +18,10 @@ import subprocess
 
 from flask import Flask, Response, abort, flash, jsonify, redirect, render_template, request, send_file, url_for
 from werkzeug.utils import secure_filename
-from smb.SMBConnection import SMBConnection
+try:
+    from smb.SMBConnection import SMBConnection
+except ImportError:
+    SMBConnection = None
 
 
 from ..config import (
@@ -110,7 +113,10 @@ def create_app(
     relay_clients: dict[str, HttpRelayClient] = {}
     relay_transports: dict[str, HttpRelayTransport] = {}
     relay_lock = threading.RLock()
-    p2p_client = P2PStorageClient(default_web_port=config.web.port)
+    p2p_client = P2PStorageClient(
+        default_web_port=config.web.port,
+        preferred_tunnel_ports=config.network.preferred_tunnel_ports,
+    )
     upload_progress = UploadProgressTracker(persist_dir=chunk_store.tmp_dir / "upload_progress")
     chat_messages: dict[str, deque[dict[str, Any]]] = defaultdict(lambda: deque(maxlen=120))
     replication_repair_lock = threading.Lock()
@@ -381,7 +387,7 @@ def create_app(
         }
 
     def _relay_url_list() -> list[str]:
-        return normalize_relay_urls(getattr(config.network, "relay_urls", [config.network.relay_url]), include_default=True)
+        return normalize_relay_urls(getattr(config.network, "relay_urls", [config.network.relay_url]), include_default=False)
 
     def _relay_statuses() -> list[dict[str, Any]]:
         statuses: list[dict[str, Any]] = []
@@ -511,6 +517,9 @@ def create_app(
             app.config["DCLOUD_RELAY_TRANSPORTS"] = {}
 
     def _learn_relay_urls(urls: list[str]) -> None:
+        if not config.network.relay_urls:
+            # User has explicitly disabled PHP relay usage in settings.
+            return
         new_urls = [url for url in normalize_relay_urls(urls, include_default=False) if url not in config.network.relay_urls]
         if not new_urls:
             return
@@ -520,7 +529,7 @@ def create_app(
             # Keep the discovered relays at least for the current runtime if the
             # config file cannot be updated.
             config.network.relay_urls = normalize_relay_urls([config.network.relay_urls, new_urls], include_default=True)
-            config.network.relay_url = config.network.relay_urls[0]
+            config.network.relay_url = config.network.relay_urls[0] if config.network.relay_urls else DEFAULT_PUBLIC_RELAY_URL
         _configure_relay_transport()
         _sync_peer_connector_settings()
 
@@ -876,6 +885,10 @@ def create_app(
     @app.post("/upload/smb")
     def upload_from_smb() -> Response:
         upload_id = _safe_upload_id(request.form.get("upload_id"))
+        if SMBConnection is None:
+            message = "SMB-Unterstuetzung ist nicht installiert (Python-Modul 'smb' fehlt)."
+            upload_progress.fail(upload_id, message)
+            return jsonify({"ok": False, "message": message, "uploadId": upload_id, "uploadProgress": upload_progress.get(upload_id)}), 503
         folder_path = sanitize_folder_path(request.form.get("folder", DEFAULT_FOLDER))
         host = (request.form.get("smb_host") or "").strip()
         share = (request.form.get("smb_share") or "").strip()
@@ -1372,6 +1385,7 @@ def create_app(
                 shared_storage_gb=request.form.get("shared_storage_gb", bytes_to_gib(config.storage.limit_bytes)),
                 relay_server_url=request.form.get("relay_server_url"),
                 relay_server_urls=request.form.get("relay_server_urls", request.form.get("relay_server_url", "\n".join(extra_relay_urls(config.network.relay_urls)))),
+                relay_enabled=request.form.get("relay_enabled") == "on",
                 smb_enabled=request.form.get("smb_enabled") == "on",
                 smb_username=request.form.get("smb_username", config.smb.username),
                 smb_password=request.form.get("smb_password", config.smb.password),
@@ -1379,7 +1393,7 @@ def create_app(
             chunk_store.limit_bytes = config.storage.limit_bytes
             _configure_relay_transport()
             _sync_peer_connector_settings()
-            relay_note = f", {len(config.network.relay_urls)} PHP-Relay(s) aktiv"
+            relay_note = ", PHP-Relay deaktiviert" if not config.network.relay_urls else f", {len(config.network.relay_urls)} PHP-Relay(s) aktiv"
             message = (
                 f"Einstellungen gespeichert: {client_type_label(config.node.client_type)}, "
                 f"{bytes_to_gib(config.storage.limit_bytes):g} GB freigegeben{relay_note}, "

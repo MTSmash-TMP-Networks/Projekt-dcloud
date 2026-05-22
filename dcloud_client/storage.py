@@ -16,7 +16,7 @@ class StorageError(RuntimeError):
     pass
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True)
 class ChunkInfo:
     hash: str
     size: int
@@ -26,7 +26,7 @@ class ChunkInfo:
     compression: str | None = None
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True)
 class StorageStats:
     path: Path
     limit_bytes: int

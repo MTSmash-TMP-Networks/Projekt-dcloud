@@ -36,7 +36,7 @@ def display_name_for_peer(node_id: str, configured_name: str | None = None) -> s
     return f"{adjective} {noun} {suffix}"
 
 
-@dataclass(slots=True)
+@dataclass
 class Peer:
     node_id: str
     host: str
@@ -153,6 +153,9 @@ class InMemoryPeerProvider:
                     peer.route_via_node_id = existing.route_via_node_id
                 elif existing.relay_url and not peer.relay_url:
                     peer.relay_url = existing.relay_url
+                # Once we have a direct endpoint, prefer relay only as bootstrap.
+                if peer.host != "__relay__":
+                    peer.relay_url = None
 
             endpoint_key = peer.endpoint_key()
             duplicate_ids = [
