@@ -719,6 +719,9 @@
 
           <section class="settings-panel">
             <h3>PHP-Relay / Proxy für Internet-Peers</h3>
+            <label style="display:flex;align-items:center;gap:.45rem;">
+              <input id="settings-relay-enabled" type="checkbox" name="relay_enabled" {% if settings_json.relayEnabled %}checked{% endif %}> PHP-Relay aktivieren
+            </label>
             <label for="settings-relay-url">Festes Standard-Relay</label>
             <input id="settings-relay-url" type="url" value="{{ settings_json.fixedRelayUrl }}" readonly>
             <label for="settings-relay-urls">Weitere Relay-URLs hinzufügen</label>
@@ -1199,6 +1202,9 @@
         if(relayUrlInput) relayUrlInput.value = settings.fixedRelayUrl || settings.relayUrl || "";
         const relayUrlsInput = document.getElementById("settings-relay-urls");
         if(relayUrlsInput && document.activeElement !== relayUrlsInput) relayUrlsInput.value = settings.additionalRelayUrlsText || "";
+        const relayEnabledInput = document.getElementById("settings-relay-enabled");
+        if(relayEnabledInput && document.activeElement !== relayEnabledInput) relayEnabledInput.checked = !!settings.relayEnabled;
+        if(relayUrlsInput) relayUrlsInput.disabled = !((relayEnabledInput && relayEnabledInput.checked) || settings.relayEnabled);
         const relayTokenMode = document.getElementById("settings-relay-token-mode");
         if(relayTokenMode) relayTokenMode.textContent = settings.relayTokenLabel || "Automatisch, tägliche Rotation";
         const relayStatus = document.getElementById("settings-relay-status");
@@ -2315,6 +2321,13 @@ ${file.name}`)) return;
         await loadChatMessages();
       });
       const settingsForm = document.getElementById("settings-form");
+      const relayEnabledInput = document.getElementById("settings-relay-enabled");
+      const relayUrlsInput = document.getElementById("settings-relay-urls");
+      if(relayEnabledInput && relayUrlsInput){
+        const syncRelayInputs = () => { relayUrlsInput.disabled = !relayEnabledInput.checked; };
+        relayEnabledInput.addEventListener("change", syncRelayInputs);
+        syncRelayInputs();
+      }
       if(settingsForm){
         settingsForm.addEventListener("submit", async event => {
           event.preventDefault();
