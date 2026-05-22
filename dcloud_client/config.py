@@ -60,6 +60,12 @@ class NetworkConfig:
     udp_host: str
     udp_port: int
     udp_port_range: UdpPortRange
+    randomize_udp_port: bool = True
+    upnp_enabled: bool = False
+    nat_pmp_enabled: bool = False
+    preferred_tunnel_ports: list[int] = field(default_factory=lambda: [443, 80])
+    dht_enabled: bool = False
+    dht_k: int = 20
     bootstrap_nodes: list[str] = field(default_factory=list)
     tree_parent_nodes: list[str] = field(default_factory=list)
     relay_children: bool = False
@@ -305,6 +311,12 @@ def load_config(config_path: str | Path = "config.yml", *, create_if_missing: bo
             udp_port=int(network_raw.get("udp_port", 6881)),
             udp_port_range=udp_range,
             bootstrap_nodes=list(network_raw.get("bootstrap_nodes", [])),
+            randomize_udp_port=bool(network_raw.get("randomize_udp_port", True)),
+            upnp_enabled=bool(network_raw.get("upnp_enabled", False)),
+            nat_pmp_enabled=bool(network_raw.get("nat_pmp_enabled", False)),
+            preferred_tunnel_ports=normalize_ports(network_raw.get("preferred_tunnel_ports"), [443, 80]),
+            dht_enabled=bool(network_raw.get("dht_enabled", False)),
+            dht_k=max(8, int(network_raw.get("dht_k", 20))),
             tree_parent_nodes=list(network_raw.get("tree_parent_nodes", [])),
             relay_children=bool(network_raw.get("relay_children", False)),
             discovery_interval_seconds=max(1, int(network_raw.get("discovery_interval_seconds", 10))),
@@ -362,6 +374,12 @@ def update_runtime_settings(
     smb_enabled: bool | str | int | None = None,
     smb_username: str | None = None,
     smb_password: str | None = None,
+    dht_enabled: bool | None = None,
+    dht_k: int | str | None = None,
+    randomize_udp_port: bool | None = None,
+    upnp_enabled: bool | None = None,
+    nat_pmp_enabled: bool | None = None,
+    preferred_tunnel_ports: Any | None = None,
 ) -> AppConfig:
     """Persist editable desktop settings and update the live config object."""
     normalized_type = normalize_client_type(client_type)
@@ -393,6 +411,15 @@ def update_runtime_settings(
     raw["network"]["relay_url"] = DEFAULT_PUBLIC_RELAY_URL
     raw["network"]["relay_urls"] = normalized_relay_urls
     raw["network"]["relay_secret"] = normalized_relay_secret
+    raw["network"]["dht_enabled"] = bool(dht_enabled) if dht_enabled is not None else bool(getattr(config.network, "dht_enabled", False))
+    raw["network"]["dht_k"] = max(8, int(dht_k if dht_k is not None else getattr(config.network, "dht_k", 20)))
+    raw["network"]["randomize_udp_port"] = bool(randomize_udp_port) if randomize_udp_port is not None else bool(getattr(config.network, "randomize_udp_port", True))
+    raw["network"]["upnp_enabled"] = bool(upnp_enabled) if upnp_enabled is not None else bool(getattr(config.network, "upnp_enabled", False))
+    raw["network"]["nat_pmp_enabled"] = bool(nat_pmp_enabled) if nat_pmp_enabled is not None else bool(getattr(config.network, "nat_pmp_enabled", False))
+    raw["network"]["preferred_tunnel_ports"] = normalize_ports(
+        preferred_tunnel_ports if preferred_tunnel_ports is not None else getattr(config.network, "preferred_tunnel_ports", [443, 80]),
+        [443, 80],
+    )
     raw["smb"]["enabled"] = bool(smb_enabled) if smb_enabled is not None else config.smb.enabled
     raw["smb"]["username"] = (smb_username if smb_username is not None else config.smb.username).strip()
     raw["smb"]["password"] = smb_password if smb_password is not None else config.smb.password
@@ -403,6 +430,12 @@ def update_runtime_settings(
     config.network.relay_url = normalized_relay_urls[0] if normalized_relay_urls else DEFAULT_PUBLIC_RELAY_URL
     config.network.relay_urls = normalized_relay_urls
     config.network.relay_secret = normalized_relay_secret
+    config.network.dht_enabled = bool(raw["network"]["dht_enabled"])
+    config.network.dht_k = int(raw["network"]["dht_k"])
+    config.network.randomize_udp_port = bool(raw["network"]["randomize_udp_port"])
+    config.network.upnp_enabled = bool(raw["network"]["upnp_enabled"])
+    config.network.nat_pmp_enabled = bool(raw["network"]["nat_pmp_enabled"])
+    config.network.preferred_tunnel_ports = [int(port) for port in raw["network"]["preferred_tunnel_ports"]]
     config.smb.enabled = bool(smb_enabled) if smb_enabled is not None else config.smb.enabled
     config.smb.username = (smb_username if smb_username is not None else config.smb.username).strip()
     config.smb.password = smb_password if smb_password is not None else config.smb.password
