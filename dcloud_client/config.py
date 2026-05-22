@@ -61,8 +61,8 @@ class NetworkConfig:
     udp_port: int
     udp_port_range: UdpPortRange
     randomize_udp_port: bool = True
-    upnp_enabled: bool = False
-    nat_pmp_enabled: bool = False
+    upnp_enabled: bool = True
+    nat_pmp_enabled: bool = True
     preferred_tunnel_ports: list[int] = field(default_factory=lambda: [443, 80])
     dht_enabled: bool = False
     dht_k: int = 20
@@ -321,8 +321,8 @@ def load_config(config_path: str | Path = "config.yml", *, create_if_missing: bo
             udp_port_range=udp_range,
             bootstrap_nodes=list(network_raw.get("bootstrap_nodes", [])),
             randomize_udp_port=bool(network_raw.get("randomize_udp_port", True)),
-            upnp_enabled=bool(network_raw.get("upnp_enabled", False)),
-            nat_pmp_enabled=bool(network_raw.get("nat_pmp_enabled", False)),
+            upnp_enabled=bool(network_raw.get("upnp_enabled", True)),
+            nat_pmp_enabled=bool(network_raw.get("nat_pmp_enabled", True)),
             preferred_tunnel_ports=normalize_ports(network_raw.get("preferred_tunnel_ports"), [443, 80]),
             dht_enabled=bool(network_raw.get("dht_enabled", False)),
             dht_k=max(8, int(network_raw.get("dht_k", 20))),
