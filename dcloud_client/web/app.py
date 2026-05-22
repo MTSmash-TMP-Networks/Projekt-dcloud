@@ -105,9 +105,11 @@ def create_app(
     manifest_store: ManifestStore,
     peer_provider: PeerProvider,
     peer_connector: PeerConnector | None = None,
+    runtime_udp_port: int | None = None,
 ) -> Flask:
     app = Flask(__name__)
     app.secret_key = identity.node_id[:32]
+    active_udp_port = int(runtime_udp_port if runtime_udp_port is not None else config.network.udp_port)
     app.config["DCLOUD_APP_CONFIG"] = config
     app.jinja_env.filters["human_bytes"] = human_bytes
     relay_clients: dict[str, HttpRelayClient] = {}
@@ -470,7 +472,7 @@ def create_app(
         ]
         return {
             "udpHost": config.network.udp_host,
-            "udpPort": config.network.udp_port,
+            "udpPort": active_udp_port,
             "autoDiscoveryEnabled": config.network.auto_discovery_enabled,
             "autoDiscoveryPorts": config.network.auto_discovery_ports,
             "autoDiscoveryHosts": config.network.auto_discovery_hosts,
@@ -607,7 +609,7 @@ def create_app(
                     peer_provider=peer_provider,
                     dispatcher=_dispatch_relay_request,
                     protocol_magic=config.security.protocol_magic,
-                    udp_port=config.network.udp_port,
+                    udp_port=active_udp_port,
                     web_port=config.web.port,
                     client_type=config.node.client_type,
                     shared_storage_bytes=config.storage.limit_bytes,

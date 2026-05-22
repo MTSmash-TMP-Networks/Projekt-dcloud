@@ -291,7 +291,15 @@ def main() -> None:
         smb_sync_thread.start()
 
     config.network.udp_port = udp_port
-    app = create_app(config, identity, chunk_store, manifest_store, peer_provider, discovery)
+    app = create_app(
+        config,
+        identity,
+        chunk_store,
+        manifest_store,
+        peer_provider,
+        discovery,
+        runtime_udp_port=udp_port,
+    )
     app.config["DCLOUD_SMB_STATUS"] = smb_status
     app.config["DCLOUD_SMB_SERVER"] = smb_server
     app.config["DCLOUD_SMB_ROOT"] = str(smb_root)
