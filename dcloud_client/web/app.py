@@ -384,7 +384,7 @@ def create_app(
         }
 
     def _relay_url_list() -> list[str]:
-        return normalize_relay_urls(getattr(config.network, "relay_urls", [config.network.relay_url]), include_default=True)
+        return normalize_relay_urls(getattr(config.network, "relay_urls", [config.network.relay_url]), include_default=False)
 
     def _relay_statuses() -> list[dict[str, Any]]:
         statuses: list[dict[str, Any]] = []

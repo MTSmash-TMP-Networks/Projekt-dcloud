@@ -281,6 +281,17 @@ def load_config(config_path: str | Path = "config.yml", *, create_if_missing: bo
     if udp_range.start > udp_range.end:
         raise ValueError("network.udp_port_range.start must be <= end")
 
+    relay_urls_key_present = "relay_urls" in network_raw
+    relay_url_key_present = "relay_url" in network_raw
+    relay_values_raw = [network_raw.get("relay_urls", []), network_raw.get("relay_url", "")]
+    relay_urls_loaded = normalize_relay_urls(
+        relay_values_raw,
+        include_default=not (relay_urls_key_present or relay_url_key_present),
+    )
+    if relay_url_key_present and not relay_urls_key_present and not relay_urls_loaded:
+        relay_urls_loaded = normalize_relay_urls(network_raw.get("relay_url", ""), include_default=False)
+    relay_primary_url = relay_urls_loaded[0] if relay_urls_loaded else DEFAULT_PUBLIC_RELAY_URL
+
     return AppConfig(
         node=NodeConfig(
             name=str(node_raw.get("name", "dcloud-node")),
@@ -304,8 +315,8 @@ def load_config(config_path: str | Path = "config.yml", *, create_if_missing: bo
             startup_discovery_interval_seconds=max(1, int(network_raw.get("startup_discovery_interval_seconds", 2))),
             peer_timeout_seconds=max(5, int(network_raw.get("peer_timeout_seconds", DEFAULT_PEER_TIMEOUT_SECONDS))),
             peer_cleanup_interval_seconds=max(1, int(network_raw.get("peer_cleanup_interval_seconds", DEFAULT_PEER_CLEANUP_INTERVAL_SECONDS))),
-            relay_url=normalize_relay_urls([network_raw.get("relay_urls", []), network_raw.get("relay_url", "")], include_default=True)[0],
-            relay_urls=normalize_relay_urls([network_raw.get("relay_urls", []), network_raw.get("relay_url", "")], include_default=True),
+            relay_url=relay_primary_url,
+            relay_urls=relay_urls_loaded,
             relay_secret=normalize_relay_secret(str(network_raw.get("relay_secret", ""))),
             relay_poll_interval_seconds=max(0.2, float(network_raw.get("relay_poll_interval_seconds", DEFAULT_RELAY_POLL_INTERVAL_SECONDS))),
             relay_request_timeout_seconds=max(30, int(network_raw.get("relay_request_timeout_seconds", DEFAULT_RELAY_REQUEST_TIMEOUT_SECONDS))),
