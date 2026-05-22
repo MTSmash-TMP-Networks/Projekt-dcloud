@@ -427,9 +427,12 @@ def peer_from_relay_payload(raw: object, *, relay_url: str, own_node_id: str | N
         if value and value != RELAY_HOST:
             external_ip = value
             break
+    # Prefer a direct endpoint whenever the relay reports an external address.
+    # This allows the client to try direct UDP first and keep relay as fallback.
+    direct_host = external_ip if external_ip else RELAY_HOST
     return Peer(
         node_id=node_id,
-        host=RELAY_HOST,
+        host=direct_host,
         udp_port=udp_port,
         name=str(raw.get("name")) if raw.get("name") else None,
         client_type=client_type,
@@ -464,6 +467,7 @@ class HttpRelayTransport:
         peer_timeout_seconds: int = 35,
         relay_urls: list[str] | None = None,
         relay_discovery_callback: Callable[[list[str]], None] | None = None,
+        metadata_provider: Callable[[], dict[str, Any]] | None = None,
     ) -> None:
         self.relay_client = relay_client
         self.relay_url = relay_client.relay_url
@@ -486,6 +490,7 @@ class HttpRelayTransport:
             urls.insert(0, self.relay_url)
         self.relay_urls = urls
         self.relay_discovery_callback = relay_discovery_callback
+        self.metadata_provider = metadata_provider
         self.last_error: str | None = None
         self.last_success_at: float | None = None
         self.active_request_workers = 0
@@ -552,7 +557,7 @@ class HttpRelayTransport:
     def _metadata(self) -> dict[str, Any]:
         token_payload = self.relay_client.token_payload()
         relay_tokens = [token_payload] if token_payload else []
-        return {
+        payload: dict[str, Any] = {
             "node_id": self.identity.node_id,
             "public_key": self.identity.public_key_b64,
             "name": self.node_name,
@@ -571,6 +576,14 @@ class HttpRelayTransport:
             "relay_tokens": relay_tokens,
             "timestamp": int(time.time()),
         }
+        if self.metadata_provider is not None:
+            try:
+                dynamic_payload = self.metadata_provider()
+            except Exception:
+                dynamic_payload = {}
+            if isinstance(dynamic_payload, dict):
+                payload.update(dynamic_payload)
+        return payload
 
     def _register_and_ingest_peers(self) -> None:
         self.relay_client.ensure_access_token()
