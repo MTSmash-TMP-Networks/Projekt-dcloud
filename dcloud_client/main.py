@@ -22,6 +22,7 @@ from .config import AppConfig, load_config
 from .identity import IdentityManager
 from .manifests import DEFAULT_FOLDER, ManifestStore, sanitize_folder_path
 from .network.peers import InMemoryPeerProvider
+from .network.nat_traversal import try_nat_pmp_port_mapping, try_upnp_port_mapping
 from .network.smb_server import EmbeddedSmbServer
 from .network.udp_discovery import UdpDiscoveryTransport
 from .storage import ChunkStore
@@ -38,7 +39,11 @@ def configure_logging(verbose: bool = False) -> None:
 
 
 def choose_udp_port(config: AppConfig) -> int:
-    candidates = [config.network.udp_port] + [
+    if config.network.randomize_udp_port:
+        preferred = [port for port in range(config.network.udp_port_range.start, config.network.udp_port_range.end + 1) if port != config.network.udp_port]
+        candidates = preferred + [config.network.udp_port]
+    else:
+        candidates = [config.network.udp_port] + [
         port for port in range(config.network.udp_port_range.start, config.network.udp_port_range.end + 1) if port != config.network.udp_port
     ]
     for port in candidates:
@@ -76,6 +81,10 @@ def main() -> None:
     peer_provider = InMemoryPeerProvider(peer_timeout_seconds=config.network.peer_timeout_seconds)
 
     udp_port = choose_udp_port(config)
+    if config.network.dht_enabled:
+        LOG.info("DHT-Modus aktiviert (Kademlia-Phase 1): derzeit nur Konfigurationsflag gesetzt, Routing folgt in naechstem Schritt")
+    if config.network.upnp_enabled or config.network.nat_pmp_enabled:
+        LOG.info("Automatische Portfreigabe angefordert (UPnP=%s, NAT-PMP=%s), aktuell noch als Planungs-Flag", config.network.upnp_enabled, config.network.nat_pmp_enabled)
     discovery = UdpDiscoveryTransport(
         host=config.network.udp_host,
         port=udp_port,
@@ -99,8 +108,16 @@ def main() -> None:
         free_storage_bytes=chunk_store.stats().free_limit_bytes,
         web_port=config.web.port,
         relay_urls=config.network.relay_urls,
+        dht_enabled=config.network.dht_enabled,
+        dht_k=config.network.dht_k,
     )
     discovery.start()
+    if config.network.upnp_enabled:
+        ok = try_upnp_port_mapping(udp_port)
+        LOG.info("UPnP UDP port mapping %s for port %s", "ok" if ok else "failed", udp_port)
+    if config.network.nat_pmp_enabled:
+        ok = try_nat_pmp_port_mapping(udp_port)
+        LOG.info("NAT-PMP UDP port mapping %s for port %s", "ok" if ok else "failed", udp_port)
 
     smb_server = None
     smb_thread = None

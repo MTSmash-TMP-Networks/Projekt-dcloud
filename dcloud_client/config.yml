@@ -17,6 +17,14 @@ network:
     start: 6881
     end: 6891
   bootstrap_nodes: []
+  randomize_udp_port: true
+  upnp_enabled: false
+  nat_pmp_enabled: false
+  preferred_tunnel_ports:
+  - 443
+  - 80
+  dht_enabled: false
+  dht_k: 20
   tree_parent_nodes: []
   relay_children: false
   discovery_interval_seconds: 10

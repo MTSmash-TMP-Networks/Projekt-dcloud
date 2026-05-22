@@ -199,11 +199,13 @@ class P2PStorageClient:
         *,
         timeout: float = 3.0,
         default_web_port: int = 8787,
+        preferred_tunnel_ports: list[int] | None = None,
         relay_client: HttpRelayClient | None = None,
         relay_clients: Mapping[str, HttpRelayClient] | None = None,
     ) -> None:
         self.timeout = float(timeout)
         self.default_web_port = int(default_web_port)
+        self.preferred_tunnel_ports = [int(port) for port in (preferred_tunnel_ports or []) if 1 <= int(port) <= 65535]
         self.relay_client = relay_client
         self.relay_clients: dict[str, HttpRelayClient] = {}
         if relay_clients:
@@ -232,6 +234,19 @@ class P2PStorageClient:
             host = f"[{host}]"
         port = int(peer.web_port or self.default_web_port)
         return f"http://{host}:{port}"
+
+    def candidate_api_bases(self, peer: Peer) -> list[str]:
+        bases = [self.api_base(peer)]
+        host = peer.host
+        if host in {"0.0.0.0", "::", ""}:
+            host = "127.0.0.1"
+        if ":" in host and not host.startswith("["):
+            host = f"[{host}]"
+        for port in self.preferred_tunnel_ports:
+            url = f"http://{host}:{int(port)}"
+            if url not in bases:
+                bases.append(url)
+        return bases
 
     def _relay_client_for(self, peer: Peer) -> HttpRelayClient | None:
         if not peer.relay_url:
@@ -281,7 +296,6 @@ class P2PStorageClient:
         compression: str | None,
     ) -> PeerTransferResult:
         path = f"/api/p2p/chunks/{parse.quote(digest)}"
-        url = f"{self.api_base(peer)}{path}"
         headers = {
             "Content-Type": "application/octet-stream",
             "X-DCloud-Chunk-Original-Size": str(int(original_size)),
@@ -291,16 +305,19 @@ class P2PStorageClient:
         if compression:
             headers["X-DCloud-Chunk-Compression"] = compression
         if peer.host != RELAY_HOST:
-            req = request.Request(url, data=stored_data, headers=headers, method="POST")
-            try:
-                with request.urlopen(req, timeout=self.timeout) as response:
-                    if 200 <= response.status < 300:
-                        return PeerTransferResult(peer.node_id, True, "stored")
-                    return PeerTransferResult(peer.node_id, False, f"HTTP {response.status}")
-            except (OSError, error.URLError, error.HTTPError) as exc:
-                LOG.debug("Chunk upload to peer %s failed", peer.node_id, exc_info=True)
-                if not self._relay_available(peer):
-                    return PeerTransferResult(peer.node_id, False, str(exc))
+            direct_exc: Exception | None = None
+            for base in self.candidate_api_bases(peer):
+                req = request.Request(f"{base}{path}", data=stored_data, headers=headers, method="POST")
+                try:
+                    with request.urlopen(req, timeout=self.timeout) as response:
+                        if 200 <= response.status < 300:
+                            return PeerTransferResult(peer.node_id, True, "stored")
+                except (OSError, error.URLError, error.HTTPError) as exc:
+                    direct_exc = exc
+                    continue
+            LOG.debug("Chunk upload to peer %s failed", peer.node_id, exc_info=True)
+            if not self._relay_available(peer):
+                return PeerTransferResult(peer.node_id, False, str(direct_exc or "direct failed"))
         if self._relay_available(peer):
             last_error = ""
             for attempt in range(3):
@@ -380,18 +397,19 @@ class P2PStorageClient:
 
     def get_chunk(self, peer: Peer, *, digest: str) -> bytes:
         path = f"/api/p2p/chunks/{parse.quote(digest)}"
-        url = f"{self.api_base(peer)}{path}"
         direct_error: Exception | None = None
         if peer.host != RELAY_HOST:
-            req = request.Request(url, headers={"Accept": "application/octet-stream"}, method="GET")
-            try:
-                with request.urlopen(req, timeout=self.timeout) as response:
-                    if response.status != 200:
-                        raise StorageError(f"Peer {peer.node_id} returned HTTP {response.status} for chunk {digest}")
-                    return response.read()
-            except (OSError, error.URLError, error.HTTPError, StorageError) as exc:
-                direct_error = exc
-                LOG.debug("Direct chunk download from peer %s failed", peer.node_id, exc_info=True)
+            for base in self.candidate_api_bases(peer):
+                req = request.Request(f"{base}{path}", headers={"Accept": "application/octet-stream"}, method="GET")
+                try:
+                    with request.urlopen(req, timeout=self.timeout) as response:
+                        if response.status != 200:
+                            raise StorageError(f"Peer {peer.node_id} returned HTTP {response.status} for chunk {digest}")
+                        return response.read()
+                except (OSError, error.URLError, error.HTTPError, StorageError) as exc:
+                    direct_error = exc
+                    continue
+            LOG.debug("Direct chunk download from peer %s failed", peer.node_id, exc_info=True)
         if self._relay_available(peer):
             last_error: Exception | None = None
             for attempt in range(3):
