@@ -1381,57 +1381,50 @@ def create_app(
             if not peers:
                 raise StorageError("Keine aktiven Speicher-Peers verfügbar")
 
-            updated_chunks: list[dict[str, Any]] = []
-            remote_successes = 0
-            local_removed = 0
-            remote_failures = 0
-            removal_candidates: list[str] = []
+            # Use the same fast binary batch path as background replication. The
+            # old implementation used put_chunk() per chunk and then tried to
+            # delete via delete_chunks_if_unreferenced(), which never removed the
+            # local files because the offloaded manifest still references the
+            # chunk hashes.
+            result = replicate_manifest_chunks(
+                manifest=manifest,
+                chunk_store=chunk_store,
+                local_node_id=identity.node_id,
+                peers=peers,
+                p2p_client=p2p_client,
+                required_peer_node_ids=[target_peer_id] if target_peer_id else None,
+            )
 
-            for chunk in manifest.chunks:
+            updated_chunks: list[dict[str, Any]] = []
+            removal_candidates: list[str] = []
+            offloaded_location_count = 0
+            local_kept_count = 0
+
+            for chunk in result.chunks:
                 entry = dict(chunk)
                 digest = str(entry.get("hash") or "")
-                if not digest:
-                    updated_chunks.append(entry)
-                    continue
-                try:
-                    stored_data = chunk_store.read_stored_chunk(digest)
-                except StorageError:
-                    # Chunk liegt bereits nur extern vor.
-                    updated_chunks.append(entry)
-                    continue
+                locations = list(dict.fromkeys(str(value) for value in entry.get("locations", []) if str(value)))
+                has_local = identity.node_id in locations
+                remote_locations = [node_id for node_id in locations if node_id != identity.node_id]
 
-                locations = [str(value) for value in entry.get("locations", []) if str(value) and str(value) != identity.node_id]
-                written = False
-                for peer in peers:
-                    if peer.node_id in locations:
-                        written = True
-                        continue
-                    transfer = p2p_client.put_chunk(
-                        peer,
-                        digest=digest,
-                        stored_data=stored_data,
-                        original_size=int(entry.get("size") or 0),
-                        stored_size=int(entry.get("stored_size") or len(stored_data)),
-                        index=int(entry.get("index") or 0),
-                        compression=str(entry.get("compression") or "") or None,
-                    )
-                    if transfer.ok:
-                        locations.append(peer.node_id)
-                        remote_successes += 1
-                        written = True
-                        break
-                    remote_failures += 1
-
-                if written:
-                    if add_only:
-                        entry["locations"] = list(dict.fromkeys([*locations, identity.node_id])) or [identity.node_id]
-                    else:
+                if add_only:
+                    # Additional-node mode must never claim a local copy that is
+                    # not actually present, but it also must not remove one.
+                    entry["locations"] = locations or ([identity.node_id] if has_local else [])
+                elif remote_locations and has_local:
+                    # Offload only after at least one remote copy exists. From
+                    # now on this manifest no longer requires the local chunk.
+                    entry["locations"] = list(dict.fromkeys(remote_locations))
+                    if digest:
                         removal_candidates.append(digest)
-                        local_removed += 1
-                        entry["locations"] = list(dict.fromkeys(locations))
+                    offloaded_location_count += 1
                 else:
-                    # Sicherheit: lokale Kopie bleibt erhalten, falls kein Peer erreichbar war.
-                    entry["locations"] = list(dict.fromkeys([*locations, identity.node_id])) or [identity.node_id]
+                    # Safety: keep local location when the remote write did not
+                    # succeed. A missing local chunk is left untouched so existing
+                    # remote-only manifests stay valid.
+                    entry["locations"] = locations or ([identity.node_id] if has_local else [])
+                    if has_local:
+                        local_kept_count += 1
                 updated_chunks.append(entry)
 
             new_targets = list(dict.fromkeys(location for chunk in updated_chunks for location in chunk.get("locations", [])))
@@ -1440,10 +1433,16 @@ def create_app(
                 "strategy": "peer_additional_replica" if add_only else "peer_offload",
                 "targets": new_targets,
                 "target_count": len(new_targets),
-                "transfer_status": "replicated_with_local_copy" if add_only else ("stored_on_peers" if local_removed else "local_only"),
-                "offloaded_local_chunks": local_removed,
-                "offload_remote_successes": remote_successes,
-                "offload_remote_failures": remote_failures,
+                "transfer_status": "replicated_with_local_copy" if add_only else ("stored_on_peers" if removal_candidates else "local_only"),
+                "offloaded_local_chunks": 0,
+                "offload_requested_chunks": len(manifest.chunks),
+                "offload_candidate_chunks": len(removal_candidates),
+                "offload_remote_successes": result.remote_successes,
+                "offload_remote_failures": result.remote_failures,
+                "replicated_chunks": result.replicated_chunks,
+                "under_replicated_chunks": result.under_replicated_chunks,
+                "desired_replicas": result.desired_replicas,
+                "local_chunks_kept": local_kept_count,
             })
             updated_manifest = manifest_store.update_placement(
                 manifest.manifest_id,
@@ -1451,26 +1450,28 @@ def create_app(
                 chunks=updated_chunks,
                 placement=placement,
             )
-            # Chunk-Dateien nur löschen, wenn sie in keinem verbleibenden Manifest mehr referenziert werden.
-            # So verlieren deduplizierte Dateien ihre gemeinsamen Chunk-Daten nicht.
-            if removal_candidates:
-                local_removed = manifest_store.delete_chunks_if_unreferenced(removal_candidates)
+
+            local_removed = 0
+            if removal_candidates and not add_only:
+                local_removed = manifest_store.delete_local_chunks_if_unreferenced(removal_candidates, identity.node_id)
                 placement["offloaded_local_chunks"] = local_removed
-                placement["transfer_status"] = "replicated_with_local_copy" if add_only else ("stored_on_peers" if local_removed else "local_only")
+                placement["transfer_status"] = "stored_on_peers" if local_removed else "stored_on_peers_metadata_only"
                 updated_manifest = manifest_store.update_placement(
                     updated_manifest.manifest_id,
                     identity,
                     placement=placement,
                 )
 
-            if add_only and remote_successes:
-                message = f"Zusätzlicher Knoten erstellt: {remote_successes} Chunk-Kopie(n) auf Ziel-Peer übertragen (lokale Sicherheitskopie bleibt erhalten)"
+            if add_only and result.remote_successes:
+                message = f"Zusätzlicher Knoten erstellt: {result.remote_successes} Chunk-Kopie(n) auf Ziel-Peer übertragen (lokale Sicherheitskopie bleibt erhalten)"
             elif add_only:
                 message = "Keine zusätzliche Kopie erstellt; lokale Daten bleiben unverändert erhalten"
             elif local_removed:
-                message = f"Auslagerung abgeschlossen: {local_removed} lokale Chunk(s) auf Peers verteilt"
+                message = f"Auslagerung abgeschlossen: {local_removed} lokale Chunk-Datei(en) entfernt, {offloaded_location_count} Chunk(s) liegen auf Peers"
+            elif removal_candidates:
+                message = "Auslagerung im Manifest abgeschlossen; lokale Chunk-Dateien werden noch von anderen lokalen Dateien benötigt"
             else:
-                message = "Keine Chunks ausgelagert; lokale Daten bleiben erhalten"
+                message = "Keine Chunks ausgelagert; es konnte noch keine Peer-Kopie erstellt werden"
             if _is_ajax_request():
                 return jsonify({"ok": True, "message": message, "manifest": manifest_payload(updated_manifest), "state": state_payload()})
             flash(message, "success")
@@ -1480,6 +1481,7 @@ def create_app(
                 return jsonify({"ok": False, "message": message, "state": state_payload()}), 400
             flash(message, "error")
         return redirect(redirect_target)
+
 
     @app.post("/files/<manifest_id>/share")
     def share_file(manifest_id: str) -> Response | str:

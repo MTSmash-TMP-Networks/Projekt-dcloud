@@ -1125,6 +1125,7 @@ def replicate_manifest_chunks(
     p2p_client: P2PStorageClient,
     min_replicas_with_peers: int = DEFAULT_MIN_REPLICAS_WITH_PEERS,
     progress_callback: Callable[[dict[str, Any]], None] | None = None,
+    required_peer_node_ids: list[str] | None = None,
 ) -> DistributedUploadResult:
     """Replicate already-local manifest chunks to peers in the background.
 
@@ -1136,6 +1137,7 @@ def replicate_manifest_chunks(
     ranked_peers = _rank_peers_by_speed(peers, p2p_client) if peers else []
     target_ids = [*[peer.node_id for peer in ranked_peers], local_node_id] if ranked_peers else [local_node_id]
     desired_replicas = min(max(1, int(min_replicas_with_peers)), 2, len(target_ids))
+    required_ids = {str(node_id) for node_id in (required_peer_node_ids or []) if str(node_id)}
 
     result = DistributedUploadResult(
         chunks=[dict(chunk, locations=list(dict.fromkeys(str(node_id) for node_id in chunk.get("locations", []) if str(node_id)))) for chunk in manifest.chunks],
@@ -1306,7 +1308,8 @@ def replicate_manifest_chunks(
 
     for entry_index, entry in enumerate(result.chunks):
         locations = [str(node_id) for node_id in entry.get("locations", []) if str(node_id)]
-        if len(locations) >= desired_replicas:
+        missing_required_ids = required_ids.difference(locations)
+        if len(locations) >= desired_replicas and not missing_required_ids:
             continue
         digest = str(entry.get("hash", ""))
         if not digest:
@@ -1322,6 +1325,9 @@ def replicate_manifest_chunks(
             for candidate, _target_id in _rotated_targets(ranked_peers, [peer.node_id for peer in ranked_peers], int(entry.get("index", entry_index)))
             if candidate is not None and candidate.node_id not in locations
         ]
+        if missing_required_ids:
+            required_candidates = [candidate for candidate in ranked_peers if candidate.node_id in missing_required_ids and candidate.node_id not in locations]
+            candidates = [*required_candidates, *[candidate for candidate in candidates if candidate.node_id not in missing_required_ids]]
         if not candidates:
             continue
         peer = candidates[0]

@@ -628,6 +628,38 @@ class ManifestStore:
                     pass
         return removed
 
+    def delete_local_chunks_if_unreferenced(self, chunk_hashes: list[str], local_node_id: str) -> int:
+        """Remove local chunk files only when no active manifest still needs them locally.
+
+        Peer offloading keeps chunk hashes in the manifest but removes the local
+        node from each chunk's ``locations`` list after a remote copy exists.
+        The older generic ``delete_chunks_if_unreferenced`` method intentionally
+        kept those files because the hashes were still referenced by the
+        offloaded manifest. For offloading we need a narrower safety check: only
+        manifests that still list this node as a chunk location should keep the
+        local chunk file.
+        """
+        local_id = str(local_node_id or "")
+        still_locally_referenced = {
+            str(chunk.get("hash", ""))
+            for remaining in self.list_manifests()
+            for chunk in remaining.chunks
+            if local_id in [str(node_id) for node_id in chunk.get("locations", []) if str(node_id)]
+        }
+        removed = 0
+        for digest in list(dict.fromkeys(str(value) for value in chunk_hashes if str(value))):
+            if digest in still_locally_referenced:
+                continue
+            path = self.chunk_store.chunk_path(digest)
+            if path.exists():
+                path.unlink(missing_ok=True)
+                removed += 1
+                try:
+                    path.parent.rmdir()
+                except OSError:
+                    pass
+        return removed
+
     def load(self, manifest_id: str) -> FileManifest:
         path = self.path_for(manifest_id)
         if not path.exists():
