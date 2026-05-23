@@ -614,8 +614,13 @@ def distribute_file_chunks(
         # handshake is completed quickly. Additional distribution can then be
         # handled from that peer side instead of blocking the browser upload.
         ranked_peers = _rank_peers_by_speed(peers, p2p_client)
-        targets: list[Peer | None] = [*ranked_peers, None]
-        target_ids = [*[peer.node_id for peer in ranked_peers], local_node_id]
+        # If the quick health probe cannot reach anyone (e.g. slow startup,
+        # transient WLAN jitter or relay-only peers), do not drop distribution
+        # entirely. Fall back to the discovered peer order and let put_chunk()
+        # decide whether a direct or relay path works.
+        selected_peers = ranked_peers or list(peers)
+        targets: list[Peer | None] = [*selected_peers, None]
+        target_ids = [*[peer.node_id for peer in selected_peers], local_node_id]
         desired_replicas = min(max(1, int(min_replicas_with_peers)), 2, len(targets))
     else:
         targets = [None]
