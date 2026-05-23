@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import argparse
 import logging
-import random
 import socket
 import sys
 import threading
@@ -23,7 +22,6 @@ from .config import AppConfig, load_config
 from .identity import IdentityManager
 from .manifests import DEFAULT_FOLDER, ManifestStore, sanitize_folder_path
 from .network.peers import InMemoryPeerProvider
-from .network.nat_traversal import try_nat_pmp_port_mapping, try_upnp_port_mapping
 from .network.smb_server import EmbeddedSmbServer
 from .network.udp_discovery import UdpDiscoveryTransport
 from .storage import ChunkStore
@@ -40,16 +38,9 @@ def configure_logging(verbose: bool = False) -> None:
 
 
 def choose_udp_port(config: AppConfig) -> int:
-    configured_port = int(config.network.udp_port)
-    range_ports = list(range(config.network.udp_port_range.start, config.network.udp_port_range.end + 1))
-    if config.network.randomize_udp_port:
-        candidates = list(range_ports)
-        random.shuffle(candidates)
-        if configured_port not in candidates:
-            candidates.append(configured_port)
-    else:
-        fallback_ports = [port for port in range_ports if port != configured_port]
-        candidates = [configured_port] + fallback_ports
+    candidates = [config.network.udp_port] + [
+        port for port in range(config.network.udp_port_range.start, config.network.udp_port_range.end + 1) if port != config.network.udp_port
+    ]
     for port in candidates:
         with closing(socket.socket(socket.AF_INET, socket.SOCK_DGRAM)) as sock:
             try:
@@ -85,14 +76,6 @@ def main() -> None:
     peer_provider = InMemoryPeerProvider(peer_timeout_seconds=config.network.peer_timeout_seconds)
 
     udp_port = choose_udp_port(config)
-    if config.network.dht_enabled:
-        LOG.info("DHT-Modus aktiviert (Kademlia-Phase 1): derzeit nur Konfigurationsflag gesetzt, Routing folgt in naechstem Schritt")
-    if config.network.upnp_enabled or config.network.nat_pmp_enabled:
-        LOG.info(
-            "Automatische Portfreigabe aktiv (UPnP=%s, NAT-PMP=%s)",
-            config.network.upnp_enabled,
-            config.network.nat_pmp_enabled,
-        )
     discovery = UdpDiscoveryTransport(
         host=config.network.udp_host,
         port=udp_port,
@@ -116,19 +99,8 @@ def main() -> None:
         free_storage_bytes=chunk_store.stats().free_limit_bytes,
         web_port=config.web.port,
         relay_urls=config.network.relay_urls,
-        dht_enabled=config.network.dht_enabled,
-        dht_k=config.network.dht_k,
     )
     discovery.start()
-    web_port = int(config.web.port)
-    if config.network.upnp_enabled:
-        for protocol, port in (("UDP", int(udp_port)), ("TCP", web_port)):
-            ok = try_upnp_port_mapping(port, protocol=protocol)
-            LOG.info("UPnP %s port mapping %s for port %s", protocol, "ok" if ok else "failed", port)
-    if config.network.nat_pmp_enabled:
-        for protocol, port in (("UDP", int(udp_port)), ("TCP", web_port)):
-            ok = try_nat_pmp_port_mapping(port, protocol=protocol)
-            LOG.info("NAT-PMP %s port mapping %s for port %s", protocol, "ok" if ok else "failed", port)
 
     smb_server = None
     smb_thread = None
@@ -295,15 +267,7 @@ def main() -> None:
         smb_sync_thread.start()
 
     config.network.udp_port = udp_port
-    app = create_app(
-        config,
-        identity,
-        chunk_store,
-        manifest_store,
-        peer_provider,
-        discovery,
-        runtime_udp_port=udp_port,
-    )
+    app = create_app(config, identity, chunk_store, manifest_store, peer_provider, discovery)
     app.config["DCLOUD_SMB_STATUS"] = smb_status
     app.config["DCLOUD_SMB_SERVER"] = smb_server
     app.config["DCLOUD_SMB_ROOT"] = str(smb_root)

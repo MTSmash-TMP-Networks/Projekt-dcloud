@@ -421,25 +421,9 @@ def peer_from_relay_payload(raw: object, *, relay_url: str, own_node_id: str | N
         except (TypeError, ValueError):
             return None
     client_type = str(raw.get("client_type")) if raw.get("client_type") in {"server"} else None
-    external_ip = ""
-    for key in ("external_ip", "public_ip", "ip", "public_host", "host"):
-        value = str(raw.get(key, "")).strip()
-        if value and value != RELAY_HOST:
-            external_ip = value
-            break
-    internal_ip = ""
-    for key in ("internal_ip", "local_ip", "lan_ip", "private_ip"):
-        value = str(raw.get(key, "")).strip()
-        if value and value != RELAY_HOST:
-            internal_ip = value
-            break
-    # Prefer a private/LAN endpoint first when a relay publishes one. This
-    # keeps traffic local for peers in the same network; external IP and relay
-    # remain fallbacks.
-    direct_host = internal_ip or external_ip or RELAY_HOST
     return Peer(
         node_id=node_id,
-        host=direct_host,
+        host=RELAY_HOST,
         udp_port=udp_port,
         name=str(raw.get("name")) if raw.get("name") else None,
         client_type=client_type,
@@ -448,7 +432,6 @@ def peer_from_relay_payload(raw: object, *, relay_url: str, own_node_id: str | N
         web_port=optional_int("web_port"),
         free_storage_bytes=optional_int("free_storage_bytes"),
         relay_url=relay_url.rstrip("/"),
-        external_ip=external_ip or None,
     )
 
 
@@ -474,7 +457,6 @@ class HttpRelayTransport:
         peer_timeout_seconds: int = 35,
         relay_urls: list[str] | None = None,
         relay_discovery_callback: Callable[[list[str]], None] | None = None,
-        metadata_provider: Callable[[], dict[str, Any]] | None = None,
     ) -> None:
         self.relay_client = relay_client
         self.relay_url = relay_client.relay_url
@@ -497,7 +479,6 @@ class HttpRelayTransport:
             urls.insert(0, self.relay_url)
         self.relay_urls = urls
         self.relay_discovery_callback = relay_discovery_callback
-        self.metadata_provider = metadata_provider
         self.last_error: str | None = None
         self.last_success_at: float | None = None
         self.active_request_workers = 0
@@ -564,7 +545,7 @@ class HttpRelayTransport:
     def _metadata(self) -> dict[str, Any]:
         token_payload = self.relay_client.token_payload()
         relay_tokens = [token_payload] if token_payload else []
-        payload: dict[str, Any] = {
+        return {
             "node_id": self.identity.node_id,
             "public_key": self.identity.public_key_b64,
             "name": self.node_name,
@@ -583,14 +564,6 @@ class HttpRelayTransport:
             "relay_tokens": relay_tokens,
             "timestamp": int(time.time()),
         }
-        if self.metadata_provider is not None:
-            try:
-                dynamic_payload = self.metadata_provider()
-            except Exception:
-                dynamic_payload = {}
-            if isinstance(dynamic_payload, dict):
-                payload.update(dynamic_payload)
-        return payload
 
     def _register_and_ingest_peers(self) -> None:
         self.relay_client.ensure_access_token()

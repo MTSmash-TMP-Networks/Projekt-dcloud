@@ -416,41 +416,6 @@ function dcloud_log_event(string $type, array $payload): void {
     }
 }
 
-function dcloud_request_remote_addr(): string {
-    $candidates = [];
-    $forwardedFor = (string)($_SERVER['HTTP_X_FORWARDED_FOR'] ?? '');
-    if ($forwardedFor !== '') {
-        foreach (explode(',', $forwardedFor) as $part) {
-            $part = trim($part);
-            if ($part !== '') {
-                $candidates[] = $part;
-            }
-        }
-    }
-    $forwarded = (string)($_SERVER['HTTP_FORWARDED'] ?? '');
-    if ($forwarded !== '' && preg_match('/for="?\\[?([^;,"\]]+)\\]?"?/i', $forwarded, $matches) === 1) {
-        $candidate = trim((string)($matches[1] ?? ''));
-        if ($candidate !== '') {
-            $candidates[] = $candidate;
-        }
-    }
-    $realIp = trim((string)($_SERVER['HTTP_X_REAL_IP'] ?? ''));
-    if ($realIp !== '') {
-        $candidates[] = $realIp;
-    }
-    $remoteAddr = trim((string)($_SERVER['REMOTE_ADDR'] ?? ''));
-    if ($remoteAddr !== '') {
-        $candidates[] = $remoteAddr;
-    }
-    foreach ($candidates as $candidate) {
-        $normalized = trim($candidate, "[] \t\n\r\0\x0B\"");
-        if ($normalized !== '') {
-            return substr($normalized, 0, 128);
-        }
-    }
-    return '';
-}
-
 function dcloud_read_input(): array {
     $method = dcloud_request_method();
 
@@ -498,7 +463,6 @@ function dcloud_read_input(): array {
     }
 
     $data = $decoded;
-    $data['remote_addr'] = dcloud_request_remote_addr();
     $GLOBALS['DCLOUD_CURRENT_INPUT'] = $data;
 
     if (($data['protocol'] ?? '') !== 'dcloud-relay-v1') {
@@ -706,8 +670,6 @@ function dcloud_sanitize_peer($peer, string $nodeId): array {
         'relay_url' => $relayUrls[0] ?? '',
         'relay_urls' => $relayUrls,
         'relay_tokens' => dcloud_sanitize_relay_tokens($peer['relay_tokens'] ?? []),
-        'external_ip' => substr((string)($peer['external_ip'] ?? $peer['public_ip'] ?? ''), 0, 128),
-        'internal_ip' => substr((string)($peer['internal_ip'] ?? $peer['local_ip'] ?? $peer['lan_ip'] ?? $peer['private_ip'] ?? ''), 0, 128),
         'relay_seen_at' => time(),
         'via_relay' => true,
     ];
@@ -751,8 +713,7 @@ function dcloud_register(array $input): void {
         ];
     }
 
-    $remoteAddr = substr((string)($GLOBALS['DCLOUD_CURRENT_INPUT']['remote_addr'] ?? ''), 0, 128);
-    $peers = dcloud_with_peer_lock(function () use ($nodeId, $peer, $remoteAddr) {
+    $peers = dcloud_with_peer_lock(function () use ($nodeId, $peer) {
         $path = dcloud_storage_dir() . DIRECTORY_SEPARATOR . 'peers.json';
         $peers = dcloud_read_json_file($path, []);
         $now = time();
@@ -766,15 +727,12 @@ function dcloud_register(array $input): void {
         $existing = isset($peers[$nodeId]) && is_array($peers[$nodeId]) ? $peers[$nodeId] : [];
         $sanitized = dcloud_sanitize_peer($peer, $nodeId);
 
-        foreach (['public_key', 'client_type', 'shared_storage_bytes', 'free_storage_bytes', 'accepts_peer_storage', 'relay_url', 'relay_urls', 'relay_tokens', 'web_port', 'udp_port', 'external_ip', 'internal_ip'] as $key) {
+        foreach (['public_key', 'client_type', 'shared_storage_bytes', 'free_storage_bytes', 'accepts_peer_storage', 'relay_url', 'relay_urls', 'relay_tokens', 'web_port', 'udp_port'] as $key) {
             $newValue = $sanitized[$key] ?? null;
             $emptyNewValue = $newValue === null || $newValue === '' || $newValue === [] || $newValue === 0 || $newValue === false;
             if ($emptyNewValue && array_key_exists($key, $existing)) {
                 $sanitized[$key] = $existing[$key];
             }
-        }
-        if (($sanitized['external_ip'] ?? '') === '' && $remoteAddr !== '') {
-            $sanitized['external_ip'] = $remoteAddr;
         }
 
         $sanitized['relay_seen_at'] = $now;

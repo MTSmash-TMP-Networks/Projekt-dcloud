@@ -194,17 +194,15 @@ setup_python_venv() {
   fi
 
   "$INSTALL_DIR/.venv/bin/python" -m pip install --upgrade pip
-
-  REQUIREMENTS_FILE="requirements.txt"
   if [ "${TARGET_OS:-}" = "openwrt" ]; then
-    REQUIREMENTS_FILE=".requirements-openwrt.txt"
-    # OpenWrt nutzt bevorzugt opkg-Pakete fuer kryptographische Abhaengigkeiten.
-    # impacket zieht ueber pyOpenSSL oft neuere cryptography-Versionen nach,
-    # die auf vielen OpenWrt/Python3.9-Systemen nur als Source-Build verfuegbar sind.
-    grep -v -E '^(cryptography|PyYAML|impacket|pyOpenSSL)([<>=!~].*)?$' requirements.txt > "$REQUIREMENTS_FILE"
+    # OpenWrt soll Flask primaer aus opkg nutzen (python3-flask).
+    # Fallback auf pip nur falls das Paket im Feed nicht vorhanden ist.
+    if ! "$INSTALL_DIR/.venv/bin/python" -c "import flask" >/dev/null 2>&1; then
+      "$INSTALL_DIR/.venv/bin/python" -m pip install --no-cache-dir --prefer-binary "Flask>=3.0,<4.0"
+    fi
+  else
+    "$INSTALL_DIR/.venv/bin/python" -m pip install -r requirements.txt
   fi
-
-  "$INSTALL_DIR/.venv/bin/python" -m pip install -r "$REQUIREMENTS_FILE"
 }
 
 setup_systemd() {

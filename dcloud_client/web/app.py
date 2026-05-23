@@ -98,27 +98,6 @@ def build_folder_tree(manifests: list[FileManifest], folders: list[str] | None =
     ]
 
 
-
-def _best_internal_advertise_ip(preferred_host: str) -> str:
-    """Return a LAN-reachable source IP for relay metadata when possible.
-
-    Never advertise loopback/unspecified addresses to other peers: if discovery
-    cannot determine a usable LAN IP we return an empty value so receivers fall
-    back to other direct endpoints (external IP) before relay.
-    """
-    host = (preferred_host or "").strip()
-    if host and host not in {"0.0.0.0", "::", "", "127.0.0.1", "localhost", "::1"}:
-        return host
-    try:
-        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
-            sock.connect(("8.8.8.8", 80))
-            ip = str(sock.getsockname()[0]).strip()
-            if ip and ip not in {"0.0.0.0", "127.0.0.1"}:
-                return ip
-    except OSError:
-        pass
-    return ""
-
 def create_app(
     config: AppConfig,
     identity: NodeIdentity,
@@ -126,76 +105,19 @@ def create_app(
     manifest_store: ManifestStore,
     peer_provider: PeerProvider,
     peer_connector: PeerConnector | None = None,
-    runtime_udp_port: int | None = None,
 ) -> Flask:
     app = Flask(__name__)
     app.secret_key = identity.node_id[:32]
-    active_udp_port = int(runtime_udp_port if runtime_udp_port is not None else config.network.udp_port)
     app.config["DCLOUD_APP_CONFIG"] = config
     app.jinja_env.filters["human_bytes"] = human_bytes
     relay_clients: dict[str, HttpRelayClient] = {}
     relay_transports: dict[str, HttpRelayTransport] = {}
     relay_lock = threading.RLock()
-    def _handle_udp_chunk_message(message: dict[str, Any], _address: tuple[str, int]) -> dict[str, Any] | None:
-        if message.get("type") != "chunk_put":
-            return None
-        try:
-            digest = str(message.get("digest", ""))
-            stored_data = base64.b64decode(str(message.get("data_b64", "")).encode("ascii"), validate=True)
-            original_size = int(message.get("original_size", 0))
-            index = int(message.get("index", 0))
-            compression = str(message.get("compression") or "") or None
-            chunk_store.write_stored_chunk(digest=digest, stored_data=stored_data, original_size=original_size, index=index, compression=compression)
-            return {"ok": True, "digest": digest}
-        except Exception as exc:
-            return {"ok": False, "message": str(exc)}
-
-    def _send_udp_chunk_message(peer: Peer, payload: dict[str, Any]) -> dict[str, Any] | None:
-        if peer.host in {"", "0.0.0.0", "::", "__relay__"}:
-            return None
-        msg = dict(payload)
-        msg["magic"] = config.security.protocol_magic
-        msg["node_id"] = identity.node_id
-        msg["public_key"] = identity.public_key_b64
-        msg["name"] = config.node.name
-        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
-            sock.settimeout(1.8)
-            sock.bind((config.network.udp_host, 0))
-            msg["udp_port"] = int(sock.getsockname()[1])
-            sock.sendto(json.dumps(msg, separators=(",", ":")).encode("utf-8"), (peer.host, int(peer.udp_port)))
-            raw, _ = sock.recvfrom(65535)
-        response = json.loads(raw.decode("utf-8"))
-        if response.get("magic") != config.security.protocol_magic or response.get("type") != "chunk_put_ack":
-            return None
-        return response
-
-    p2p_client = P2PStorageClient(
-        default_web_port=config.web.port,
-        preferred_tunnel_ports=config.network.preferred_tunnel_ports,
-        udp_chunk_sender=_send_udp_chunk_message,
-    )
-    if peer_connector is not None and hasattr(peer_connector, "set_chunk_message_handler"):
-        peer_connector.set_chunk_message_handler(_handle_udp_chunk_message)
+    p2p_client = P2PStorageClient(default_web_port=config.web.port)
     upload_progress = UploadProgressTracker(persist_dir=chunk_store.tmp_dir / "upload_progress")
     chat_messages: dict[str, deque[dict[str, Any]]] = defaultdict(lambda: deque(maxlen=120))
     replication_repair_lock = threading.Lock()
     last_replication_repair_at = 0.0
-
-    def _recover_peer_via_relay(stale_peer: Peer) -> Peer | None:
-        """If a peer dropped from active list, refresh relay view and return it again."""
-        with relay_lock:
-            transports = list(relay_transports.values())
-        for transport in transports:
-            try:
-                transport._register_and_ingest_peers()  # noqa: SLF001 - intentional best-effort recovery hook
-            except Exception:
-                continue
-            recovered = peer_provider.get_peer(stale_peer.node_id)
-            if recovered is not None:
-                return recovered
-        return peer_provider.get_peer(stale_peer.node_id)
-
-    p2p_client.peer_recovery_callback = _recover_peer_via_relay
 
     def _is_ajax_request() -> bool:
         return request.headers.get("X-Requested-With") == "XMLHttpRequest" or request.accept_mimetypes.best == "application/json"
@@ -206,10 +128,9 @@ def create_app(
 
     def _cleanup_storage_garbage(*, stale_tmp_age_seconds: int = 900) -> dict[str, int]:
         referenced_chunks = {
-            str(chunk.get("hash", "")).strip()
+            str(chunk["hash"])
             for manifest in manifest_store.list_manifests()
             for chunk in manifest.chunks
-            if str(chunk.get("hash", "")).strip()
         }
         removed_unreferenced_chunks = 0
         removed_stale_tmp_files = 0
@@ -322,7 +243,7 @@ def create_app(
 
     def _accepts_peer_storage(peers: list[Any]) -> bool:
         _ = peers
-        return not bool(getattr(config.network, "outgoing_only", False))
+        return True
 
     def _storage_policy_message(peers: list[Any]) -> str:
         _ = peers
@@ -345,11 +266,6 @@ def create_app(
 
     def _eligible_storage_peer_node_ids() -> list[str]:
         return [peer.node_id for peer in _eligible_storage_peers()]
-
-    def _reject_if_outgoing_only() -> Response | None:
-        if bool(getattr(config.network, "outgoing_only", False)):
-            return jsonify({"ok": False, "message": "Outgoing-Only aktiv: eingehende Peer-Verbindungen sind deaktiviert.", "state": state_payload()}), 403
-        return None
 
     def _repair_under_replicated_manifests(peers: list[Any] | None = None, *, min_interval_seconds: float = 20.0) -> None:
         """Best-effort healing for chunks that temporarily lost remote replicas."""
@@ -381,28 +297,15 @@ def create_app(
                         stored_data = chunk_store.read_stored_chunk(digest)
                     except StorageError:
                         continue
-                    try:
-                        original_size = int(chunk.get("size", len(stored_data)))
-                    except (TypeError, ValueError):
-                        original_size = len(stored_data)
-                    try:
-                        stored_size = int(chunk.get("stored_size", len(stored_data)))
-                    except (TypeError, ValueError):
-                        stored_size = len(stored_data)
-                    try:
-                        chunk_index = int(chunk.get("index", 0))
-                    except (TypeError, ValueError):
-                        chunk_index = 0
-                    compression = str(chunk.get("compression")) if chunk.get("compression") else None
                     for peer_id, peer in peers_by_id.items():
                         transfer = p2p_client.put_chunk(
                             peer,
                             digest=digest,
                             stored_data=stored_data,
-                            original_size=original_size,
-                            stored_size=stored_size,
-                            index=chunk_index,
-                            compression=compression,
+                            original_size=int(chunk.get("size", len(stored_data))),
+                            stored_size=int(chunk.get("stored_size", len(stored_data))),
+                            index=int(chunk.get("index", 0)),
+                            compression=str(chunk.get("compression")) if chunk.get("compression") else None,
                         )
                         if transfer.ok:
                             chunk["locations"] = list(dict.fromkeys([*existing_locations, peer_id]))
@@ -469,13 +372,6 @@ def create_app(
             "relaySecretSet": False,
             "relayTokenMode": "automatic-daily",
             "relayTokenLabel": "Automatisch, tägliche Rotation",
-            "dhtEnabled": bool(getattr(config.network, "dht_enabled", True)),
-            "dhtK": int(getattr(config.network, "dht_k", 20)),
-            "randomizeUdpPort": bool(getattr(config.network, "randomize_udp_port", True)),
-            "upnpEnabled": bool(getattr(config.network, "upnp_enabled", False)),
-            "natPmpEnabled": bool(getattr(config.network, "nat_pmp_enabled", False)),
-            "preferredTunnelPortsText": ", ".join(str(port) for port in getattr(config.network, "preferred_tunnel_ports", [443, 80])),
-            "outgoingOnly": bool(getattr(config.network, "outgoing_only", False)),
             "smbEnabled": bool(config.smb.enabled),
             "smbHost": config.smb.host,
             "smbPort": runtime_smb_port,
@@ -531,19 +427,9 @@ def create_app(
     def network_payload() -> dict[str, Any]:
         relay_statuses = _relay_statuses()
         relay_status, relay_error = _relay_overall_status(relay_statuses)
-        active_peers = _list_active_peers()
-        direct_peers = [
-            peer for peer in active_peers
-            if str(getattr(peer, "host", "")) not in {"", "__relay__"}
-        ]
-        relay_route_peers = [
-            peer for peer in active_peers
-            if str(getattr(peer, "host", "")) == "__relay__"
-            or bool(getattr(peer, "relay_url", ""))
-        ]
         return {
             "udpHost": config.network.udp_host,
-            "udpPort": active_udp_port,
+            "udpPort": config.network.udp_port,
             "autoDiscoveryEnabled": config.network.auto_discovery_enabled,
             "autoDiscoveryPorts": config.network.auto_discovery_ports,
             "autoDiscoveryHosts": config.network.auto_discovery_hosts,
@@ -563,16 +449,6 @@ def create_app(
             "relayLastError": relay_error,
             "relayStatuses": relay_statuses,
             "relayTokenMode": "automatic-daily",
-            "directPeerCount": len(direct_peers),
-            "relayRoutePeerCount": len(relay_route_peers),
-            "relayBootstrapOnly": bool(direct_peers) and not bool(relay_route_peers),
-            "dhtEnabled": bool(getattr(config.network, "dht_enabled", True)),
-            "dhtK": int(getattr(config.network, "dht_k", 20)),
-            "randomizeUdpPort": bool(getattr(config.network, "randomize_udp_port", True)),
-            "upnpEnabled": bool(getattr(config.network, "upnp_enabled", False)),
-            "natPmpEnabled": bool(getattr(config.network, "nat_pmp_enabled", False)),
-            "preferredTunnelPorts": list(getattr(config.network, "preferred_tunnel_ports", [443, 80])),
-            "outgoingOnly": bool(getattr(config.network, "outgoing_only", False)),
         }
 
     def _sync_peer_connector_settings() -> None:
@@ -680,7 +556,7 @@ def create_app(
                     peer_provider=peer_provider,
                     dispatcher=_dispatch_relay_request,
                     protocol_magic=config.security.protocol_magic,
-                    udp_port=active_udp_port,
+                    udp_port=config.network.udp_port,
                     web_port=config.web.port,
                     client_type=config.node.client_type,
                     shared_storage_bytes=config.storage.limit_bytes,
@@ -690,12 +566,6 @@ def create_app(
                     peer_timeout_seconds=getattr(config.network, "peer_timeout_seconds", 35),
                     relay_urls=desired_urls,
                     relay_discovery_callback=_learn_relay_urls,
-                    metadata_provider=lambda: {
-                        "shared_storage_bytes": config.storage.limit_bytes,
-                        "free_storage_bytes": chunk_store.stats().free_limit_bytes,
-                        "accepts_peer_storage": _accepts_peer_storage(_list_active_peers()),
-                        "internal_ip": _best_internal_advertise_ip(active_host),
-                    },
                 )
                 relay_clients[desired_url] = relay_client
                 relay_transports[desired_url] = relay_transport
@@ -848,17 +718,6 @@ def create_app(
             payload.append({"name": folder["name"], "files": files})
         return payload
 
-
-    def _peer_payload(peer: Any) -> dict[str, Any]:
-        payload = peer.to_dict()
-        if payload.get("accepts_peer_storage") is None:
-            payload["accepts_peer_storage"] = True
-        if payload.get("shared_storage_bytes") is None:
-            payload["shared_storage_bytes"] = 0
-        if payload.get("free_storage_bytes") is None:
-            payload["free_storage_bytes"] = payload.get("shared_storage_bytes", 0)
-        return payload
-
     def state_payload() -> dict[str, Any]:
         _sync_peer_connector_settings()
         stats = chunk_store.stats()
@@ -876,7 +735,7 @@ def create_app(
             "settings": settings_payload(stats, peers),
             "network": network_payload(),
             "networkCapacity": _network_storage_capacity(stats, peers),
-            "peers": [_peer_payload(peer) for peer in peers],
+            "peers": [peer.to_dict() for peer in peers],
             "fileCount": len(manifests),
             "folders": folders,
             "folderTree": folder_tree_json(tree),
@@ -896,7 +755,7 @@ def create_app(
             stats=stats,
             stats_json=stats_payload(stats),
             peers=_list_active_peers(),
-            peers_json=[_peer_payload(peer) for peer in _list_active_peers()],
+            peers_json=[peer.to_dict() for peer in _list_active_peers()],
             settings_json=settings_payload(stats),
             network_json=network_payload(),
             manifests=manifests,
@@ -1527,13 +1386,6 @@ def create_app(
                 smb_enabled=request.form.get("smb_enabled") == "on",
                 smb_username=request.form.get("smb_username", config.smb.username),
                 smb_password=request.form.get("smb_password", config.smb.password),
-                dht_enabled=request.form.get("dht_enabled") == "on",
-                dht_k=request.form.get("dht_k", getattr(config.network, "dht_k", 20)),
-                randomize_udp_port=request.form.get("randomize_udp_port") == "on",
-                upnp_enabled=request.form.get("upnp_enabled") == "on",
-                nat_pmp_enabled=request.form.get("nat_pmp_enabled") == "on",
-                preferred_tunnel_ports=request.form.get("preferred_tunnel_ports", ",".join(str(port) for port in getattr(config.network, "preferred_tunnel_ports", [443, 80]))),
-                outgoing_only=request.form.get("outgoing_only") == "on",
             )
             chunk_store.limit_bytes = config.storage.limit_bytes
             _configure_relay_transport()
@@ -1667,9 +1519,6 @@ def create_app(
 
     @app.get("/api/p2p/chunks/<digest>")
     def api_p2p_get_chunk(digest: str) -> Response:
-        blocked = _reject_if_outgoing_only()
-        if blocked is not None:
-            return blocked
         try:
             data = chunk_store.read_stored_chunk(digest)
         except StorageError:
@@ -1678,9 +1527,6 @@ def create_app(
 
     @app.post("/api/p2p/chunks/<digest>")
     def api_p2p_put_chunk(digest: str) -> Response:
-        blocked = _reject_if_outgoing_only()
-        if blocked is not None:
-            return blocked
         compression = request.headers.get("X-DCloud-Chunk-Compression") or None
         try:
             original_size = int(request.headers.get("X-DCloud-Chunk-Original-Size", "0"))
@@ -1701,9 +1547,6 @@ def create_app(
 
     @app.post("/api/p2p/chunks/batch")
     def api_p2p_put_chunks_batch() -> Response:
-        blocked = _reject_if_outgoing_only()
-        if blocked is not None:
-            return blocked
         try:
             payload = request.get_json(force=True)
             raw_chunks = payload.get("chunks", []) if isinstance(payload, dict) else []
@@ -1738,9 +1581,6 @@ def create_app(
 
     @app.post("/api/p2p/manifests/revoke")
     def api_p2p_revoke_manifest() -> Response:
-        blocked = _reject_if_outgoing_only()
-        if blocked is not None:
-            return blocked
         try:
             data = request.get_json(force=True)
             if not isinstance(data, dict):
@@ -1765,9 +1605,6 @@ def create_app(
 
     @app.post("/api/p2p/files/delete")
     def api_p2p_delete_file() -> Response:
-        blocked = _reject_if_outgoing_only()
-        if blocked is not None:
-            return blocked
         try:
             data = request.get_json(force=True)
             if not isinstance(data, dict):
@@ -1789,11 +1626,7 @@ def create_app(
                 removed_manifest = True
 
             removed_chunks = manifest_store.delete_chunks_if_unreferenced(
-                [
-                    str(chunk.get("hash", "")).strip()
-                    for chunk in deletion_manifest.chunks
-                    if str(chunk.get("hash", "")).strip()
-                ]
+                [str(chunk["hash"]) for chunk in deletion_manifest.chunks]
             )
             _sync_peer_connector_settings()
             return jsonify({
@@ -1808,9 +1641,6 @@ def create_app(
 
     @app.post("/api/p2p/manifests")
     def api_p2p_receive_manifest() -> Response:
-        blocked = _reject_if_outgoing_only()
-        if blocked is not None:
-            return blocked
         try:
             data = request.get_json(force=True)
             if not isinstance(data, dict):
@@ -1829,9 +1659,6 @@ def create_app(
 
     @app.post("/api/p2p/chat")
     def p2p_chat_message() -> Response:
-        blocked = _reject_if_outgoing_only()
-        if blocked is not None:
-            return blocked
         payload = request.get_json(silent=True) or {}
         from_node_id = str(payload.get("from_node_id", "")).strip()
         to_node_id = str(payload.get("to_node_id", "")).strip()

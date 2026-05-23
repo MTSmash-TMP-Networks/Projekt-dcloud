@@ -60,13 +60,6 @@ class NetworkConfig:
     udp_host: str
     udp_port: int
     udp_port_range: UdpPortRange
-    randomize_udp_port: bool = True
-    upnp_enabled: bool = True
-    nat_pmp_enabled: bool = True
-    preferred_tunnel_ports: list[int] = field(default_factory=lambda: [443, 80])
-    dht_enabled: bool = True
-    dht_k: int = 20
-    outgoing_only: bool = False
     bootstrap_nodes: list[str] = field(default_factory=list)
     tree_parent_nodes: list[str] = field(default_factory=list)
     relay_children: bool = False
@@ -182,15 +175,7 @@ def _as_list(value: Any, default: list[Any]) -> list[Any]:
 
 def normalize_ports(values: Any, default: list[int] | None = None) -> list[int]:
     result: list[int] = []
-    expanded: list[Any] = []
     for raw in _as_list(values, default or DEFAULT_AUTO_DISCOVERY_PORTS):
-        if isinstance(raw, str):
-            parts = [item.strip() for item in re.split(r"[\s,;]+", raw) if item.strip()]
-            if parts:
-                expanded.extend(parts)
-                continue
-        expanded.append(raw)
-    for raw in expanded:
         port = int(raw)
         if not 1 <= port <= 65535:
             raise ValueError("Discovery-Ports müssen zwischen 1 und 65535 liegen")
@@ -298,13 +283,15 @@ def load_config(config_path: str | Path = "config.yml", *, create_if_missing: bo
 
     relay_urls_key_present = "relay_urls" in network_raw
     relay_url_key_present = "relay_url" in network_raw
-    relay_values_raw = [network_raw.get("relay_urls", []), network_raw.get("relay_url", "")]
-    relay_urls_loaded = normalize_relay_urls(
-        relay_values_raw,
-        include_default=not (relay_urls_key_present or relay_url_key_present),
-    )
-    if relay_url_key_present and not relay_urls_key_present and not relay_urls_loaded:
+    if relay_urls_key_present:
+        # `relay_urls: []` is an explicit user choice from the dashboard to
+        # disable PHP relay usage. Do not merge the legacy `relay_url` value
+        # back in, otherwise the relay is silently re-enabled after reload.
+        relay_urls_loaded = normalize_relay_urls(network_raw.get("relay_urls", []), include_default=False)
+    elif relay_url_key_present:
         relay_urls_loaded = normalize_relay_urls(network_raw.get("relay_url", ""), include_default=False)
+    else:
+        relay_urls_loaded = normalize_relay_urls([], include_default=True)
     relay_primary_url = relay_urls_loaded[0] if relay_urls_loaded else DEFAULT_PUBLIC_RELAY_URL
 
     return AppConfig(
@@ -320,13 +307,6 @@ def load_config(config_path: str | Path = "config.yml", *, create_if_missing: bo
             udp_port=int(network_raw.get("udp_port", 6881)),
             udp_port_range=udp_range,
             bootstrap_nodes=list(network_raw.get("bootstrap_nodes", [])),
-            randomize_udp_port=bool(network_raw.get("randomize_udp_port", True)),
-            upnp_enabled=bool(network_raw.get("upnp_enabled", True)),
-            nat_pmp_enabled=bool(network_raw.get("nat_pmp_enabled", True)),
-            preferred_tunnel_ports=normalize_ports(network_raw.get("preferred_tunnel_ports"), [443, 80]),
-            dht_enabled=bool(network_raw.get("dht_enabled", True)),
-            dht_k=max(8, int(network_raw.get("dht_k", 20))),
-            outgoing_only=bool(network_raw.get("outgoing_only", False)),
             tree_parent_nodes=list(network_raw.get("tree_parent_nodes", [])),
             relay_children=bool(network_raw.get("relay_children", False)),
             discovery_interval_seconds=max(1, int(network_raw.get("discovery_interval_seconds", 10))),
@@ -384,24 +364,23 @@ def update_runtime_settings(
     smb_enabled: bool | str | int | None = None,
     smb_username: str | None = None,
     smb_password: str | None = None,
-    dht_enabled: bool | None = None,
-    dht_k: int | str | None = None,
-    randomize_udp_port: bool | None = None,
-    upnp_enabled: bool | None = None,
-    nat_pmp_enabled: bool | None = None,
-    preferred_tunnel_ports: Any | None = None,
-    outgoing_only: bool | None = None,
 ) -> AppConfig:
     """Persist editable desktop settings and update the live config object."""
     normalized_type = normalize_client_type(client_type)
     storage_limit_bytes = validate_shared_storage_bytes(gib_to_bytes(shared_storage_gb))
     relay_values = relay_server_urls if relay_server_urls is not None else relay_server_url
     relay_is_enabled = bool(relay_enabled) if relay_enabled is not None else bool(config.network.relay_urls)
-    normalized_relay_urls = (
-        normalize_relay_urls(relay_values, include_default=relay_is_enabled)
-        if relay_values is not None
-        else normalize_relay_urls(config.network.relay_urls, include_default=relay_is_enabled)
-    )
+    if relay_is_enabled:
+        normalized_relay_urls = (
+            normalize_relay_urls(relay_values, include_default=True)
+            if relay_values is not None
+            else normalize_relay_urls(config.network.relay_urls, include_default=True)
+        )
+    else:
+        # When the checkbox is off, the textarea can be disabled and omitted
+        # from FormData. Treat the checkbox as authoritative and clear all
+        # relay URLs instead of preserving stale values.
+        normalized_relay_urls = []
     # Relay access tokens are generated automatically by each PHP relay and
     # refreshed daily by the client. Manual relay_secret values from older
     # configs are cleared on the next settings save.
@@ -422,16 +401,6 @@ def update_runtime_settings(
     raw["network"]["relay_url"] = DEFAULT_PUBLIC_RELAY_URL
     raw["network"]["relay_urls"] = normalized_relay_urls
     raw["network"]["relay_secret"] = normalized_relay_secret
-    raw["network"]["dht_enabled"] = bool(dht_enabled) if dht_enabled is not None else bool(getattr(config.network, "dht_enabled", True))
-    raw["network"]["dht_k"] = max(8, int(dht_k if dht_k is not None else getattr(config.network, "dht_k", 20)))
-    raw["network"]["randomize_udp_port"] = bool(randomize_udp_port) if randomize_udp_port is not None else bool(getattr(config.network, "randomize_udp_port", True))
-    raw["network"]["upnp_enabled"] = bool(upnp_enabled) if upnp_enabled is not None else bool(getattr(config.network, "upnp_enabled", False))
-    raw["network"]["nat_pmp_enabled"] = bool(nat_pmp_enabled) if nat_pmp_enabled is not None else bool(getattr(config.network, "nat_pmp_enabled", False))
-    raw["network"]["preferred_tunnel_ports"] = normalize_ports(
-        preferred_tunnel_ports if preferred_tunnel_ports is not None else getattr(config.network, "preferred_tunnel_ports", [443, 80]),
-        [443, 80],
-    )
-    raw["network"]["outgoing_only"] = bool(outgoing_only) if outgoing_only is not None else bool(getattr(config.network, "outgoing_only", False))
     raw["smb"]["enabled"] = bool(smb_enabled) if smb_enabled is not None else config.smb.enabled
     raw["smb"]["username"] = (smb_username if smb_username is not None else config.smb.username).strip()
     raw["smb"]["password"] = smb_password if smb_password is not None else config.smb.password
@@ -442,13 +411,6 @@ def update_runtime_settings(
     config.network.relay_url = normalized_relay_urls[0] if normalized_relay_urls else DEFAULT_PUBLIC_RELAY_URL
     config.network.relay_urls = normalized_relay_urls
     config.network.relay_secret = normalized_relay_secret
-    config.network.dht_enabled = bool(raw["network"]["dht_enabled"])
-    config.network.dht_k = int(raw["network"]["dht_k"])
-    config.network.randomize_udp_port = bool(raw["network"]["randomize_udp_port"])
-    config.network.upnp_enabled = bool(raw["network"]["upnp_enabled"])
-    config.network.nat_pmp_enabled = bool(raw["network"]["nat_pmp_enabled"])
-    config.network.preferred_tunnel_ports = [int(port) for port in raw["network"]["preferred_tunnel_ports"]]
-    config.network.outgoing_only = bool(raw["network"]["outgoing_only"])
     config.smb.enabled = bool(smb_enabled) if smb_enabled is not None else config.smb.enabled
     config.smb.username = (smb_username if smb_username is not None else config.smb.username).strip()
     config.smb.password = smb_password if smb_password is not None else config.smb.password

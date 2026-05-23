@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
-import ipaddress
 import threading
 from typing import Protocol
 
@@ -50,7 +49,6 @@ class Peer:
     web_port: int | None = None
     free_storage_bytes: int | None = None
     relay_url: str | None = None
-    external_ip: str | None = None
     last_seen: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 
     def endpoint_key(self) -> tuple[str, int, str | None]:
@@ -78,7 +76,6 @@ class Peer:
             "web_port": self.web_port,
             "free_storage_bytes": self.free_storage_bytes,
             "relay_url": self.relay_url,
-            "external_ip": self.external_ip,
             "transport": "relay" if self.host == "__relay__" else ("direct+relay" if self.relay_url else "direct"),
             "display_name": display_name_for_peer(self.node_id, self.name),
             "last_seen": self.last_seen.isoformat(),
@@ -101,17 +98,6 @@ class IndexProvider(Protocol):
     def announce_manifest(self, manifest_id: str, chunk_hashes: list[str]) -> None: ...
     def find_manifest(self, manifest_id: str) -> list[Peer]: ...
     def find_chunk(self, chunk_hash: str) -> list[Peer]: ...
-
-
-def _host_is_private_or_loopback(host: str) -> bool:
-    value = (host or '').strip().lower()
-    if value in {'localhost', '127.0.0.1', '::1'}:
-        return True
-    try:
-        ip = ipaddress.ip_address(value)
-    except ValueError:
-        return False
-    return ip.is_private or ip.is_loopback or ip.is_link_local
 
 
 class InMemoryPeerProvider:
@@ -159,13 +145,12 @@ class InMemoryPeerProvider:
                 peer.free_storage_bytes = (
                     peer.free_storage_bytes if peer.free_storage_bytes is not None else existing.free_storage_bytes
                 )
-                # Keep an already known LAN endpoint when the new heartbeat only
-                # adds relay metadata, but do not pin an unreachable public IP.
+                # Keep the fast LAN endpoint when it exists, but remember the
+                # relay as a fallback for peers behind NAT or outside the LAN.
                 if peer.relay_url and not existing.relay_url:
-                    if _host_is_private_or_loopback(existing.host) and not _host_is_private_or_loopback(peer.host):
-                        peer.host = existing.host
-                        peer.udp_port = existing.udp_port
-                        peer.route_via_node_id = existing.route_via_node_id
+                    peer.host = existing.host
+                    peer.udp_port = existing.udp_port
+                    peer.route_via_node_id = existing.route_via_node_id
                 elif existing.relay_url and not peer.relay_url:
                     peer.relay_url = existing.relay_url
 

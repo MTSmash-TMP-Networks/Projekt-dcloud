@@ -199,19 +199,13 @@ class P2PStorageClient:
         *,
         timeout: float = 3.0,
         default_web_port: int = 8787,
-        preferred_tunnel_ports: list[int] | None = None,
         relay_client: HttpRelayClient | None = None,
         relay_clients: Mapping[str, HttpRelayClient] | None = None,
-        peer_recovery_callback: Callable[[Peer], Peer | None] | None = None,
-        udp_chunk_sender: Callable[[Peer, dict[str, Any]], dict[str, Any] | None] | None = None,
     ) -> None:
         self.timeout = float(timeout)
         self.default_web_port = int(default_web_port)
-        self.preferred_tunnel_ports = [int(port) for port in (preferred_tunnel_ports or []) if 1 <= int(port) <= 65535]
         self.relay_client = relay_client
         self.relay_clients: dict[str, HttpRelayClient] = {}
-        self.peer_recovery_callback = peer_recovery_callback
-        self.udp_chunk_sender = udp_chunk_sender
         if relay_clients:
             self.set_relay_clients(relay_clients)
         elif relay_client is not None:
@@ -239,19 +233,6 @@ class P2PStorageClient:
         port = int(peer.web_port or self.default_web_port)
         return f"http://{host}:{port}"
 
-    def candidate_api_bases(self, peer: Peer) -> list[str]:
-        bases = [self.api_base(peer)]
-        host = peer.host
-        if host in {"0.0.0.0", "::", ""}:
-            host = "127.0.0.1"
-        if ":" in host and not host.startswith("["):
-            host = f"[{host}]"
-        for port in self.preferred_tunnel_ports:
-            url = f"http://{host}:{int(port)}"
-            if url not in bases:
-                bases.append(url)
-        return bases
-
     def _relay_client_for(self, peer: Peer) -> HttpRelayClient | None:
         if not peer.relay_url:
             return None
@@ -265,19 +246,6 @@ class P2PStorageClient:
 
     def _relay_available(self, peer: Peer) -> bool:
         return self._relay_client_for(peer) is not None
-
-    def _recover_peer_if_possible(self, peer: Peer) -> Peer:
-        """Try to refresh a stale/lost peer via relay discovery before giving up."""
-        if self.peer_recovery_callback is None:
-            return peer
-        try:
-            recovered = self.peer_recovery_callback(peer)
-        except Exception:
-            LOG.debug("Peer recovery callback failed for %s", peer.node_id, exc_info=True)
-            return peer
-        if recovered is not None:
-            return recovered
-        return peer
 
     def _forward_via_relay(
         self,
@@ -301,40 +269,6 @@ class P2PStorageClient:
             timeout=relay_client.request_timeout if timeout is None else timeout,
         )
 
-
-    def _try_udp_chunk_put(
-        self,
-        peer: Peer,
-        *,
-        digest: str,
-        stored_data: bytes,
-        original_size: int,
-        stored_size: int,
-        index: int,
-        compression: str | None,
-    ) -> PeerTransferResult | None:
-        if self.udp_chunk_sender is None or peer.host == RELAY_HOST:
-            return None
-        if len(stored_data) > 48 * 1024:
-            return None
-        payload = {
-            "type": "chunk_put",
-            "digest": digest,
-            "original_size": int(original_size),
-            "stored_size": int(stored_size),
-            "index": int(index),
-            "compression": compression or "",
-            "data_b64": base64.b64encode(stored_data).decode("ascii"),
-        }
-        try:
-            response = self.udp_chunk_sender(peer, payload)
-        except Exception as exc:
-            LOG.debug("UDP chunk upload to peer %s failed", peer.node_id, exc_info=True)
-            return PeerTransferResult(peer.node_id, False, f"udp failed: {exc}")
-        if isinstance(response, dict) and response.get("ok"):
-            return PeerTransferResult(peer.node_id, True, "stored via udp")
-        return None
-
     def put_chunk(
         self,
         peer: Peer,
@@ -347,6 +281,7 @@ class P2PStorageClient:
         compression: str | None,
     ) -> PeerTransferResult:
         path = f"/api/p2p/chunks/{parse.quote(digest)}"
+        url = f"{self.api_base(peer)}{path}"
         headers = {
             "Content-Type": "application/octet-stream",
             "X-DCloud-Chunk-Original-Size": str(int(original_size)),
@@ -355,32 +290,17 @@ class P2PStorageClient:
         }
         if compression:
             headers["X-DCloud-Chunk-Compression"] = compression
-        udp_result = self._try_udp_chunk_put(
-            peer,
-            digest=digest,
-            stored_data=stored_data,
-            original_size=original_size,
-            stored_size=stored_size,
-            index=index,
-            compression=compression,
-        )
-        if udp_result is not None and udp_result.ok:
-            return udp_result
         if peer.host != RELAY_HOST:
-            direct_exc: Exception | None = None
-            for base in self.candidate_api_bases(peer):
-                req = request.Request(f"{base}{path}", data=stored_data, headers=headers, method="POST")
-                try:
-                    with request.urlopen(req, timeout=self.timeout) as response:
-                        if 200 <= response.status < 300:
-                            return PeerTransferResult(peer.node_id, True, "stored")
-                except (OSError, error.URLError, error.HTTPError) as exc:
-                    direct_exc = exc
-                    continue
-            LOG.debug("Chunk upload to peer %s failed", peer.node_id, exc_info=True)
-            if not self._relay_available(peer):
-                peer = self._recover_peer_if_possible(peer)
-                return PeerTransferResult(peer.node_id, False, str(direct_exc or "direct failed"))
+            req = request.Request(url, data=stored_data, headers=headers, method="POST")
+            try:
+                with request.urlopen(req, timeout=self.timeout) as response:
+                    if 200 <= response.status < 300:
+                        return PeerTransferResult(peer.node_id, True, "stored")
+                    return PeerTransferResult(peer.node_id, False, f"HTTP {response.status}")
+            except (OSError, error.URLError, error.HTTPError) as exc:
+                LOG.debug("Chunk upload to peer %s failed", peer.node_id, exc_info=True)
+                if not self._relay_available(peer):
+                    return PeerTransferResult(peer.node_id, False, str(exc))
         if self._relay_available(peer):
             last_error = ""
             for attempt in range(3):
@@ -460,21 +380,18 @@ class P2PStorageClient:
 
     def get_chunk(self, peer: Peer, *, digest: str) -> bytes:
         path = f"/api/p2p/chunks/{parse.quote(digest)}"
+        url = f"{self.api_base(peer)}{path}"
         direct_error: Exception | None = None
         if peer.host != RELAY_HOST:
-            for base in self.candidate_api_bases(peer):
-                req = request.Request(f"{base}{path}", headers={"Accept": "application/octet-stream"}, method="GET")
-                try:
-                    with request.urlopen(req, timeout=self.timeout) as response:
-                        if response.status != 200:
-                            raise StorageError(f"Peer {peer.node_id} returned HTTP {response.status} for chunk {digest}")
-                        return response.read()
-                except (OSError, error.URLError, error.HTTPError, StorageError) as exc:
-                    direct_error = exc
-                    continue
-            LOG.debug("Direct chunk download from peer %s failed", peer.node_id, exc_info=True)
-            if not self._relay_available(peer):
-                peer = self._recover_peer_if_possible(peer)
+            req = request.Request(url, headers={"Accept": "application/octet-stream"}, method="GET")
+            try:
+                with request.urlopen(req, timeout=self.timeout) as response:
+                    if response.status != 200:
+                        raise StorageError(f"Peer {peer.node_id} returned HTTP {response.status} for chunk {digest}")
+                    return response.read()
+            except (OSError, error.URLError, error.HTTPError, StorageError) as exc:
+                direct_error = exc
+                LOG.debug("Direct chunk download from peer %s failed", peer.node_id, exc_info=True)
         if self._relay_available(peer):
             last_error: Exception | None = None
             for attempt in range(3):
@@ -507,7 +424,6 @@ class P2PStorageClient:
             except (OSError, error.URLError, error.HTTPError) as exc:
                 LOG.debug(log_message, peer.node_id, exc_info=True)
                 if not self._relay_available(peer):
-                    peer = self._recover_peer_if_possible(peer)
                     return PeerTransferResult(peer.node_id, False, str(exc))
         if self._relay_available(peer):
             try:
@@ -614,13 +530,8 @@ def distribute_file_chunks(
         # handshake is completed quickly. Additional distribution can then be
         # handled from that peer side instead of blocking the browser upload.
         ranked_peers = _rank_peers_by_speed(peers, p2p_client)
-        # If the quick health probe cannot reach anyone (e.g. slow startup,
-        # transient WLAN jitter or relay-only peers), do not drop distribution
-        # entirely. Fall back to the discovered peer order and let put_chunk()
-        # decide whether a direct or relay path works.
-        selected_peers = ranked_peers or list(peers)
-        targets: list[Peer | None] = [*selected_peers, None]
-        target_ids = [*[peer.node_id for peer in selected_peers], local_node_id]
+        targets: list[Peer | None] = [*ranked_peers, None]
+        target_ids = [*[peer.node_id for peer in ranked_peers], local_node_id]
         desired_replicas = min(max(1, int(min_replicas_with_peers)), 2, len(targets))
     else:
         targets = [None]
