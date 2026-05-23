@@ -4,13 +4,13 @@ declare(strict_types=1);
 /*
  * dcloud PHP HTTP relay/proxy
  *
- * - POST + JSON: Relay API (health/register/enqueue_request/poll_requests/post_response/poll_response/direct_proxy_request/direct_proxy_request_raw)
- * - GET/HEAD: Modern minimal landing page (unless ?action=health to get JSON)
+ * - POST + JSON: Relay API (health/register/enqueue_request/poll_requests/post_response/poll_response/direct_proxy_request/direct_proxy_request_raw/create_external_download_link)
+ * - GET/HEAD: Landing page, health JSON, or temporary external downloads (?action=external_download)
  *
  * Landing page intentionally reveals only minimal information.
  */
 
-const DCLOUD_RELAY_VERSION = '1.4.1';
+const DCLOUD_RELAY_VERSION = '1.5.0';
 const DCLOUD_RELAY_TOKEN_ROTATION_SECONDS = 86400;
 const DCLOUD_PEER_TTL_SECONDS = 45;
 const DCLOUD_MESSAGE_TTL_SECONDS = 900;
@@ -20,6 +20,8 @@ const DCLOUD_DIRECT_PROXY_MAX_ENCODED_BODY_BYTES = 67108864; // 64 MiB base64 pa
 const DCLOUD_DIRECT_PROXY_CONNECT_TIMEOUT_SECONDS = 4;
 const DCLOUD_DIRECT_PROXY_TIMEOUT_SECONDS = 90;
 const DCLOUD_CLEANUP_INTERVAL_SECONDS = 30;
+const DCLOUD_EXTERNAL_LINK_MAX_TTL_SECONDS = 3600;
+const DCLOUD_EXTERNAL_LINK_TOKEN_BYTES = 24;
 
 $GLOBALS['DCLOUD_CURRENT_INPUT'] = [];
 
@@ -75,6 +77,83 @@ function dcloud_storage_dir(): string {
 function dcloud_seed_file(): string {
     return dcloud_storage_dir() . DIRECTORY_SEPARATOR . 'relay-token-seed.txt';
 }
+
+function dcloud_external_links_file(): string {
+    return dcloud_storage_dir() . DIRECTORY_SEPARATOR . 'external-download-links.json';
+}
+
+function dcloud_read_external_links(): array {
+    $path = dcloud_external_links_file();
+    $data = dcloud_read_json_file($path, []);
+    return is_array($data) ? $data : [];
+}
+
+function dcloud_write_external_links(array $links): void {
+    $path = dcloud_external_links_file();
+    $tmp = $path . '.tmp';
+    $encoded = json_encode($links, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE | JSON_PRETTY_PRINT);
+    if ($encoded === false) {
+        dcloud_fail('Relay-Link-Daten konnten nicht serialisiert werden', 500);
+    }
+    if (@file_put_contents($tmp, $encoded, LOCK_EX) === false) {
+        dcloud_fail('Relay-Link-Daten konnten nicht gespeichert werden', 500);
+    }
+    @chmod($tmp, 0600);
+    if (!@rename($tmp, $path)) {
+        @unlink($tmp);
+        dcloud_fail('Relay-Link-Daten konnten nicht ersetzt werden', 500);
+    }
+    @chmod($path, 0600);
+}
+
+function dcloud_cleanup_external_links(bool $persist = true): int {
+    $links = dcloud_read_external_links();
+    $now = time();
+    $removed = 0;
+    foreach ($links as $token => $item) {
+        if (!is_array($item) || (int)($item['expires_at'] ?? 0) <= $now) {
+            unset($links[$token]);
+            $removed++;
+        }
+    }
+    if ($removed > 0 && $persist) {
+        dcloud_write_external_links($links);
+    }
+    return $removed;
+}
+
+function dcloud_current_script_url(array $params = []): string {
+    $https = !empty($_SERVER['HTTPS']) && strtolower((string)$_SERVER['HTTPS']) !== 'off';
+    $scheme = $https ? 'https' : 'http';
+    $host = (string)($_SERVER['HTTP_HOST'] ?? ($_SERVER['SERVER_NAME'] ?? 'localhost'));
+    $host = preg_replace('/[^A-Za-z0-9.\-_:\[\]]/', '', $host) ?: 'localhost';
+    $script = (string)($_SERVER['SCRIPT_NAME'] ?? '');
+    if ($script === '') {
+        $script = (string)($_SERVER['PHP_SELF'] ?? '/dcloud_relay.php');
+    }
+    $base = $scheme . '://' . $host . $script;
+    if ($params) {
+        $base .= '?' . http_build_query($params, '', '&', PHP_QUERY_RFC3986);
+    }
+    return $base;
+}
+
+function dcloud_safe_public_token($value): string {
+    $token = trim((string)$value);
+    if ($token === '' || !preg_match('/^[A-Za-z0-9_-]{12,160}$/', $token)) {
+        dcloud_fail('Ungueltiger Download-Token', 404);
+    }
+    return $token;
+}
+
+function dcloud_safe_external_file_name($value): string {
+    $name = trim((string)$value);
+    $name = preg_replace('/[\r\n\x00-\x1F]+/', ' ', $name) ?: '';
+    $name = trim($name);
+    if ($name === '') return 'download.bin';
+    return substr($name, 0, 180);
+}
+
 
 function dcloud_relay_seed(): string {
     static $cachedSeed = null;
@@ -451,6 +530,9 @@ function dcloud_read_input(): array {
         if ($action === 'health' || $action === 'ping') {
             return ['protocol' => 'dcloud-relay-v1', 'action' => 'health'];
         }
+        if ($action === 'external_download' || $action === 'download') {
+            dcloud_external_download_via_relay((string)($_GET['token'] ?? ''));
+        }
         dcloud_render_landing_page();
     }
 
@@ -626,6 +708,8 @@ function dcloud_cleanup(): void {
             @unlink($file);
         }
     }
+
+    dcloud_cleanup_external_links(true);
 }
 
 function dcloud_cleanup_if_due(): void {
@@ -774,7 +858,7 @@ function dcloud_headers_for_json(array $headers): array {
         $name = trim($name);
         if ($name === '') continue;
         $lower = strtolower($name);
-        if ($lower === 'content-type' || strncmp($lower, 'x-dcloud-', 9) === 0) {
+        if ($lower === 'content-type' || $lower === 'content-disposition' || $lower === 'content-length' || strncmp($lower, 'x-dcloud-', 9) === 0) {
             $out[$name] = trim($value);
         }
     }
@@ -937,6 +1021,14 @@ function dcloud_send_raw_proxy_headers_once(int $statusCode, array $responseHead
         header('X-DCloud-Relay-Mode: direct_proxy_raw');
         $contentType = $safeHeaders['Content-Type'] ?? ($safeHeaders['content-type'] ?? 'application/octet-stream');
         header('Content-Type: ' . str_replace(["\r", "\n"], ' ', (string)$contentType));
+        $contentDisposition = $safeHeaders['Content-Disposition'] ?? ($safeHeaders['content-disposition'] ?? '');
+        if ($contentDisposition !== '') {
+            header('Content-Disposition: ' . str_replace(["\r", "\n"], ' ', (string)$contentDisposition));
+        }
+        $contentLength = $safeHeaders['Content-Length'] ?? ($safeHeaders['content-length'] ?? '');
+        if ($contentLength !== '' && preg_match('/^\d+$/', (string)$contentLength)) {
+            header('Content-Length: ' . (string)$contentLength);
+        }
         foreach ($safeHeaders as $name => $value) {
             $lower = strtolower((string)$name);
             if (strncmp($lower, 'x-dcloud-', 9) === 0 && $lower !== 'x-dcloud-relay-mode') {
@@ -1051,18 +1143,23 @@ function dcloud_raw_proxy_response(int $statusCode, array $responseHeaders, stri
         header('X-Content-Type-Options: nosniff');
         header('X-DCloud-Relay-Mode: direct_proxy_raw');
         $contentType = $safeHeaders['Content-Type'] ?? ($safeHeaders['content-type'] ?? 'application/octet-stream');
-        header('Content-Type: ' . str_replace(["
-", "
-"], ' ', (string)$contentType));
+        header('Content-Type: ' . str_replace(["\r", "\n"], ' ', (string)$contentType));
+        $contentDisposition = $safeHeaders['Content-Disposition'] ?? ($safeHeaders['content-disposition'] ?? '');
+        if ($contentDisposition !== '') {
+            header('Content-Disposition: ' . str_replace(["\r", "\n"], ' ', (string)$contentDisposition));
+        }
+        $contentLength = $safeHeaders['Content-Length'] ?? ($safeHeaders['content-length'] ?? '');
+        if ($contentLength !== '' && preg_match('/^\d+$/', (string)$contentLength)) {
+            header('Content-Length: ' . (string)$contentLength);
+        } else {
+            header('Content-Length: ' . strlen($responseBody));
+        }
         foreach ($safeHeaders as $name => $value) {
             $lower = strtolower((string)$name);
             if (strncmp($lower, 'x-dcloud-', 9) === 0 && $lower !== 'x-dcloud-relay-mode') {
-                header($name . ': ' . str_replace(["
-", "
-"], ' ', (string)$value));
+                header($name . ': ' . str_replace(["\r", "\n"], ' ', (string)$value));
             }
         }
-        header('Content-Length: ' . strlen($responseBody));
         header('Connection: close');
     }
     echo $responseBody;
@@ -1072,6 +1169,95 @@ function dcloud_raw_proxy_response(int $statusCode, array $responseHeaders, stri
 function dcloud_direct_proxy_request_raw(array $input): void {
     [$_targetNodeId, $url, $method, $_path, $headers, $body, $timeout] = dcloud_decode_direct_proxy_input($input);
     dcloud_stream_direct_proxy_http($url, $method, $headers, $body, $timeout);
+}
+
+
+function dcloud_create_external_download_link(array $input): void {
+    $targetNodeIdRaw = dcloud_first_string_value($input, ['target_node_id', 'node_id', 'owner_node_id']);
+    if ($targetNodeIdRaw === '') {
+        dcloud_fail('Relay-Link-Anfrage ist unvollstaendig: target_node_id fehlt', 400);
+    }
+    $targetNodeId = dcloud_safe_id($targetNodeIdRaw, 'target_node_id');
+    $localToken = dcloud_safe_public_token($input['local_token'] ?? ($input['token'] ?? ''));
+    $fileName = dcloud_safe_external_file_name($input['file_name'] ?? 'download.bin');
+    $now = time();
+    $requestedTtl = (int)($input['ttl_seconds'] ?? 3600);
+    $requestedTtl = max(1, min(DCLOUD_EXTERNAL_LINK_MAX_TTL_SECONDS, $requestedTtl));
+    $requestedExpires = (int)floor((float)($input['expires_at'] ?? ($now + $requestedTtl)));
+    $expiresAt = min($now + $requestedTtl, $requestedExpires, $now + DCLOUD_EXTERNAL_LINK_MAX_TTL_SECONDS);
+    if ($expiresAt <= $now) {
+        dcloud_fail('Relay-Link-Ablaufzeit ist bereits erreicht', 400);
+    }
+
+    // The target must be registered and reachable from this PHP relay now.
+    // Otherwise the generated browser link would look public but fail for the
+    // recipient. This check is intentionally lightweight and uses /healthz,
+    // never the actual file endpoint.
+    $peer = dcloud_find_active_peer($targetNodeId);
+    $healthUrl = dcloud_forward_target_url($peer, '/healthz');
+    $health = dcloud_perform_direct_proxy_http($healthUrl, 'GET', ['Accept' => 'application/json'], '', 4);
+    $healthStatus = (int)($health['status_code'] ?? 0);
+    if ($healthStatus < 200 || $healthStatus >= 300) {
+        dcloud_fail('Ziel-Knoten ist vom PHP-Relay nicht direkt erreichbar; Relay-Link wurde nicht erstellt', 502, ['status_code' => $healthStatus]);
+    }
+
+    $publicToken = rtrim(strtr(base64_encode(random_bytes(DCLOUD_EXTERNAL_LINK_TOKEN_BYTES)), '+/', '-_'), '=');
+    dcloud_cleanup_external_links(true);
+    $links = dcloud_read_external_links();
+    $links[$publicToken] = [
+        'target_node_id' => $targetNodeId,
+        'local_token' => $localToken,
+        'file_name' => $fileName,
+        'created_at' => $now,
+        'expires_at' => $expiresAt,
+        'creator_node_id' => dcloud_safe_id((string)($input['node_id'] ?? $targetNodeId), 'node_id'),
+    ];
+    dcloud_write_external_links($links);
+
+    $publicUrl = dcloud_current_script_url(['action' => 'external_download', 'token' => $publicToken]);
+    dcloud_json_response([
+        'ok' => true,
+        'public_url' => $publicUrl,
+        'url' => $publicUrl,
+        'token' => $publicToken,
+        'expires_at' => $expiresAt,
+        'expiresInSeconds' => max(0, $expiresAt - $now),
+        'message' => 'Relay-Download-Link wurde erstellt',
+    ]);
+}
+
+function dcloud_external_download_via_relay(string $token): void {
+    $publicToken = dcloud_safe_public_token($token);
+    dcloud_cleanup_external_links(true);
+    $links = dcloud_read_external_links();
+    $item = $links[$publicToken] ?? null;
+    if (!is_array($item)) {
+        dcloud_clear_all_output_buffers();
+        http_response_code(410);
+        header('Content-Type: text/plain; charset=utf-8');
+        header('Cache-Control: no-store');
+        echo 'Dieser dcloud Download-Link ist abgelaufen oder ungueltig.';
+        dcloud_finalize_and_exit();
+    }
+    if ((int)($item['expires_at'] ?? 0) <= time()) {
+        unset($links[$publicToken]);
+        dcloud_write_external_links($links);
+        dcloud_clear_all_output_buffers();
+        http_response_code(410);
+        header('Content-Type: text/plain; charset=utf-8');
+        header('Cache-Control: no-store');
+        echo 'Dieser dcloud Download-Link ist abgelaufen.';
+        dcloud_finalize_and_exit();
+    }
+    $targetNodeId = dcloud_safe_id((string)($item['target_node_id'] ?? ''), 'target_node_id');
+    $localToken = dcloud_safe_public_token($item['local_token'] ?? '');
+    $peer = dcloud_find_active_peer($targetNodeId);
+    $url = dcloud_forward_target_url($peer, '/external/' . rawurlencode($localToken));
+    $headers = [
+        'Accept' => 'application/octet-stream',
+        'X-DCloud-External-Relay' => '1',
+    ];
+    dcloud_stream_direct_proxy_http($url, 'GET', $headers, '', DCLOUD_DIRECT_PROXY_TIMEOUT_SECONDS);
 }
 
 function dcloud_register(array $input): void {
@@ -1292,6 +1478,8 @@ function dcloud_normalize_action(string $action): string {
         'http_forward' => 'direct_proxy_request',
         'forward_http' => 'direct_proxy_request',
         'php_forwarder' => 'direct_proxy_request',
+        'create_external_download_link' => 'create_external_download_link',
+        'external_link_create' => 'create_external_download_link',
         'relay_request' => 'enqueue_request',
         'fetch_requests' => 'poll_requests',
         'get_requests' => 'poll_requests',
@@ -1339,6 +1527,10 @@ try {
 
         case 'direct_proxy_request_raw':
             dcloud_direct_proxy_request_raw($input);
+            break;
+
+        case 'create_external_download_link':
+            dcloud_create_external_download_link($input);
             break;
 
         case 'poll_requests':

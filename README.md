@@ -336,4 +336,10 @@ Hinweise:
 
 Im Dashboard kann per Rechtsklick auf eine eigene Datei ein temporärer externer Download-Link erzeugt werden. Die Laufzeit wird beim Erstellen abgefragt und serverseitig hart auf maximal 60 Minuten begrenzt. Nach Ablauf liefert der Link keinen Download mehr aus.
 
-Der Link verwendet einen zufälligen Token unter `/external/<token>` und benötigt keine Peer-Freigabe. Er funktioniert extern nur dann, wenn der HTTP-/Dashboard-Port dieses Knotens aus dem gewünschten Netzwerk erreichbar ist, zum Beispiel über Portfreigabe, Reverse Proxy oder VPN.
+Beim Erstellen versucht dcloud zuerst, zusätzlich einen öffentlichen Relay-Link über die konfigurierten PHP-Relays anzulegen. Dieser Link sieht zum Beispiel so aus:
+
+```text
+https://relay.example/dcloud_relay.php?action=external_download&token=...
+```
+
+Der direkte lokale Node-Link unter `/external/<token>` bleibt als Fallback erhalten. Der Relay-Link speichert die Datei nicht im Relay, sondern hält nur ein kurzlebiges Token und leitet den Browser-Download zum registrierten dcloud-Knoten weiter. Das funktioniert, wenn das PHP-Relay den Web-Port des Knotens unter dessen öffentlicher IP erreichen kann. Hinter CGNAT oder vollständig geschlossenen Firewalls braucht es weiterhin Portfreigabe, Reverse Proxy, VPN oder einen echten Reverse-Tunnel; ein PHP-Relay kann keine eingehende Verbindung zu einem komplett nicht erreichbaren Node erzwingen.

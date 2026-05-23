@@ -201,6 +201,55 @@ def create_app(
             minutes = 60
         return max(1, min(60, minutes))
 
+
+    def _create_relay_external_download_links(
+        *,
+        local_token: str,
+        manifest: FileManifest,
+        expires_at: float,
+        ttl_seconds: int,
+    ) -> list[dict[str, Any]]:
+        """Ask configured PHP relays to publish a temporary public link.
+
+        A relay link is useful when users share the URL with someone outside the
+        local network. It still requires that the PHP relay can reach this node's
+        registered public IP/web port; otherwise the direct node URL remains as a
+        fallback and the relay returns a clear error when opened.
+        """
+        results: list[dict[str, Any]] = []
+        with relay_lock:
+            clients = list(relay_clients.items())
+        for relay_url, relay_client in clients:
+            try:
+                payload = relay_client.create_external_download_link(
+                    local_token=local_token,
+                    file_name=manifest.file_name,
+                    expires_at=expires_at,
+                    ttl_seconds=ttl_seconds,
+                )
+            except Exception as exc:
+                results.append({
+                    "ok": False,
+                    "relayUrl": relay_url,
+                    "message": str(exc),
+                })
+                continue
+            public_url = str(payload.get("public_url") or payload.get("url") or "")
+            if public_url:
+                results.append({
+                    "ok": True,
+                    "relayUrl": relay_url,
+                    "url": public_url,
+                    "message": str(payload.get("message") or "Relay-Link erstellt"),
+                })
+            else:
+                results.append({
+                    "ok": False,
+                    "relayUrl": relay_url,
+                    "message": str(payload.get("message") or "Relay hat keinen Link zurueckgegeben"),
+                })
+        return results
+
     with external_link_lock:
         _load_external_download_links()
         _cleanup_external_download_links(persist=True)
@@ -2182,15 +2231,32 @@ def create_app(
                 "created_by": identity.node_id,
             }
             _persist_external_download_links()
-        link = url_for("external_download_file", token=token, _external=True)
+        direct_link = url_for("external_download_file", token=token, _external=True)
+        relay_links = _create_relay_external_download_links(
+            local_token=token,
+            manifest=manifest,
+            expires_at=expires_at,
+            ttl_seconds=minutes * 60,
+        )
+        usable_relay_links = [item for item in relay_links if item.get("ok") and item.get("url")]
+        preferred_link = str(usable_relay_links[0].get("url")) if usable_relay_links else direct_link
+        message = (
+            f"Externer Relay-Download-Link wurde für {minutes} Minute(n) erstellt."
+            if usable_relay_links
+            else f"Direkter externer Download-Link wurde für {minutes} Minute(n) erstellt; kein Relay-Link verfügbar."
+        )
         return jsonify(
             {
                 "ok": True,
-                "url": link,
+                "url": preferred_link,
+                "directUrl": direct_link,
+                "relayUrl": str(usable_relay_links[0].get("url")) if usable_relay_links else "",
+                "relayLinks": relay_links,
+                "viaRelay": bool(usable_relay_links),
                 "token": token,
                 "expiresInMinutes": minutes,
                 "expiresAt": datetime.fromtimestamp(expires_at, timezone.utc).isoformat(),
-                "message": f"Externer Download-Link wurde für {minutes} Minute(n) erstellt.",
+                "message": message,
             }
         )
 

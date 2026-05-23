@@ -2308,7 +2308,12 @@
           prompt("Externer Download-Link zum Kopieren:", link);
         }
         const expiryText = payload.expiresInMinutes ? `${payload.expiresInMinutes} Minute(n)` : "maximal 60 Minuten";
-        showToast(copied ? `Externer Link kopiert · gültig ${expiryText}` : `Externer Link erstellt · gültig ${expiryText}`, "success");
+        const linkMode = payload.viaRelay ? "Relay-Link" : "Direkt-Link";
+        if(!payload.viaRelay && Array.isArray(payload.relayLinks) && payload.relayLinks.length){
+          const failed = payload.relayLinks.filter(item => !item.ok).map(item => item.message).filter(Boolean).slice(0, 1).join(" · ");
+          if(failed) showToast(`Relay-Link nicht verfügbar: ${failed}`, "warning");
+        }
+        showToast(copied ? `${linkMode} kopiert · gültig ${expiryText}` : `${linkMode} erstellt · gültig ${expiryText}`, "success");
       }
       async function deleteFile(file){
         if(!confirm(`Datei wirklich löschen?\n${file.name}`)) return;

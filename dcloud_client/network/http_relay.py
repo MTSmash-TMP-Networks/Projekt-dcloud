@@ -501,6 +501,34 @@ class HttpRelayClient:
         )
         return self._send_raw_proxy_json(payload, timeout=max(self.timeout, min(wait_timeout + 5.0, 130.0)))
 
+
+    def create_external_download_link(
+        self,
+        *,
+        local_token: str,
+        file_name: str,
+        expires_at: float,
+        ttl_seconds: int,
+    ) -> dict[str, Any]:
+        """Publish a temporary public download link on this PHP relay.
+
+        The relay stores only a short-lived mapping from a relay token to the
+        local node's `/external/<token>` endpoint. The file itself remains on
+        the dcloud node and is streamed through the PHP relay only when the
+        public link is opened.
+        """
+        return self._post_json(
+            {
+                "action": "create_external_download_link",
+                "target_node_id": self.identity.node_id,
+                "local_token": str(local_token),
+                "file_name": str(file_name or "download"),
+                "expires_at": float(expires_at),
+                "ttl_seconds": max(1, min(3600, int(ttl_seconds))),
+            },
+            timeout=max(self.timeout, 10.0),
+        )
+
     def forward_request(
         self,
         peer: Peer,
