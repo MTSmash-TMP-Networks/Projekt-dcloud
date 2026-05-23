@@ -121,7 +121,9 @@ network:
   peer_timeout_seconds: 35
   peer_cleanup_interval_seconds: 5
   relay_url: "https://support.tmp-networks.de/dcstorage/dcloud_relay.php"
-  relay_urls: ["https://support.tmp-networks.de/dcstorage/dcloud_relay.php"]
+  relay_urls:
+    - "https://support.tmp-networks.de/dcstorage/dcloud_relay.php"
+    - "http://dcloud.byethost12.com/dcloud_relay.php"
   relay_secret: ""
   relay_poll_interval_seconds: 1
   relay_request_timeout_seconds: 180
@@ -335,20 +337,88 @@ setup_openwrt_auto_update() {
   UPDATE_SCRIPT="/usr/bin/${SERVICE_NAME}_autoupdate.sh"
   cat > "$UPDATE_SCRIPT" <<SCRIPT
 #!/bin/sh
-set -eu
-cd "$INSTALL_DIR"
+set -u
 
+INSTALL_DIR="$INSTALL_DIR"
+SERVICE_NAME="$SERVICE_NAME"
+LOCK_DIR="/tmp/\${SERVICE_NAME}_autoupdate.lock"
+LOCK_ACQUIRED=0
+SERVICE_STOPPED=0
+
+log() {
+  printf '[%s] %s\n' "\$(date -u +%Y-%m-%dT%H:%M:%SZ)" "\$*"
+}
+
+cleanup() {
+  rc=\$?
+  if [ "\$SERVICE_STOPPED" = "1" ]; then
+    log "Autoupdate beendet mit Code \$rc, starte Dienst \$SERVICE_NAME wieder"
+    /etc/init.d/"\$SERVICE_NAME" enable >/dev/null 2>&1 || true
+    /etc/init.d/"\$SERVICE_NAME" start >/dev/null 2>&1 || true
+    sleep 2
+    if ! /etc/init.d/"\$SERVICE_NAME" status >/dev/null 2>&1; then
+      log "WARNUNG: Dienst \$SERVICE_NAME meldet nach dem Autoupdate keinen laufenden Status"
+      /etc/init.d/"\$SERVICE_NAME" restart >/dev/null 2>&1 || true
+    fi
+  fi
+  if [ "\$LOCK_ACQUIRED" = "1" ]; then
+    rmdir "\$LOCK_DIR" >/dev/null 2>&1 || true
+  fi
+  exit "\$rc"
+}
+trap cleanup EXIT INT TERM
+
+if ! mkdir "\$LOCK_DIR" 2>/dev/null; then
+  log "Autoupdate laeuft bereits, ueberspringe diesen Durchlauf"
+  exit 0
+fi
+LOCK_ACQUIRED=1
+
+cd "\$INSTALL_DIR" || exit 1
 [ -d .git ] || exit 0
-git remote update --prune
-LOCAL_SHA=\$(git rev-parse @)
-REMOTE_SHA=\$(git rev-parse @{u})
+
+if ! git remote update --prune; then
+  log "git remote update fehlgeschlagen, Dienst bleibt unveraendert"
+  exit 1
+fi
+
+LOCAL_SHA=\$(git rev-parse @ 2>/dev/null || true)
+REMOTE_SHA=\$(git rev-parse @{u} 2>/dev/null || true)
+
+if [ -z "\$LOCAL_SHA" ] || [ -z "\$REMOTE_SHA" ]; then
+  log "Konnte lokalen oder Remote-Stand nicht ermitteln"
+  exit 1
+fi
 
 [ "\$LOCAL_SHA" = "\$REMOTE_SHA" ] && exit 0
 
-/etc/init.d/$SERVICE_NAME stop
-git pull --ff-only
-"$INSTALL_DIR/.venv/bin/pip" install -r "$INSTALL_DIR/requirements.txt"
-/etc/init.d/$SERVICE_NAME start
+log "Update erkannt: \$LOCAL_SHA -> \$REMOTE_SHA"
+/etc/init.d/"\$SERVICE_NAME" stop >/dev/null 2>&1 || true
+SERVICE_STOPPED=1
+
+if ! git pull --ff-only; then
+  log "git pull fehlgeschlagen; Dienst wird durch cleanup wieder gestartet"
+  exit 1
+fi
+
+# OpenWrt nutzt Abhaengigkeiten bevorzugt aus opkg/system-site-packages.
+# Ein volles pip install -r requirements.txt kann auf kleinen Routern
+# lange bauen oder scheitern und darf den Dienst nicht dauerhaft stoppen.
+if [ -x "\$INSTALL_DIR/.venv/bin/python" ]; then
+  if ! "\$INSTALL_DIR/.venv/bin/python" - <<'PYDEP' >/dev/null 2>&1
+import flask
+import yaml
+import cryptography
+PYDEP
+  then
+    log "WARNUNG: Python-Abhaengigkeiten unvollstaendig; versuche leichten pip-Fallback"
+    if ! "\$INSTALL_DIR/.venv/bin/python" -m pip install --no-cache-dir --prefer-binary "Flask>=3.0,<4.0" "PyYAML>=6.0,<7.0" >/dev/null 2>&1; then
+      log "WARNUNG: pip-Fallback fehlgeschlagen; Dienst wird trotzdem neu gestartet"
+    fi
+  fi
+fi
+
+log "Update abgeschlossen; Dienststart erfolgt durch cleanup"
 SCRIPT
   chmod +x "$UPDATE_SCRIPT"
 

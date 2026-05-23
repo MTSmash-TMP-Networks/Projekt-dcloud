@@ -316,5 +316,6 @@ Hinweise:
 
 - `--target linux` richtet einen `systemd`-Service ein.
 - `--target openwrt` richtet einen `/etc/init.d`-Service ein.
+- OpenWrt-Autoupdate nutzt eine Lock-Datei unter `/tmp`, startet den Dienst per Cleanup-Trap nach jedem Updateversuch wieder und vermeidet ein komplettes `pip install -r requirements.txt`, damit kleine Router nicht beim Dependency-Build hängen bleiben. Logs landen in `INSTALL_DIR/logs/autoupdate.log`.
 - `--target windows` erzeugt ein PowerShell-Bootstrap-Skript für eine geplante Aufgabe beim Systemstart (als Dienst-Ersatz).
 - Mindestwert für `--storage-gb` ist `5`.
