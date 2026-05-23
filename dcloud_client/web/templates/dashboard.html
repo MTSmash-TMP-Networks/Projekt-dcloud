@@ -145,7 +145,8 @@
     }
     #win-explorer{ left:150px; top:58px; width:min(900px, calc(100vw - 190px)); height:min(620px, calc(100vh - 126px)); }
     #win-network{ left:260px; top:98px; width:690px; height:490px; }
-    #win-status{ left:310px; top:126px; width:680px; height:450px; }
+    #win-status{ left:310px; top:126px; width:680px; height:390px; }
+    #win-logs{ left:340px; top:146px; width:min(780px, calc(100vw - 380px)); height:min(560px, calc(100vh - 138px)); }
     #win-settings{ left:360px; top:154px; width:720px; height:620px; }
     #win-chat{ left:420px; top:90px; width:640px; height:520px; }
     .chat-shell{ display:grid; grid-template-columns:220px minmax(0, 1fr); min-height:0; height:100%; }
@@ -320,6 +321,7 @@
     .status-kpi{ font-size:1.32rem; font-weight:760; color:var(--accent); overflow-wrap:anywhere; }
     .status-sub{ color:var(--muted); font-size:.87rem; }
     .status-list{ margin:.45rem 0 0; padding-left:1rem; color:#1c2f4d; font-size:.92rem; }
+    .status-list li{ margin-bottom:.38rem; line-height:1.38; }
     .status-log-wrap{ margin-top:1rem; }
     .status-log-box{
       margin-top:.4rem;
@@ -331,7 +333,7 @@
       font-family:ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
       font-size:.78rem;
       line-height:1.35;
-      max-height:210px;
+      max-height:calc(100vh - 260px);
       overflow:auto;
       white-space:pre-wrap;
       user-select:text;
@@ -591,6 +593,9 @@
       <button class="desk-item app-icon" data-app="status" type="button">
         <span class="glyph">🖥️</span><span class="label">System-Status</span>
       </button>
+      <button class="desk-item app-icon" data-app="logs" type="button">
+        <span class="glyph">📜</span><span class="label">Logs</span>
+      </button>
       <button class="desk-item app-icon" data-app="settings" type="button">
         <span class="glyph">⚙️</span><span class="label">Einstellungen</span>
       </button>
@@ -650,7 +655,7 @@
           <section class="status-card"><h3>Aktive Peers</h3><div class="status-kpi" id="network-peer-count">0</div><div class="status-sub">Nur aktuell erreichbare Knoten im dcloud-Netzwerk</div></section>
           <section class="status-card"><h3>Netzwerk-Speicher</h3><div class="status-kpi" id="network-storage-limit">0 B</div><div class="status-sub">Lokale Freigabe plus aktive Speicher-Peers</div></section>
           <section class="status-card"><h3>Verfügbar für neue Daten</h3><div class="status-kpi" id="network-storage-free">0 B</div><div class="status-sub">Freier Speicher im erreichbaren Verbund</div></section>
-          <section class="status-card"><h3>Auto-Verbindung</h3><div class="status-kpi" id="network-auto-discovery">Aktiv</div><div class="status-sub" id="network-auto-discovery-sub">Port 6881 wird automatisch gesucht</div></section>
+          <section class="status-card"><h3>Peer-Suche</h3><div class="status-kpi" id="network-auto-discovery">Aktiv</div><div class="status-sub" id="network-auto-discovery-sub">UDP-Discovery sucht erreichbare Peers</div></section>
         </div>
         <h3>Aktive Peer-Liste</h3>
         <p class="settings-note">Speicherziele für neue Uploads auswählen (Standard: alle aktiven Peers).</p>
@@ -676,17 +681,31 @@
           <section class="status-card"><h3>Client-Typ</h3><div class="status-kpi" id="status-client-type">Server</div><div class="status-sub">Server für P2P-Speicher</div></section>
           <section class="status-card"><h3>P2P-Ablage</h3><div class="status-kpi" id="status-peer-storage">Wartet</div><div class="status-sub" id="status-peer-storage-sub">-</div></section>
           <section class="status-card"><h3>Discovery-Port</h3><div class="status-kpi" id="status-discovery-port">6881</div><div class="status-sub">UDP-Port dieser Instanz</div></section>
-          <section class="status-card"><h3>PHP-Relay</h3><div class="status-kpi" id="status-relay-state">Aus</div><div class="status-sub" id="status-relay-sub">Nur LAN-Verbindungen</div></section>
+          <section class="status-card"><h3>PHP-Vermittlung</h3><div class="status-kpi" id="status-relay-state">Aus</div><div class="status-sub" id="status-relay-sub">Nur direkte LAN-Verbindungen</div></section>
           <section class="status-card"><h3>SMB-Server</h3><div class="status-kpi" id="status-smb-state">Aus</div><div class="status-sub" id="status-smb-sub">Server ist deaktiviert</div></section>
-          <section class="status-card"><h3>Gespeicherte Dateien</h3><div class="status-kpi" id="status-file-count">0</div><div class="status-sub">Sichtbar in deinem Explorer</div></section>
-          <section class="status-card"><h3>Verwendeter Speicher</h3><div class="status-kpi" id="status-storage-used">0 B</div><div class="status-sub">Lokale Chunks + Manifeste</div></section>
+          <section class="status-card"><h3>Dateien</h3><div class="status-kpi" id="status-file-count">0</div><div class="status-sub">Sichtbar im Datei-Explorer</div></section>
+          <section class="status-card"><h3>Lokaler Speicher</h3><div class="status-kpi" id="status-storage-used">0 B</div><div class="status-sub">Lokale Chunks und Manifeste</div></section>
           <section class="status-card"><h3>Verbund-Kapazität</h3><div class="status-kpi" id="status-network-capacity">0 B</div><div class="status-sub" id="status-network-capacity-sub">0 aktive Speicher-Peers</div></section>
           <section class="status-card"><h3>GitHub-Stand</h3><div class="status-kpi" id="status-git-revision">-</div><div class="status-sub">Lokaler Git Commit (short SHA)</div></section>
         </div>
+      </div>
+    </section>
+
+    <section class="window" id="win-logs" hidden>
+      <div class="titlebar" data-app="logs">
+        <span class="title"><span>📜</span><span>Logs</span></span>
+        <div class="window-controls">
+          <button type="button" data-action="min" aria-label="Minimieren">–</button>
+          <button type="button" data-action="max" aria-label="Maximieren">□</button>
+          <button type="button" data-action="close" aria-label="Schließen">×</button>
+        </div>
+      </div>
+      <div class="window-content dummy-app">
+        <h2>Logs</h2>
+        <p>Audit- und Manifest-Logauszug dieses Knotens. Die Ansicht aktualisiert sich automatisch.</p>
         <div class="status-log-wrap">
-          <h3>Logs</h3>
-          <div class="status-sub" id="status-log-source">Lade Audit-Log…</div>
-          <pre class="status-log-box" id="status-log-output">Lade Logs…</pre>
+          <div class="status-sub" id="logs-source">Lade Audit-Log…</div>
+          <pre class="status-log-box" id="logs-output">Lade Logs…</pre>
         </div>
       </div>
     </section>
@@ -718,16 +737,16 @@
           </section>
 
           <section class="settings-panel">
-            <h3>PHP-Relay / Proxy für Internet-Peers</h3>
+            <h3>PHP-Vermittlung / Forwarder für Internet-Peers</h3>
             <label style="display:flex;align-items:center;gap:.45rem;">
-              <input id="settings-relay-enabled" type="checkbox" name="relay_enabled" {% if settings_json.relayEnabled %}checked{% endif %}> PHP-Relay aktivieren
+              <input id="settings-relay-enabled" type="checkbox" name="relay_enabled" {% if settings_json.relayEnabled %}checked{% endif %}> PHP-Vermittlung aktivieren
             </label>
             <label for="settings-relay-url">Festes Standard-Relay</label>
             <input id="settings-relay-url" type="url" value="{{ settings_json.fixedRelayUrl }}" readonly>
             <label for="settings-relay-urls">Weitere Relay-URLs hinzufügen</label>
             <textarea id="settings-relay-urls" name="relay_server_urls" rows="3" placeholder="https://deine-domain.de/dcloud_relay.php">{{ settings_json.additionalRelayUrlsText }}</textarea>
             <p class="settings-note"><strong>Relay-Zugriff:</strong> <span id="settings-relay-token-mode">{{ settings_json.relayTokenLabel }}</span>. Der Tages-Schlüssel wird automatisch vom Relay erzeugt, täglich erneuert und vom Client bei Bedarf direkt abgerufen.</p>
-            <p class="settings-note" id="settings-relay-note">Das Standard-Relay ist fest hinterlegt. Zusätzliche Relays werden gespeichert, automatisch genutzt und per LAN-/Relay-Discovery an andere Peers verteilt, damit das Netzwerk auch über Heimnetzgrenzen hinweg erreichbar bleibt.</p>
+            <p class="settings-note" id="settings-relay-note">Das Standard-Relay ist fest hinterlegt. Zusätzliche Relays dienen als Vermittlung und Forwarder für Internet-Peers. Direkte Verbindungen werden weiterhin bevorzugt; der Mailbox-Relay bleibt nur Fallback.</p>
           </section>
 
           <section class="settings-panel">
@@ -757,9 +776,9 @@
         </form>
         <div style="margin-top:1rem;">
           <strong>Automatische Netzwerksuche:</strong>
-          <span id="settings-auto-discovery">aktiv auf Port 6881</span>
+          <span id="settings-auto-discovery">aktiv · UDP-Port 6881</span>
           <p class="settings-note">Beim Start sendet der Client sofort LAN-Discovery-Hellos an sichtbare dcloud-Clients auf UDP-Port 6881 und danach regelmäßig weiter.</p>
-          <p class="settings-note"><strong>PHP-Relay:</strong> <span id="settings-relay-status">nicht konfiguriert</span></p>
+          <p class="settings-note"><strong>PHP-Vermittlung:</strong> <span id="settings-relay-status">nicht konfiguriert</span></p>
           <div style="margin-top:.5rem;display:flex;gap:.5rem;flex-wrap:wrap;">
             <button type="button" class="explorer-btn" id="settings-refresh">Netzwerksuche aktualisieren</button>
             <button type="button" class="explorer-btn" id="settings-cleanup">Datenmüll bereinigen</button>
@@ -990,6 +1009,7 @@
         explorer: document.getElementById("win-explorer"),
         network: document.getElementById("win-network"),
         status: document.getElementById("win-status"),
+        logs: document.getElementById("win-logs"),
         settings: document.getElementById("win-settings"),
         chat: document.getElementById("win-chat")
       };
@@ -997,6 +1017,7 @@
         explorer:"📁 Datei-Explorer",
         network:"🌐 Netzwerk",
         status:"🖥️ Status",
+        logs:"📜 Logs",
         settings:"⚙️ Einstellungen",
         chat:"💬 Peer-Chat"
       };
@@ -1088,6 +1109,12 @@
         }
         return `${amount.toFixed(1)} ${unit}`;
       }
+      function formatDateTime(value){
+        if(!value) return "-";
+        const parsed = new Date(value);
+        if(Number.isNaN(parsed.getTime())) return String(value);
+        return parsed.toLocaleString("de-DE");
+      }
       function showToast(message, type="success"){
         const wrap = document.getElementById("notifications");
         const toast = document.createElement("div");
@@ -1132,9 +1159,9 @@
         const response = await fetch("/api/logs", { cache:"no-store", headers: { "Accept":"application/json" } });
         const data = await response.json();
         lastLogsFetchAt = Date.now();
-        const output = document.getElementById("status-log-output");
-        const source = document.getElementById("status-log-source");
-        if(source) source.textContent = `Quelle: ${data.manifestAuditPath || "-"} · Aktualisiert: ${data.updatedAt || "-"}`;
+        const output = document.getElementById("logs-output");
+        const source = document.getElementById("logs-source");
+        if(source) source.textContent = `Quelle: ${data.manifestAuditPath || "-"} · Aktualisiert: ${formatDateTime(data.updatedAt)}`;
         if(output) output.textContent = String(data.manifestAuditLog || "Keine Logs verfügbar.");
       }
 
@@ -1144,8 +1171,8 @@
         const autoPorts = Array.isArray(network.autoDiscoveryPorts) ? network.autoDiscoveryPorts : [6881];
         const autoText = network.autoDiscoveryEnabled === false ? "Aus" : "Aktiv";
         const autoSub = network.autoDiscoveryEnabled === false
-          ? "Automatische LAN-Suche ist deaktiviert"
-          : `Sucht sofort sichtbare Clients auf UDP-Port ${autoPorts.join(", ")} · Offline-Timeout ${network.peerTimeoutSeconds || 35}s`;
+          ? "Automatische Peer-Suche ist deaktiviert"
+          : `Sucht LAN-/Relay-Peers auf UDP-Port ${autoPorts.join(", ")} · Offline-Timeout ${network.peerTimeoutSeconds || 35}s`;
         const capacity = appState.networkCapacity || settings || {};
         document.getElementById("network-peer-count").textContent = String((appState.peers || []).length);
         document.getElementById("network-storage-limit").textContent = formatBytes(capacity.networkLimitBytes || settings.networkLimitBytes || appState.stats.limitBytes);
@@ -1160,10 +1187,10 @@
         const relaySubEl = document.getElementById("status-relay-sub");
         if(relayStateEl) relayStateEl.textContent = network.relayEnabled ? (relayState === "verbunden" ? "Aktiv" : relayState === "fehler" ? "Fehler" : "Startet") : "Aus";
         if(relaySubEl){
-          const relayNames = relayUrls.length ? `${relayUrls.length} Relay(s): ${relayUrls.slice(0,2).join(", ")}${relayUrls.length > 2 ? " …" : ""}` : "Nur LAN-Verbindungen";
+          const relayNames = relayUrls.length ? `${relayUrls.length} Vermittlungsserver: ${relayUrls.slice(0,2).join(", ")}${relayUrls.length > 2 ? " …" : ""}` : "Nur direkte LAN-Verbindungen";
           relaySubEl.textContent = network.relayEnabled
-            ? (network.relayLastError ? `Relay-Fehler: ${network.relayLastError}` : relayNames)
-            : "Nur LAN-Verbindungen";
+            ? (network.relayLastError ? `Vermittlungsfehler: ${network.relayLastError}` : relayNames)
+            : "Nur direkte LAN-Verbindungen";
         }
         document.getElementById("status-client-type").textContent = settings.clientTypeLabel || ("Server");
         document.getElementById("status-peer-storage").textContent = settings.acceptsPeerStorage ? "Aktiv" : "Wartet";
@@ -1190,7 +1217,7 @@
         const settingsAuto = document.getElementById("settings-auto-discovery");
         if(settingsAuto) settingsAuto.textContent = network.autoDiscoveryEnabled === false
           ? "deaktiviert"
-          : `aktiv auf UDP-Port ${autoPorts.join(", ")} · Intervall ${network.discoveryIntervalSeconds || 10}s · Offline-Timeout ${network.peerTimeoutSeconds || 35}s`;
+          : `aktiv · UDP-Port ${autoPorts.join(", ")} · Intervall ${network.discoveryIntervalSeconds || 10}s · Offline-Timeout ${network.peerTimeoutSeconds || 35}s`;
         const free = document.getElementById("settings-storage-free");
         if(free) free.textContent = formatBytes(settings.freeSharedStorageBytes || appState.stats.freeLimitBytes);
         const storageGbInput = document.getElementById("settings-storage-gb");
@@ -1211,7 +1238,7 @@
         if(relayStatus){
           const urls = Array.isArray(network.relayUrls) ? network.relayUrls : [];
           relayStatus.textContent = network.relayEnabled
-            ? `${network.relayStatus || "startet"} · ${urls.length || 1} Relay(s)`
+            ? `${network.relayStatus || "startet"} · ${urls.length || 1} Vermittlungsserver`
             : "nicht konfiguriert";
         }
                 const smbEnabledInput = document.getElementById("settings-smb-enabled");
@@ -1471,6 +1498,7 @@
         focusWindow(app);
         if(!openOrder.includes(app)) openOrder.push(app);
         if(app === "explorer") renderExplorer();
+        if(app === "logs") refreshLogs().catch(() => {});
         if(app === "chat"){ renderChatPeers(); loadChatMessages().catch(() => {}); }
         updateTaskbar();
       }
@@ -2069,7 +2097,7 @@
         const publicIp = peerPublicIp(peer);
         const hostPort = peer.host && peer.host !== "__relay__" ? `${peer.host}:${peer.udp_port || "?"}` : "";
         if(isRelayPeer(peer)){
-          return publicIp ? `Vermittlung: PHP-Relay, extern ${publicIp}` : "Vermittlung: PHP-Relay";
+          return publicIp ? `Vermittlung: PHP, externe IP ${publicIp}` : "Vermittlung: PHP";
         }
         if(peer.transport === "direct+relay"){
           const direct = hostPort || (publicIp ? `${publicIp}:${peer.udp_port || "?"}` : "direkt");
@@ -2079,7 +2107,7 @@
       }
       function peerTransferLabel(peer){
         if(isRelayPeer(peer)){
-          return peerPublicIp(peer) && peer.web_port ? "Transfer: PHP-Forwarder, Mailbox-Fallback" : "Transfer: Mailbox-Relay";
+          return peerPublicIp(peer) && peer.web_port ? "Transfer: PHP-Forwarder, Mailbox nur Fallback" : "Transfer: Mailbox-Relay";
         }
         if(peer.transport === "direct+relay"){
           return "Transfer: direkt, PHP-Forwarder/Relay-Fallback";
