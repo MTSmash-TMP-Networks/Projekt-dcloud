@@ -407,13 +407,15 @@
       max-height:calc(100vh - 88px);
       border:1px solid rgba(255,255,255,.56);
       border-radius:20px;
-      background:rgba(248,251,255,.82);
-      box-shadow:0 20px 60px rgba(0,17,55,.30), inset 0 1px 0 rgba(255,255,255,.6);
-      z-index:240;
+      background:rgba(248,251,255,.70);
+      box-shadow:0 14px 38px rgba(0,17,55,.18), inset 0 1px 0 rgba(255,255,255,.6);
+      z-index:8;
       overflow:hidden;
-      backdrop-filter:blur(26px) saturate(1.35);
+      backdrop-filter:blur(20px) saturate(1.18);
     }
     .transfer-panel[hidden]{ display:none; }
+    .transfer-panel:hover{ z-index:9; }
+    .transfer-panel::after{ content:"Hintergrund"; position:absolute; right:12px; bottom:8px; font-size:.72rem; color:rgba(36,70,111,.52); pointer-events:none; }
     .transfer-toggle{ width:100%; display:flex; align-items:center; justify-content:space-between; gap:10px; border:0; padding:11px 14px; background:linear-gradient(135deg, rgba(8,102,232,.95), rgba(25,199,255,.72)); color:#fff; font-weight:800; cursor:pointer; }
     .transfer-toggle small{ color:rgba(255,255,255,.86); font-weight:650; }
     .transfer-body{ padding:13px; max-height:calc(100vh - 168px); overflow:auto; }
@@ -750,7 +752,7 @@
     <aside class="transfer-panel" id="transfer-panel">
       <button class="transfer-toggle" id="transfer-toggle" type="button" aria-expanded="true">
         <span>⚡ Transfer-Center</span>
-        <small id="transfer-toggle-label">Einklappen</small>
+        <small id="transfer-toggle-label">Hintergrund</small>
       </button>
       <div class="transfer-body" id="transfer-body">
       <div class="transfer-content">
@@ -1558,7 +1560,7 @@
         transferExpanded = !!expanded;
         if(transferBody) transferBody.hidden = !transferExpanded;
         if(transferToggle) transferToggle.setAttribute("aria-expanded", transferExpanded ? "true" : "false");
-        if(transferToggleLabel) transferToggleLabel.textContent = transferExpanded ? "Einklappen" : "Ausklappen";
+        if(transferToggleLabel) transferToggleLabel.textContent = transferExpanded ? "Einklappen" : "Hintergrund";
       }
       function focusWindow(app){
         const win = windows[app];
