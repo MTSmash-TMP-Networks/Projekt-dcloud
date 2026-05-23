@@ -112,171 +112,255 @@ def main() -> None:
     smb_thread = None
     smb_sync_thread = None
     smb_sync_stop = threading.Event()
+    smb_runtime_lock = threading.RLock()
     smb_root = config.storage.path / "smb_virtual"
-    smb_status: dict[str, object] = {"enabled": bool(config.smb.enabled), "running": False, "port": int(config.smb.port), "last_error": ""}
-    if config.smb.enabled:
-        smb_server = EmbeddedSmbServer(
-            root=smb_root,
-            host=config.smb.host,
-            port=config.smb.port,
-            share_name=config.smb.share_name,
-            username=config.smb.username,
-            password=config.smb.password,
-        )
-        def run_smb_server() -> None:
+    smb_status: dict[str, object] = {
+        "enabled": bool(config.smb.enabled),
+        "running": False,
+        "port": int(config.smb.port),
+        "last_error": "",
+    }
+    app_holder: dict[str, object] = {}
+
+    def publish_smb_runtime() -> None:
+        flask_app = app_holder.get("app")
+        if flask_app is None:
+            return
+        flask_app.config["DCLOUD_SMB_STATUS"] = smb_status.copy()
+        flask_app.config["DCLOUD_SMB_SERVER"] = smb_server
+        flask_app.config["DCLOUD_SMB_ROOT"] = str(smb_root)
+
+    def sync_smb_virtual_view(stop_event: threading.Event) -> None:
+        previous_expected: set[Path] = set()
+        previous_expected_dirs: set[Path] = {smb_root.resolve()}
+        while not stop_event.is_set():
             try:
-                smb_server.start()
-            except Exception as exc:
-                smb_status["running"] = False
-                smb_status["last_error"] = str(exc)
-                LOG.exception("Embedded SMB server konnte nicht gestartet werden")
-            else:
-                smb_status["running"] = bool(smb_server.running)
-                smb_status["port"] = int(smb_server.actual_port)
-                smb_status["last_error"] = ""
-
-        smb_thread = threading.Thread(target=run_smb_server, name="dcloud-smb", daemon=True)
-        smb_thread.start()
-        smb_status["running"] = bool(smb_server.running)
-        smb_status["port"] = int(smb_server.actual_port)
-        smb_status["last_error"] = smb_server.last_error
-
-        def sync_smb_virtual_view() -> None:
-            previous_expected: set[Path] = set()
-            previous_expected_dirs: set[Path] = {smb_root.resolve()}
-            while not smb_sync_stop.is_set():
-                try:
-                    manifests = manifest_store.list_visible_for_node(identity.node_id)
-                    smb_root.mkdir(parents=True, exist_ok=True)
-                    expected: set[Path] = set()
-                    expected_dirs: set[Path] = {smb_root.resolve()}
-                    manifest_by_virtual_path: dict[Path, object] = {}
-                    visible_folders = manifest_store.list_folders_for_node(identity.node_id)
-                    manifest_folders = {
-                        sanitize_folder_path(str(manifest.folder_path or DEFAULT_FOLDER))
-                        for manifest in manifests
-                    }
-                    for folder_path in visible_folders:
-                        clean_folder = sanitize_folder_path(str(folder_path))
-                        folder_dir = (smb_root / Path(clean_folder)).resolve()
-                        # SMB-seitig gelöschte, leere virtuelle Ordner nicht automatisch
-                        # wieder anlegen: sonst tauchen sie alle 5s erneut auf.
-                        if (
-                            clean_folder != DEFAULT_FOLDER
-                            and clean_folder not in manifest_folders
-                            and folder_dir in previous_expected_dirs
-                            and not folder_dir.exists()
-                        ):
-                            try:
-                                manifest_store.delete_folder(clean_folder, identity.node_id, delete_files=False)
-                            except Exception:
-                                LOG.debug("SMB-View Sync: Folder-Delete fehlgeschlagen für %s", clean_folder, exc_info=True)
-                            continue
-                        folder_dir.mkdir(parents=True, exist_ok=True)
-                        expected_dirs.add(folder_dir)
-                    existing_file_paths = {p.resolve() for p in smb_root.rglob("*") if p.is_file()}
-                    for manifest in manifests:
-                        folder = Path(manifest.folder_path or DEFAULT_FOLDER)
-                        target_dir = smb_root / folder
-                        target_dir.mkdir(parents=True, exist_ok=True)
-                        expected_dirs.add(target_dir.resolve())
-                        target_file = target_dir / manifest.file_name
-                        expected.add(target_file.resolve())
-                        manifest_by_virtual_path[target_file.resolve()] = manifest
-                    # Datei via SMB gelöscht -> zugehöriges Manifest zuerst löschen.
-                    # Wichtig: vor restore(), sonst wird die Datei direkt wiederhergestellt.
-                    for virtual_path, manifest in list(manifest_by_virtual_path.items()):
-                        if virtual_path not in existing_file_paths and virtual_path in previous_expected:
-                            # Nur eigene Dateien dürfen via SMB-Delete automatisch
-                            # entfernt werden. Geteilte/empfangene Manifeste können
-                            # ohne lokale Datei sichtbar sein und würden sonst
-                            # fälschlich gelöscht.
-                            if str(getattr(manifest, "owner_node_id", "")) != identity.node_id:
-                                continue
-                            try:
-                                manifest_store.delete(manifest.manifest_id, delete_unreferenced_chunks=True)
-                                expected.discard(virtual_path)
-                                manifest_by_virtual_path.pop(virtual_path, None)
-                            except Exception:
-                                LOG.debug("SMB-View Sync: Delete fehlgeschlagen für %s", manifest.manifest_id, exc_info=True)
-                    for virtual_path, manifest in manifest_by_virtual_path.items():
-                        target_file = Path(virtual_path)
-                        if target_file.exists() and target_file.stat().st_size == int(manifest.file_size):
+                manifests = manifest_store.list_visible_for_node(identity.node_id)
+                smb_root.mkdir(parents=True, exist_ok=True)
+                expected: set[Path] = set()
+                expected_dirs: set[Path] = {smb_root.resolve()}
+                manifest_by_virtual_path: dict[Path, object] = {}
+                visible_folders = manifest_store.list_folders_for_node(identity.node_id)
+                manifest_folders = {
+                    sanitize_folder_path(str(manifest.folder_path or DEFAULT_FOLDER))
+                    for manifest in manifests
+                }
+                for folder_path in visible_folders:
+                    clean_folder = sanitize_folder_path(str(folder_path))
+                    folder_dir = (smb_root / Path(clean_folder)).resolve()
+                    # SMB-seitig gelöschte, leere virtuelle Ordner nicht automatisch
+                    # wieder anlegen: sonst tauchen sie alle 5s erneut auf.
+                    if (
+                        clean_folder != DEFAULT_FOLDER
+                        and clean_folder not in manifest_folders
+                        and folder_dir in previous_expected_dirs
+                        and not folder_dir.exists()
+                    ):
+                        try:
+                            manifest_store.delete_folder(clean_folder, identity.node_id, delete_files=False)
+                        except Exception:
+                            LOG.debug("SMB-View Sync: Folder-Delete fehlgeschlagen für %s", clean_folder, exc_info=True)
+                        continue
+                    folder_dir.mkdir(parents=True, exist_ok=True)
+                    expected_dirs.add(folder_dir)
+                existing_file_paths = {p.resolve() for p in smb_root.rglob("*") if p.is_file()}
+                for manifest in manifests:
+                    folder = Path(manifest.folder_path or DEFAULT_FOLDER)
+                    target_dir = smb_root / folder
+                    target_dir.mkdir(parents=True, exist_ok=True)
+                    expected_dirs.add(target_dir.resolve())
+                    target_file = target_dir / manifest.file_name
+                    expected.add(target_file.resolve())
+                    manifest_by_virtual_path[target_file.resolve()] = manifest
+                # Datei via SMB gelöscht -> zugehöriges Manifest zuerst löschen.
+                # Wichtig: vor restore(), sonst wird die Datei direkt wiederhergestellt.
+                for virtual_path, manifest in list(manifest_by_virtual_path.items()):
+                    if virtual_path not in existing_file_paths and virtual_path in previous_expected:
+                        # Nur eigene Dateien dürfen via SMB-Delete automatisch
+                        # entfernt werden. Geteilte/empfangene Manifeste können
+                        # ohne lokale Datei sichtbar sein und würden sonst
+                        # fälschlich gelöscht.
+                        if str(getattr(manifest, "owner_node_id", "")) != identity.node_id:
                             continue
                         try:
-                            manifest_store.restore(manifest.manifest_id, target=target_file)
+                            manifest_store.delete(manifest.manifest_id, delete_unreferenced_chunks=True)
+                            expected.discard(virtual_path)
+                            manifest_by_virtual_path.pop(virtual_path, None)
                         except Exception:
-                            LOG.debug("SMB-View Sync: Restore für %s fehlgeschlagen", manifest.manifest_id, exc_info=True)
+                            LOG.debug("SMB-View Sync: Delete fehlgeschlagen für %s", manifest.manifest_id, exc_info=True)
+                for virtual_path, manifest in manifest_by_virtual_path.items():
+                    target_file = Path(virtual_path)
+                    if target_file.exists() and target_file.stat().st_size == int(manifest.file_size):
+                        continue
+                    try:
+                        manifest_store.restore(manifest.manifest_id, target=target_file)
+                    except Exception:
+                        LOG.debug("SMB-View Sync: Restore für %s fehlgeschlagen", manifest.manifest_id, exc_info=True)
+                        continue
+                existing_files = [p for p in smb_root.rglob("*") if p.is_file()]
+                for existing in existing_files:
+                    resolved = existing.resolve()
+                    manifest = manifest_by_virtual_path.get(resolved)
+                    if manifest is None:
+                        if resolved in previous_expected:
+                            # Diese Datei wurde im vorherigen Sync noch von einem Manifest
+                            # abgedeckt, inzwischen aber gelöscht (z. B. via UI). In diesem
+                            # Fall darf sie nicht als neue SMB-Datei re-importiert werden.
+                            existing.unlink(missing_ok=True)
                             continue
-                    existing_files = [p for p in smb_root.rglob("*") if p.is_file()]
-                    for existing in existing_files:
-                        resolved = existing.resolve()
-                        manifest = manifest_by_virtual_path.get(resolved)
-                        if manifest is None:
-                            if resolved in previous_expected:
-                                # Diese Datei wurde im vorherigen Sync noch von einem Manifest
-                                # abgedeckt, inzwischen aber gelöscht (z. B. via UI). In diesem
-                                # Fall darf sie nicht als neue SMB-Datei re-importiert werden.
-                                existing.unlink(missing_ok=True)
-                                continue
-                            # Neue Datei via SMB angelegt -> als neues Manifest importieren
+                        # Neue Datei via SMB angelegt -> als neues Manifest importieren
+                        rel = resolved.relative_to(smb_root.resolve())
+                        folder_path = sanitize_folder_path(str(rel.parent).replace("\\", "/"))
+                        try:
+                            manifest_store.create_for_file(existing, identity, folder_path=folder_path or DEFAULT_FOLDER)
+                        except Exception:
+                            LOG.debug("SMB-View Sync: Import fehlgeschlagen für %s", existing, exc_info=True)
+                        continue
+                    if existing.stat().st_size != int(manifest.file_size):
+                        # Datei via SMB geändert -> altes Manifest ersetzen
+                        try:
+                            manifest_store.delete(manifest.manifest_id, delete_unreferenced_chunks=True)
                             rel = resolved.relative_to(smb_root.resolve())
                             folder_path = sanitize_folder_path(str(rel.parent).replace("\\", "/"))
-                            try:
-                                manifest_store.create_for_file(existing, identity, folder_path=folder_path or DEFAULT_FOLDER)
-                            except Exception:
-                                LOG.debug("SMB-View Sync: Import fehlgeschlagen für %s", existing, exc_info=True)
-                            continue
-                        if existing.stat().st_size != int(manifest.file_size):
-                            # Datei via SMB geändert -> altes Manifest ersetzen
-                            try:
-                                manifest_store.delete(manifest.manifest_id, delete_unreferenced_chunks=True)
-                                rel = resolved.relative_to(smb_root.resolve())
-                                folder_path = sanitize_folder_path(str(rel.parent).replace("\\", "/"))
-                                manifest_store.create_for_file(existing, identity, folder_path=folder_path or DEFAULT_FOLDER)
-                            except Exception:
-                                LOG.debug("SMB-View Sync: Update fehlgeschlagen für %s", existing, exc_info=True)
-                    # Neue Ordner via SMB angelegt -> als virtuelle Ordner persistieren
-                    existing_dirs = [p for p in smb_root.rglob("*") if p.is_dir()]
-                    for existing_dir in existing_dirs:
-                        resolved_dir = existing_dir.resolve()
-                        if resolved_dir == smb_root.resolve():
-                            continue
-                        rel = resolved_dir.relative_to(smb_root.resolve())
-                        folder_path = sanitize_folder_path(str(rel).replace("\\", "/"))
-                        if not folder_path or folder_path == DEFAULT_FOLDER:
-                            continue
-                        if resolved_dir in previous_expected_dirs:
-                            continue
-                        try:
-                            manifest_store.create_folder(folder_path, identity.node_id)
-                            expected_dirs.add(resolved_dir)
+                            manifest_store.create_for_file(existing, identity, folder_path=folder_path or DEFAULT_FOLDER)
                         except Exception:
-                            LOG.debug("SMB-View Sync: Folder-Import fehlgeschlagen für %s", existing_dir, exc_info=True)
-                    for existing in smb_root.rglob("*"):
-                        if existing.is_file() and existing.resolve() not in expected:
-                            existing.unlink(missing_ok=True)
-                    for existing_dir in sorted([p for p in smb_root.rglob("*") if p.is_dir()], reverse=True):
-                        if existing_dir.resolve() in expected_dirs:
-                            continue
-                        try:
-                            existing_dir.rmdir()
-                        except OSError:
-                            pass
-                except Exception:
-                    LOG.debug("SMB-View Sync fehlgeschlagen", exc_info=True)
-                previous_expected = set(expected) if "expected" in locals() else set()
-                previous_expected_dirs = set(expected_dirs) if "expected_dirs" in locals() else {smb_root.resolve()}
-                smb_sync_stop.wait(5.0)
+                            LOG.debug("SMB-View Sync: Update fehlgeschlagen für %s", existing, exc_info=True)
+                # Neue Ordner via SMB angelegt -> als virtuelle Ordner persistieren
+                existing_dirs = [p for p in smb_root.rglob("*") if p.is_dir()]
+                for existing_dir in existing_dirs:
+                    resolved_dir = existing_dir.resolve()
+                    if resolved_dir == smb_root.resolve():
+                        continue
+                    rel = resolved_dir.relative_to(smb_root.resolve())
+                    folder_path = sanitize_folder_path(str(rel).replace("\\", "/"))
+                    if not folder_path or folder_path == DEFAULT_FOLDER:
+                        continue
+                    if resolved_dir in previous_expected_dirs:
+                        continue
+                    try:
+                        manifest_store.create_folder(folder_path, identity.node_id)
+                        expected_dirs.add(resolved_dir)
+                    except Exception:
+                        LOG.debug("SMB-View Sync: Folder-Import fehlgeschlagen für %s", existing_dir, exc_info=True)
+                for existing in smb_root.rglob("*"):
+                    if existing.is_file() and existing.resolve() not in expected:
+                        existing.unlink(missing_ok=True)
+                for existing_dir in sorted([p for p in smb_root.rglob("*") if p.is_dir()], reverse=True):
+                    if existing_dir.resolve() in expected_dirs:
+                        continue
+                    try:
+                        existing_dir.rmdir()
+                    except OSError:
+                        pass
+                previous_expected = set(expected)
+                previous_expected_dirs = set(expected_dirs)
+            except Exception:
+                LOG.debug("SMB-View Sync fehlgeschlagen", exc_info=True)
+                previous_expected = set()
+                previous_expected_dirs = {smb_root.resolve()}
+            stop_event.wait(5.0)
 
-        smb_sync_thread = threading.Thread(target=sync_smb_virtual_view, name="dcloud-smb-sync", daemon=True)
-        smb_sync_thread.start()
+    def stop_smb_runtime() -> None:
+        nonlocal smb_server, smb_thread, smb_sync_thread, smb_sync_stop
+        with smb_runtime_lock:
+            smb_status["enabled"] = bool(config.smb.enabled)
+            smb_status["running"] = False
+            smb_status["port"] = int(config.smb.port)
+            smb_sync_stop.set()
+            if smb_server is not None:
+                try:
+                    smb_server.stop()
+                except Exception:
+                    LOG.debug("SMB-Server Stop fehlgeschlagen", exc_info=True)
+            if smb_sync_thread is not None and smb_sync_thread.is_alive():
+                smb_sync_thread.join(timeout=1.0)
+            if smb_thread is not None and smb_thread.is_alive():
+                smb_thread.join(timeout=1.0)
+            smb_server = None
+            smb_thread = None
+            smb_sync_thread = None
+            smb_sync_stop = threading.Event()
+            publish_smb_runtime()
+
+    def start_smb_runtime() -> None:
+        nonlocal smb_server, smb_thread, smb_sync_thread, smb_sync_stop
+        with smb_runtime_lock:
+            # Konfigurationsänderungen an Benutzer/Passwort/Port werden sofort
+            # übernommen; deshalb vor dem Start immer eine laufende Instanz stoppen.
+            if smb_server is not None or smb_thread is not None or smb_sync_thread is not None:
+                stop_smb_runtime()
+            smb_status["enabled"] = True
+            smb_status["running"] = False
+            smb_status["port"] = int(config.smb.port)
+            smb_status["last_error"] = ""
+            smb_root.mkdir(parents=True, exist_ok=True)
+            server = EmbeddedSmbServer(
+                root=smb_root,
+                host=config.smb.host,
+                port=config.smb.port,
+                share_name=config.smb.share_name,
+                username=config.smb.username,
+                password=config.smb.password,
+            )
+            smb_server = server
+
+            def run_smb_server() -> None:
+                try:
+                    server.start()
+                except Exception as exc:
+                    if smb_server is server:
+                        smb_status["running"] = False
+                        smb_status["last_error"] = str(exc)
+                    LOG.exception("Embedded SMB server konnte nicht gestartet werden")
+                finally:
+                    if smb_server is server:
+                        smb_status["running"] = bool(server.running)
+                        smb_status["port"] = int(server.actual_port)
+                        if server.last_error:
+                            smb_status["last_error"] = server.last_error
+                    publish_smb_runtime()
+
+            smb_thread = threading.Thread(target=run_smb_server, name="dcloud-smb", daemon=True)
+            smb_thread.start()
+            smb_sync_stop = threading.Event()
+            smb_sync_thread = threading.Thread(
+                target=sync_smb_virtual_view,
+                args=(smb_sync_stop,),
+                name="dcloud-smb-sync",
+                daemon=True,
+            )
+            smb_sync_thread.start()
+            # Kurz warten, damit Startfehler/Port-Fallback im Dashboard direkt sichtbar werden.
+            deadline = time.time() + 0.8
+            while time.time() < deadline:
+                if smb_server is not None and (smb_server.running or smb_server.last_error):
+                    break
+                time.sleep(0.05)
+            if smb_server is not None:
+                smb_status["running"] = bool(smb_server.running)
+                smb_status["port"] = int(smb_server.actual_port)
+                smb_status["last_error"] = smb_server.last_error
+            publish_smb_runtime()
+
+    def apply_smb_runtime_settings() -> dict[str, object]:
+        if config.smb.enabled:
+            start_smb_runtime()
+        else:
+            stop_smb_runtime()
+            smb_status["enabled"] = False
+            smb_status["last_error"] = ""
+            publish_smb_runtime()
+        return smb_status.copy()
 
     config.network.udp_port = udp_port
     app = create_app(config, identity, chunk_store, manifest_store, peer_provider, discovery)
-    app.config["DCLOUD_SMB_STATUS"] = smb_status
+    app_holder["app"] = app
+    app.config["DCLOUD_SMB_STATUS"] = smb_status.copy()
     app.config["DCLOUD_SMB_SERVER"] = smb_server
     app.config["DCLOUD_SMB_ROOT"] = str(smb_root)
+    app.config["DCLOUD_APPLY_SMB_SETTINGS"] = apply_smb_runtime_settings
+    if config.smb.enabled:
+        start_smb_runtime()
     LOG.info("Starting local web UI on http://%s:%s", config.web.host, config.web.port)
     try:
         app.run(host=config.web.host, port=config.web.port, threaded=True)
@@ -284,9 +368,7 @@ def main() -> None:
         stop_relays = app.config.get("DCLOUD_STOP_RELAYS")
         if callable(stop_relays):
             stop_relays()
-        if smb_server is not None:
-            smb_sync_stop.set()
-            smb_server.stop()
+        stop_smb_runtime()
         discovery.stop()
 
 

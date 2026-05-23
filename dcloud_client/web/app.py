@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from pathlib import Path
 import tempfile
+import json
+import secrets
 from typing import Any, Protocol
 from io import BytesIO
 import threading
@@ -121,6 +123,9 @@ def create_app(
     download_progress = UploadProgressTracker(persist_dir=chunk_store.tmp_dir / "download_progress")
     download_results: dict[str, dict[str, Any]] = {}
     download_lock = threading.RLock()
+    external_link_lock = threading.RLock()
+    external_links_path = chunk_store.tmp_dir / "external_download_links.json"
+    external_download_links: dict[str, dict[str, Any]] = {}
     chat_messages: dict[str, deque[dict[str, Any]]] = defaultdict(lambda: deque(maxlen=120))
     replication_repair_lock = threading.Lock()
     last_replication_repair_at = 0.0
@@ -136,6 +141,69 @@ def create_app(
     def _safe_upload_id(value: str | None) -> str:
         cleaned = "".join(char for char in (value or "") if char.isalnum() or char in "-_")[:80]
         return cleaned or uuid4().hex
+
+
+    def _load_external_download_links() -> None:
+        """Load temporary external download links from the runtime store."""
+        nonlocal external_download_links
+        try:
+            with external_links_path.open("r", encoding="utf-8") as handle:
+                raw = json.load(handle)
+            if not isinstance(raw, dict):
+                return
+            now = time.time()
+            loaded: dict[str, dict[str, Any]] = {}
+            for token, item in raw.items():
+                if not isinstance(token, str) or not isinstance(item, dict):
+                    continue
+                expires_at = float(item.get("expires_at") or 0)
+                manifest_id = str(item.get("manifest_id") or "")
+                if token and manifest_id and expires_at > now:
+                    loaded[token] = {
+                        "manifest_id": manifest_id,
+                        "file_name": str(item.get("file_name") or "download.bin"),
+                        "created_at": float(item.get("created_at") or now),
+                        "expires_at": expires_at,
+                        "created_by": str(item.get("created_by") or ""),
+                    }
+            external_download_links = loaded
+        except FileNotFoundError:
+            external_download_links = {}
+        except Exception:
+            external_download_links = {}
+
+    def _persist_external_download_links() -> None:
+        external_links_path.parent.mkdir(parents=True, exist_ok=True)
+        payload = json.dumps(external_download_links, ensure_ascii=False, indent=2, sort_keys=True)
+        tmp_path = external_links_path.with_suffix(".tmp")
+        tmp_path.write_text(payload, encoding="utf-8")
+        tmp_path.replace(external_links_path)
+
+    def _cleanup_external_download_links(*, persist: bool = True) -> int:
+        now = time.time()
+        removed = 0
+        for token, item in list(external_download_links.items()):
+            try:
+                expires_at = float(item.get("expires_at") or 0)
+            except Exception:
+                expires_at = 0
+            if expires_at <= now:
+                external_download_links.pop(token, None)
+                removed += 1
+        if removed and persist:
+            _persist_external_download_links()
+        return removed
+
+    def _parse_external_link_minutes(value: Any) -> int:
+        try:
+            minutes = int(float(value))
+        except Exception:
+            minutes = 60
+        return max(1, min(60, minutes))
+
+    with external_link_lock:
+        _load_external_download_links()
+        _cleanup_external_download_links(persist=True)
 
     def _cleanup_storage_garbage(*, stale_tmp_age_seconds: int = 900) -> dict[str, int]:
         referenced_chunks = {
@@ -157,6 +225,8 @@ def create_app(
 
         for tmp_path in chunk_store.tmp_dir.glob("*"):
             if not tmp_path.is_file():
+                continue
+            if tmp_path == external_links_path or tmp_path == external_links_path.with_suffix(".tmp"):
                 continue
             try:
                 age_seconds = now - tmp_path.stat().st_mtime
@@ -531,13 +601,14 @@ def create_app(
         current_peers = peers if peers is not None else _list_active_peers()
         capacity = _network_storage_capacity(current_stats, current_peers)
         smb_server = app.config.get("DCLOUD_SMB_SERVER")
-        runtime_smb_running = bool(getattr(smb_server, "running", False)) if smb_server is not None else bool(config.smb.enabled)
-        runtime_smb_port = int(getattr(smb_server, "actual_port", config.smb.port)) if smb_server is not None else int(config.smb.port)
-        runtime_smb_error = str(getattr(smb_server, "last_error", "") or "")
+        smb_runtime_status = app.config.get("DCLOUD_SMB_STATUS") or {}
+        runtime_smb_running = bool(smb_runtime_status.get("running", getattr(smb_server, "running", False)))
+        runtime_smb_port = int(smb_runtime_status.get("port", getattr(smb_server, "actual_port", config.smb.port)) or config.smb.port)
+        runtime_smb_error = str(smb_runtime_status.get("last_error", getattr(smb_server, "last_error", "")) or "")
         smb_root_path = str(app.config.get("DCLOUD_SMB_ROOT") or config.storage.path)
         if config.smb.enabled and not runtime_smb_running and not runtime_smb_error:
             runtime_smb_error = (
-                "SMB-Server läuft nicht. Prüfe Logausgabe, Port-Freigabe und ob der Speicherpfad verfügbar ist."
+                "SMB-Server läuft nicht. Der Dienst wird normalerweise automatisch neu gestartet; prüfe sonst Logausgabe, Port-Freigabe und ob der Speicherpfad verfügbar ist."
             )
         return {
             "nodeName": config.node.name,
@@ -906,6 +977,7 @@ def create_app(
             "storage_locations": locations,
             "remote_storage_count": len([node_id for node_id in locations if node_id != identity.node_id]),
             "download_url": url_for("download", manifest_id=manifest.manifest_id),
+            "external_link_url": url_for("api_create_external_download_link", manifest_id=manifest.manifest_id),
             "delete_url": url_for("delete_file", manifest_id=manifest.manifest_id),
             "share_url": url_for("share_file", manifest_id=manifest.manifest_id),
             "offload_url": url_for("offload_file_chunks", manifest_id=manifest.manifest_id),
@@ -1583,6 +1655,16 @@ def create_app(
     def update_settings() -> Response | str:
         redirect_target = _safe_next(request.form.get("next"), url_for("dashboard"))
         try:
+            old_smb_settings = (
+                bool(config.smb.enabled),
+                str(config.smb.username),
+                str(config.smb.password),
+                str(config.smb.host),
+                int(config.smb.port),
+                str(config.smb.share_name),
+            )
+            submitted_smb_password = request.form.get("smb_password")
+            smb_runtime_before = app.config.get("DCLOUD_SMB_STATUS") or {}
             update_runtime_settings(
                 config,
                 client_type="server",
@@ -1592,7 +1674,7 @@ def create_app(
                 relay_enabled=request.form.get("relay_enabled") == "on",
                 smb_enabled=request.form.get("smb_enabled") == "on",
                 smb_username=request.form.get("smb_username", config.smb.username),
-                smb_password=request.form.get("smb_password", config.smb.password),
+                smb_password=submitted_smb_password if submitted_smb_password else config.smb.password,
                 compression_mode=request.form.get("compression_mode", config.storage.compression.mode),
                 compression_algorithm=request.form.get("compression_algorithm", config.storage.compression.algorithm),
                 compression_level=request.form.get("compression_level", str(config.storage.compression.level)),
@@ -1610,12 +1692,36 @@ def create_app(
             )
             _configure_relay_transport()
             _sync_peer_connector_settings()
+            new_smb_settings = (
+                bool(config.smb.enabled),
+                str(config.smb.username),
+                str(config.smb.password),
+                str(config.smb.host),
+                int(config.smb.port),
+                str(config.smb.share_name),
+            )
+            smb_runtime_note = ""
+            if old_smb_settings != new_smb_settings or (config.smb.enabled and not smb_runtime_before.get("running")):
+                apply_smb_settings = app.config.get("DCLOUD_APPLY_SMB_SETTINGS")
+                if callable(apply_smb_settings):
+                    smb_status_after = apply_smb_settings()
+                    if config.smb.enabled:
+                        if smb_status_after.get("running"):
+                            smb_runtime_note = f", SMB neu gestartet auf Port {smb_status_after.get('port', config.smb.port)}"
+                        elif smb_status_after.get("last_error"):
+                            smb_runtime_note = f", SMB Startfehler: {smb_status_after.get('last_error')}"
+                        else:
+                            smb_runtime_note = ", SMB wird gestartet"
+                    else:
+                        smb_runtime_note = ", SMB gestoppt"
+                elif config.smb.enabled:
+                    smb_runtime_note = ", SMB-Änderung gespeichert; Dienst-Neustart erforderlich"
             relay_note = ", PHP-Relay deaktiviert" if not config.network.relay_urls else f", {len(config.network.relay_urls)} PHP-Relay(s) aktiv"
             message = (
                 f"Einstellungen gespeichert: {client_type_label(config.node.client_type)}, "
                 f"{bytes_to_gib(config.storage.limit_bytes):g} GB freigegeben{relay_note}, "
                 f"Komprimierung {config.storage.compression.mode}/{config.storage.compression.algorithm}, "
-                f"SMB {'aktiv' if config.smb.enabled else 'aus'} auf Port {config.smb.port}"
+                f"SMB {'aktiv' if config.smb.enabled else 'aus'} auf Port {config.smb.port}{smb_runtime_note}"
             )
             if _is_ajax_request():
                 return jsonify({"ok": True, "message": message, "settings": settings_payload(), "state": state_payload()})
@@ -2049,6 +2155,70 @@ def create_app(
         if not result or not path.exists():
             abort(404)
         return send_file(path, as_attachment=True, download_name=str(result.get("file_name") or path.name))
+
+    @app.post("/api/external-links/<manifest_id>")
+    def api_create_external_download_link(manifest_id: str) -> Response:
+        """Create a temporary public download link for an owned file."""
+        try:
+            manifest = manifest_store.load(manifest_id)
+        except StorageError as exc:
+            return jsonify({"ok": False, "message": str(exc)}), 404
+        if manifest.owner_node_id != identity.node_id:
+            return jsonify({"ok": False, "message": "Nur der Eigentümer kann einen externen Download-Link erstellen"}), 403
+        payload = request.get_json(silent=True) or {}
+        if not isinstance(payload, dict):
+            payload = {}
+        minutes = _parse_external_link_minutes(payload.get("expires_minutes") or payload.get("minutes") or request.form.get("expires_minutes"))
+        now = time.time()
+        expires_at = now + (minutes * 60)
+        token = secrets.token_urlsafe(32)
+        with external_link_lock:
+            _cleanup_external_download_links(persist=False)
+            external_download_links[token] = {
+                "manifest_id": manifest.manifest_id,
+                "file_name": manifest.file_name,
+                "created_at": now,
+                "expires_at": expires_at,
+                "created_by": identity.node_id,
+            }
+            _persist_external_download_links()
+        link = url_for("external_download_file", token=token, _external=True)
+        return jsonify(
+            {
+                "ok": True,
+                "url": link,
+                "token": token,
+                "expiresInMinutes": minutes,
+                "expiresAt": datetime.fromtimestamp(expires_at, timezone.utc).isoformat(),
+                "message": f"Externer Download-Link wurde für {minutes} Minute(n) erstellt.",
+            }
+        )
+
+    @app.get("/external/<token>")
+    def external_download_file(token: str) -> Response:
+        safe_token = "".join(char for char in str(token or "") if char.isalnum() or char in "-_")
+        if not safe_token or safe_token != token:
+            abort(404)
+        with external_link_lock:
+            _cleanup_external_download_links(persist=True)
+            item = dict(external_download_links.get(safe_token) or {})
+        if not item:
+            abort(410, "Dieser Download-Link ist abgelaufen oder ungültig")
+        if float(item.get("expires_at") or 0) <= time.time():
+            with external_link_lock:
+                external_download_links.pop(safe_token, None)
+                _persist_external_download_links()
+            abort(410, "Dieser Download-Link ist abgelaufen")
+        try:
+            manifest = manifest_store.load(str(item.get("manifest_id") or ""))
+        except StorageError:
+            abort(404)
+        try:
+            _ensure_manifest_chunks_available(manifest)
+            output = manifest_store.restore(manifest.manifest_id)
+        except StorageError as exc:
+            abort(503, str(exc))
+        return send_file(output, as_attachment=True, download_name=manifest.file_name)
 
     @app.get("/download/<manifest_id>")
     def download(manifest_id: str) -> Response:

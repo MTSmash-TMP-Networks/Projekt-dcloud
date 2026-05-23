@@ -785,6 +785,7 @@
               <input id="settings-smb-enabled" type="checkbox" name="smb_enabled" {% if settings_json.smbEnabled %}checked{% endif %}> SMB-Server aktivieren
             </label>
             <p class="settings-note">Port: <strong>{{ settings_json.smbPort }}</strong> · Host: <strong>{{ settings_json.smbHost }}</strong></p>
+            <p class="settings-note" id="settings-smb-runtime-note">Änderungen am SMB-Server werden nach dem Speichern automatisch im laufenden Dienst neu gestartet.</p>
             <label for="settings-smb-username">Benutzername</label>
             <input id="settings-smb-username" type="text" name="smb_username" value="{{ settings_json.smbUsername }}" placeholder="leer = Gastzugriff">
             <label for="settings-smb-password">Passwort</label>
@@ -888,6 +889,7 @@
     <div class="ctx" id="ctxMenu" role="menu" aria-label="Desktop Kontextmenü">
       <button type="button" id="ctxOpen"><span>Öffnen</span><span class="kbd">Enter</span></button>
       <button type="button" id="ctxDownload"><span>Download</span><span class="kbd">Ctrl+S</span></button>
+      <button type="button" id="ctxExternalLink"><span>Externen Link erstellen…</span><span class="kbd">1h</span></button>
       <button type="button" id="ctxShare"><span>Freigabe…</span><span class="kbd">Ctrl+H</span></button>
       <button type="button" id="ctxOffload"><span>Auf Peers auslagern</span><span class="kbd">Ctrl+O</span></button>
       <button type="button" id="ctxMoveFolder"><span>In Ordner verschieben…</span><span class="kbd">Ctrl+B</span></button>
@@ -1036,6 +1038,7 @@
       let latestAppliedRefreshSeq = 0;
       let lastSuccessfulUploadAt = 0;
       let lastLogsFetchAt = 0;
+      let settingsFormDirty = false;
       const UPLOAD_SESSION_KEY = "dcloud_active_upload_ids";
 
       const windows = {
@@ -1112,7 +1115,8 @@
             downloadUrl: file.download_url || `/download/${file.manifest_id}`,
             deleteUrl: file.delete_url || `/files/${file.manifest_id}/delete`,
             shareUrl: file.share_url || `/files/${file.manifest_id}/share`,
-            offloadUrl: file.offload_url || `/files/${file.manifest_id}/offload`
+            offloadUrl: file.offload_url || `/files/${file.manifest_id}/offload`,
+            externalLinkUrl: file.external_link_url || `/api/external-links/${file.manifest_id}`
           })).sort((a,b)=>a.name.localeCompare(b.name));
         });
         fsMap.forEach(node => node.folders.sort((a,b)=>a.localeCompare(b)));
@@ -1286,10 +1290,18 @@
             ? `${network.relayStatus || "startet"} · ${urls.length || 1} Vermittlungsserver`
             : "nicht konfiguriert";
         }
-                const smbEnabledInput = document.getElementById("settings-smb-enabled");
-        if(smbEnabledInput && document.activeElement !== smbEnabledInput) smbEnabledInput.checked = !!settings.smbEnabled;
+        const smbEnabledInput = document.getElementById("settings-smb-enabled");
+        if(smbEnabledInput && document.activeElement !== smbEnabledInput && !settingsFormDirty) smbEnabledInput.checked = !!settings.smbEnabled;
         const smbUserInput = document.getElementById("settings-smb-username");
-        if(smbUserInput && document.activeElement !== smbUserInput) smbUserInput.value = settings.smbUsername || "";
+        if(smbUserInput && document.activeElement !== smbUserInput && !settingsFormDirty) smbUserInput.value = settings.smbUsername || "";
+        const smbRuntimeNote = document.getElementById("settings-smb-runtime-note");
+        if(smbRuntimeNote){
+          smbRuntimeNote.textContent = settings.smbEnabled
+            ? (settings.smbRunning
+                ? `SMB läuft auf Port ${settings.smbPort || 445}. Änderungen werden nach dem Speichern automatisch neu gestartet.`
+                : `SMB ist aktiviert, läuft aber noch nicht${settings.smbLastError ? `: ${settings.smbLastError}` : "."}`)
+            : "SMB ist deaktiviert. Beim Aktivieren wird der Dienst nach dem Speichern automatisch gestartet.";
+        }
 
         const peers = appState.peers || [];
         const activeIds = new Set(peers.map(peer => String(peer.node_id || "")));
@@ -1636,6 +1648,7 @@
         const isDeletableFolder = isFolder && normalizeFolderPath(selectedTarget.path) !== DEFAULT_FOLDER;
         document.getElementById("ctxOpen").hidden = !(isFile || isFolder);
         document.getElementById("ctxDownload").hidden = !isFile;
+        document.getElementById("ctxExternalLink").hidden = !isOwnerFile;
         document.getElementById("ctxShare").hidden = !isOwnerFile;
         document.getElementById("ctxOffload").hidden = !isOwnerFile;
         const moveFolderBtn = document.getElementById("ctxMoveFolder");
@@ -2268,6 +2281,35 @@
         showToast(data.message || "Aktion abgeschlossen", "success");
         return data;
       }
+      async function createExternalDownloadLink(file){
+        if(!file || !file.owner) throw new Error("Nur der Eigentümer kann externe Download-Links erstellen");
+        const answer = prompt(`Wie lange soll der externe Download-Link gültig sein?\n${file.name}\n\nMinuten eingeben, maximal 60:`, "60");
+        if(answer === null) return;
+        const minutes = Math.max(1, Math.min(60, Number.parseInt(answer, 10) || 60));
+        const response = await fetch(file.externalLinkUrl || `/api/external-links/${encodeURIComponent(file.id)}`, {
+          method:"POST",
+          headers:{ "X-Requested-With":"XMLHttpRequest", "Content-Type":"application/json", "Accept":"application/json" },
+          body:JSON.stringify({ expires_minutes: minutes })
+        });
+        const payload = await response.json();
+        if(!response.ok || !payload.ok) throw new Error(payload.message || "Externer Link konnte nicht erstellt werden");
+        const link = String(payload.url || "");
+        if(!link) throw new Error("Der Server hat keinen Link zurückgegeben");
+        let copied = false;
+        if(navigator.clipboard && window.isSecureContext){
+          try{
+            await navigator.clipboard.writeText(link);
+            copied = true;
+          }catch(error){
+            copied = false;
+          }
+        }
+        if(!copied){
+          prompt("Externer Download-Link zum Kopieren:", link);
+        }
+        const expiryText = payload.expiresInMinutes ? `${payload.expiresInMinutes} Minute(n)` : "maximal 60 Minuten";
+        showToast(copied ? `Externer Link kopiert · gültig ${expiryText}` : `Externer Link erstellt · gültig ${expiryText}`, "success");
+      }
       async function deleteFile(file){
         if(!confirm(`Datei wirklich löschen?\n${file.name}`)) return;
         await ajaxPost(file.deleteUrl, { next:"/" });
@@ -2405,6 +2447,7 @@
         file.deleteUrl = manifest.delete_url || `/files/${nextId}/delete`;
         file.shareUrl = manifest.share_url || `/files/${nextId}/share`;
         file.offloadUrl = manifest.offload_url || `/files/${nextId}/offload`;
+        file.externalLinkUrl = manifest.external_link_url || `/api/external-links/${nextId}`;
       }
       async function offloadFile(file){
         if(!file.owner) throw new Error("Nur der Eigentümer kann auslagern");
@@ -2631,6 +2674,8 @@ ${file.name}`)) return;
         syncRelayInputs();
       }
       if(settingsForm){
+        settingsForm.addEventListener("input", () => { settingsFormDirty = true; });
+        settingsForm.addEventListener("change", () => { settingsFormDirty = true; });
         settingsForm.addEventListener("submit", async event => {
           event.preventDefault();
           try{
@@ -2641,6 +2686,7 @@ ${file.name}`)) return;
             });
             const payload = await response.json();
             if(!response.ok || !payload.ok) throw new Error(payload.message || "Einstellungen konnten nicht gespeichert werden");
+            settingsFormDirty = false;
             applyState(payload.state);
             showToast(payload.message || "Einstellungen gespeichert", "success");
           }catch(error){
@@ -2655,6 +2701,7 @@ ${file.name}`)) return;
         if(selectedTarget.kind === "file") startDownload(selectedTarget.file).catch(error => showToast(error.message, "error"));
       };
       document.getElementById("ctxDownload").onclick = () => { closeCtx(); if(selectedTarget.kind === "file") startDownload(selectedTarget.file).catch(error => showToast(error.message, "error")); };
+      document.getElementById("ctxExternalLink").onclick = () => { closeCtx(); if(selectedTarget.kind === "file") createExternalDownloadLink(selectedTarget.file).catch(error => showToast(error.message, "error")); };
       document.getElementById("ctxShare").onclick = () => { closeCtx(); if(selectedTarget.kind === "file") toggleShare(selectedTarget.file).catch(error => showToast(error.message, "error")); };
       document.getElementById("ctxOffload").onclick = () => { closeCtx(); if(selectedTarget.kind === "file") offloadFile(selectedTarget.file).catch(error => showToast(error.message, "error")); };
       const ctxMoveFolderBtn = document.getElementById("ctxMoveFolder");
