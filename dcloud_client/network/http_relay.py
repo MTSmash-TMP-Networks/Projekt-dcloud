@@ -427,9 +427,16 @@ def peer_from_relay_payload(raw: object, *, relay_url: str, own_node_id: str | N
         if value and value != RELAY_HOST:
             external_ip = value
             break
-    # Prefer a direct endpoint whenever the relay reports an external address.
-    # This allows the client to try direct UDP first and keep relay as fallback.
-    direct_host = external_ip if external_ip else RELAY_HOST
+    internal_ip = ""
+    for key in ("internal_ip", "local_ip", "lan_ip", "private_ip"):
+        value = str(raw.get(key, "")).strip()
+        if value and value != RELAY_HOST:
+            internal_ip = value
+            break
+    # Prefer a private/LAN endpoint first when a relay publishes one. This
+    # keeps traffic local for peers in the same network; external IP and relay
+    # remain fallbacks.
+    direct_host = internal_ip or external_ip or RELAY_HOST
     return Peer(
         node_id=node_id,
         host=direct_host,
