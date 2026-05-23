@@ -103,6 +103,7 @@ class UdpDiscoveryTransport:
         self._announce_thread: threading.Thread | None = None
         self._cleanup_thread: threading.Thread | None = None
         self._last_dht_probe_at = 0.0
+        self.chunk_message_handler: Callable[[dict[str, Any], tuple[str, int]], dict[str, Any] | None] | None = None
 
     @staticmethod
     def _normalize_ports(raw_ports: list[int] | list[str]) -> list[int]:
@@ -290,6 +291,10 @@ class UdpDiscoveryTransport:
                 targets.append(BootstrapNode(host=host, port=port))
         return targets
 
+
+    def set_chunk_message_handler(self, handler: Callable[[dict[str, Any], tuple[str, int]], dict[str, Any] | None] | None) -> None:
+        self.chunk_message_handler = handler
+
     def _serve(self) -> None:
         assert self._socket is not None
         while not self._stop_event.is_set():
@@ -323,6 +328,20 @@ class UdpDiscoveryTransport:
                 nodes = message.get("nodes")
                 if isinstance(nodes, list):
                     self.dht_index.ingest(item for item in nodes if isinstance(item, dict))
+            return
+        if message_type == "chunk_put":
+            if self.chunk_message_handler is None:
+                return
+            sender = self._peer_from_message(message, address)
+            if sender is not None:
+                self.peer_provider.add_or_update(sender)
+            response = self.chunk_message_handler(message, address)
+            if isinstance(response, dict):
+                sender_port = int(message.get("udp_port") or address[1])
+                target_host = sender.host if sender is not None else address[0]
+                self.send_control(target_host, sender_port, {"type":"chunk_put_ack", **response})
+            return
+        if message_type == "chunk_put_ack":
             return
         if message_type not in {"hello", "hello_ack", "peer_list"}:
             return

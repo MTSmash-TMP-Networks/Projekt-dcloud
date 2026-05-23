@@ -115,10 +115,46 @@ def create_app(
     relay_clients: dict[str, HttpRelayClient] = {}
     relay_transports: dict[str, HttpRelayTransport] = {}
     relay_lock = threading.RLock()
+    def _handle_udp_chunk_message(message: dict[str, Any], _address: tuple[str, int]) -> dict[str, Any] | None:
+        if message.get("type") != "chunk_put":
+            return None
+        try:
+            digest = str(message.get("digest", ""))
+            stored_data = base64.b64decode(str(message.get("data_b64", "")).encode("ascii"), validate=True)
+            original_size = int(message.get("original_size", 0))
+            index = int(message.get("index", 0))
+            compression = str(message.get("compression") or "") or None
+            chunk_store.write_stored_chunk(digest=digest, stored_data=stored_data, original_size=original_size, index=index, compression=compression)
+            return {"ok": True, "digest": digest}
+        except Exception as exc:
+            return {"ok": False, "message": str(exc)}
+
+    def _send_udp_chunk_message(peer: Peer, payload: dict[str, Any]) -> dict[str, Any] | None:
+        if peer.host in {"", "0.0.0.0", "::", "__relay__"}:
+            return None
+        msg = dict(payload)
+        msg["magic"] = config.security.protocol_magic
+        msg["node_id"] = identity.node_id
+        msg["public_key"] = identity.public_key_b64
+        msg["name"] = config.node.name
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+            sock.settimeout(1.8)
+            sock.bind((config.network.udp_host, 0))
+            msg["udp_port"] = int(sock.getsockname()[1])
+            sock.sendto(json.dumps(msg, separators=(",", ":")).encode("utf-8"), (peer.host, int(peer.udp_port)))
+            raw, _ = sock.recvfrom(65535)
+        response = json.loads(raw.decode("utf-8"))
+        if response.get("magic") != config.security.protocol_magic or response.get("type") != "chunk_put_ack":
+            return None
+        return response
+
     p2p_client = P2PStorageClient(
         default_web_port=config.web.port,
         preferred_tunnel_ports=config.network.preferred_tunnel_ports,
+        udp_chunk_sender=_send_udp_chunk_message,
     )
+    if peer_connector is not None and hasattr(peer_connector, "set_chunk_message_handler"):
+        peer_connector.set_chunk_message_handler(_handle_udp_chunk_message)
     upload_progress = UploadProgressTracker(persist_dir=chunk_store.tmp_dir / "upload_progress")
     chat_messages: dict[str, deque[dict[str, Any]]] = defaultdict(lambda: deque(maxlen=120))
     replication_repair_lock = threading.Lock()

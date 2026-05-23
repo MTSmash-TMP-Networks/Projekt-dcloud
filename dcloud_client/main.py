@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import random
 import socket
 import sys
 import threading
@@ -39,13 +40,16 @@ def configure_logging(verbose: bool = False) -> None:
 
 
 def choose_udp_port(config: AppConfig) -> int:
+    configured_port = int(config.network.udp_port)
+    range_ports = list(range(config.network.udp_port_range.start, config.network.udp_port_range.end + 1))
     if config.network.randomize_udp_port:
-        preferred = [port for port in range(config.network.udp_port_range.start, config.network.udp_port_range.end + 1) if port != config.network.udp_port]
-        candidates = preferred + [config.network.udp_port]
+        candidates = list(range_ports)
+        random.shuffle(candidates)
+        if configured_port not in candidates:
+            candidates.append(configured_port)
     else:
-        candidates = [config.network.udp_port] + [
-        port for port in range(config.network.udp_port_range.start, config.network.udp_port_range.end + 1) if port != config.network.udp_port
-    ]
+        fallback_ports = [port for port in range_ports if port != configured_port]
+        candidates = [configured_port] + fallback_ports
     for port in candidates:
         with closing(socket.socket(socket.AF_INET, socket.SOCK_DGRAM)) as sock:
             try:
