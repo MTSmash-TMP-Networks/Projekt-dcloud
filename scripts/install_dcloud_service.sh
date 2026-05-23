@@ -100,6 +100,13 @@ storage:
   limit_bytes: $LIMIT_BYTES
   min_free_bytes: 1073741824
   chunk_size_bytes: 4194304
+  compression:
+    mode: auto
+    algorithm: zlib
+    level: 1
+    min_savings_percent: 3.0
+    min_savings_bytes: 65536
+    skip_incompressible: true
 web:
   host: 0.0.0.0
   port: 8787

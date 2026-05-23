@@ -11,9 +11,22 @@ import tempfile
 import zlib
 from typing import Any, BinaryIO, Callable, Iterable
 
+try:
+    import zstandard as zstd  # type: ignore
+except Exception:  # pragma: no cover - optional runtime dependency
+    zstd = None
+
 
 class StorageError(RuntimeError):
     pass
+
+
+COMPRESSED_FILE_EXTENSIONS = {
+    ".7z", ".avi", ".br", ".bz2", ".dmg", ".gz", ".heic", ".heif",
+    ".iso", ".jar", ".jpeg", ".jpg", ".lz4", ".m4a", ".mkv",
+    ".mov", ".mp3", ".mp4", ".ogg", ".pdf", ".png", ".rar",
+    ".tgz", ".webm", ".webp", ".xz", ".zip", ".zst",
+}
 
 
 @dataclass(frozen=True)
@@ -45,7 +58,20 @@ class ChunkStore:
     digest.
     """
 
-    def __init__(self, root: Path, limit_bytes: int, min_free_bytes: int, chunk_size: int) -> None:
+    def __init__(
+        self,
+        root: Path,
+        limit_bytes: int,
+        min_free_bytes: int,
+        chunk_size: int,
+        *,
+        compression_mode: str = "auto",
+        compression_algorithm: str = "auto",
+        compression_level: int = 1,
+        compression_min_savings_percent: float = 3.0,
+        compression_min_savings_bytes: int = 64 * 1024,
+        compression_skip_incompressible: bool = True,
+    ) -> None:
         self.root = root
         self.chunks_dir = root / "chunks"
         self.manifests_dir = root / "manifests"
@@ -54,6 +80,31 @@ class ChunkStore:
         self.limit_bytes = limit_bytes
         self.min_free_bytes = min_free_bytes
         self.chunk_size = chunk_size
+        self.configure_compression(
+            mode=compression_mode,
+            algorithm=compression_algorithm,
+            level=compression_level,
+            min_savings_percent=compression_min_savings_percent,
+            min_savings_bytes=compression_min_savings_bytes,
+            skip_incompressible=compression_skip_incompressible,
+        )
+
+    def configure_compression(
+        self,
+        *,
+        mode: str = "auto",
+        algorithm: str = "auto",
+        level: int = 1,
+        min_savings_percent: float = 3.0,
+        min_savings_bytes: int = 64 * 1024,
+        skip_incompressible: bool = True,
+    ) -> None:
+        self.compression_mode = str(mode or "auto").lower()
+        self.compression_algorithm = str(algorithm or "auto").lower()
+        self.compression_level = max(1, min(22, int(level or 1)))
+        self.compression_min_savings_percent = max(0.0, float(min_savings_percent or 0.0))
+        self.compression_min_savings_bytes = max(0, int(min_savings_bytes or 0))
+        self.compression_skip_incompressible = bool(skip_incompressible)
 
     def initialize(self) -> None:
         for directory in (self.root, self.chunks_dir, self.manifests_dir, self.tmp_dir, self.downloads_dir):
@@ -117,11 +168,103 @@ class ChunkStore:
         if stats.filesystem_free_bytes - additional_bytes < self.min_free_bytes:
             raise StorageError("Minimum filesystem free space would be undercut")
 
-    def prepare_chunk_data(self, data: bytes) -> tuple[bytes, str | None]:
-        """Return the bytes to store and the compression marker for a raw chunk."""
-        compressed = zlib.compress(data)
-        if len(compressed) < len(data):
-            return compressed, "zlib"
+    def _compression_level_for_mode(self) -> int:
+        mode = self.compression_mode
+        if mode == "fast":
+            return 1
+        if mode == "balanced":
+            return 3
+        if mode == "max":
+            return 10
+        return self.compression_level
+
+    def _selected_compression_algorithm(self) -> str | None:
+        mode = self.compression_mode
+        if mode in {"off", "none", "disabled"}:
+            return None
+        algorithm = self.compression_algorithm
+        if algorithm in {"off", "none", "disabled"}:
+            return None
+        if algorithm == "zstd" and zstd is not None:
+            return "zstd"
+        if algorithm == "zstd" and zstd is None:
+            return "zlib"
+        if algorithm == "zlib":
+            return "zlib"
+        # auto keeps the network-compatible zlib behavior. zstd can be enabled
+        # explicitly once all storage peers have the optional zstandard package.
+        return "zlib"
+
+    @staticmethod
+    def _looks_like_precompressed_file(file_name: str | None) -> bool:
+        if not file_name:
+            return False
+        return Path(str(file_name)).suffix.lower() in COMPRESSED_FILE_EXTENSIONS
+
+    def _compress_with_algorithm(self, data: bytes, algorithm: str, *, level: int | None = None) -> bytes:
+        effective_level = int(level if level is not None else self._compression_level_for_mode())
+        if algorithm == "zstd" and zstd is not None:
+            return zstd.ZstdCompressor(level=effective_level).compress(data)
+        if algorithm == "zlib":
+            return zlib.compress(data, max(1, min(9, effective_level)))
+        raise StorageError(f"Unsupported chunk compression {algorithm}")
+
+    def _compression_is_worthwhile(self, raw_size: int, compressed_size: int) -> bool:
+        saved = raw_size - compressed_size
+        if saved <= 0:
+            return False
+        percent_required = int(raw_size * (self.compression_min_savings_percent / 100.0))
+        required = max(percent_required, self.compression_min_savings_bytes)
+        # For small chunks, a strict 64 KiB minimum would skip useful text/log
+        # compression. Cap the byte threshold to 3 % of small payloads while still
+        # keeping the configured percentage rule.
+        if raw_size < 2 * 1024 * 1024:
+            required = max(percent_required, min(required, int(raw_size * 0.03)))
+        return saved >= max(1, required)
+
+    def _probe_compression_candidate(self, data: bytes, algorithm: str) -> bool:
+        if len(data) < 128 * 1024:
+            return True
+        sample_size = min(256 * 1024, max(64 * 1024, len(data) // 8))
+        if len(data) <= sample_size * 2:
+            sample = data[:sample_size]
+        else:
+            half = sample_size // 2
+            sample = data[:half] + data[-half:]
+        try:
+            compressed_sample = self._compress_with_algorithm(sample, algorithm, level=1)
+        except StorageError:
+            return False
+        return self._compression_is_worthwhile(len(sample), len(compressed_sample))
+
+    def prepare_chunk_data(
+        self,
+        data: bytes,
+        *,
+        file_name: str | None = None,
+        file_size: int | None = None,
+    ) -> tuple[bytes, str | None]:
+        """Return the bytes to store and the compression marker for a raw chunk.
+
+        Compression is adaptive. Already-compressed media/archive formats and
+        high-entropy chunks are skipped in ``auto`` mode. A compressed chunk is
+        only kept when it saves a meaningful amount of space, which avoids CPU
+        spikes on large uploads and small OpenWrt nodes.
+        """
+        algorithm = self._selected_compression_algorithm()
+        if algorithm is None or not data:
+            return data, None
+
+        mode = self.compression_mode
+        if mode == "auto" and self.compression_skip_incompressible and self._looks_like_precompressed_file(file_name):
+            return data, None
+
+        if mode == "auto" and self.compression_skip_incompressible and not self._probe_compression_candidate(data, algorithm):
+            return data, None
+
+        compressed = self._compress_with_algorithm(data, algorithm)
+        if self._compression_is_worthwhile(len(data), len(compressed)):
+            return compressed, algorithm
         return data, None
 
     # Backwards-compatible internal name used by earlier code.
@@ -144,6 +287,16 @@ class ChunkStore:
                 raw = zlib.decompress(stored_data)
             except zlib.error as exc:
                 raise StorageError("Compressed chunk cannot be decompressed") from exc
+            if len(raw) != int(original_size):
+                raise StorageError("Compressed chunk metadata reports the wrong original size")
+            return
+        if compression == "zstd":
+            if zstd is None:
+                raise StorageError("Compressed chunk uses zstd, but Python package 'zstandard' is not installed")
+            try:
+                raw = zstd.ZstdDecompressor().decompress(stored_data, max_output_size=int(original_size))
+            except Exception as exc:
+                raise StorageError("Compressed zstd chunk cannot be decompressed") from exc
             if len(raw) != int(original_size):
                 raise StorageError("Compressed chunk metadata reports the wrong original size")
             return
@@ -201,8 +354,8 @@ class ChunkStore:
             compression=compression,
         )
 
-    def write_chunk(self, data: bytes, index: int = 0) -> ChunkInfo:
-        stored_data, compression = self.prepare_chunk_data(data)
+    def write_chunk(self, data: bytes, index: int = 0, *, file_name: str | None = None, file_size: int | None = None) -> ChunkInfo:
+        stored_data, compression = self.prepare_chunk_data(data, file_name=file_name, file_size=file_size)
         return self.write_stored_chunk(
             stored_data,
             original_size=len(data),
@@ -211,14 +364,14 @@ class ChunkStore:
             validate=False,
         )
 
-    def chunk_file(self, source: BinaryIO) -> list[ChunkInfo]:
+    def chunk_file(self, source: BinaryIO, *, file_name: str | None = None, file_size: int | None = None) -> list[ChunkInfo]:
         chunks: list[ChunkInfo] = []
         index = 0
         while True:
             data = source.read(self.chunk_size)
             if not data:
                 break
-            chunks.append(self.write_chunk(data, index=index))
+            chunks.append(self.write_chunk(data, index=index, file_name=file_name, file_size=file_size))
             index += 1
         return chunks
 
@@ -238,6 +391,10 @@ class ChunkStore:
             return data
         if compression == "zlib":
             return zlib.decompress(data)
+        if compression == "zstd":
+            if zstd is None:
+                raise StorageError("Chunk uses zstd compression, but Python package 'zstandard' is not installed")
+            return zstd.ZstdDecompressor().decompress(data)
         raise StorageError(f"Unsupported chunk compression {compression}")
 
     def restore_chunks(

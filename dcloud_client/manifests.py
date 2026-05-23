@@ -109,7 +109,7 @@ class ManifestStore:
     ) -> FileManifest:
         file_size = source.stat().st_size
         with source.open("rb") as handle:
-            chunk_infos = self.chunk_store.chunk_file(handle)
+            chunk_infos = self.chunk_store.chunk_file(handle, file_name=source.name, file_size=file_size)
         return self.create_from_chunks(
             source.name,
             file_size,

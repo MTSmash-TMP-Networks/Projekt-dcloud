@@ -550,6 +550,17 @@ def create_app(
             "minSharedStorageGb": MIN_SHARED_STORAGE_GB,
             "sharedStorageBytes": config.storage.limit_bytes,
             "freeSharedStorageBytes": current_stats.free_limit_bytes,
+            "compressionMode": config.storage.compression.mode,
+            "compressionAlgorithm": config.storage.compression.algorithm,
+            "compressionLevel": config.storage.compression.level,
+            "compressionMinSavingsPercent": config.storage.compression.min_savings_percent,
+            "compressionMinSavingsBytes": config.storage.compression.min_savings_bytes,
+            "compressionSkipIncompressible": bool(config.storage.compression.skip_incompressible),
+            "compressionActiveLabel": (
+                "Aus"
+                if config.storage.compression.mode == "off"
+                else f"{config.storage.compression.mode} · {config.storage.compression.algorithm} · Level {config.storage.compression.level}"
+            ),
             "fixedRelayUrl": DEFAULT_PUBLIC_RELAY_URL,
             "fixedRelayUrls": DEFAULT_PUBLIC_RELAY_URLS.copy(),
             "fixedRelayUrlsText": "\n".join(DEFAULT_PUBLIC_RELAY_URLS),
@@ -1582,14 +1593,28 @@ def create_app(
                 smb_enabled=request.form.get("smb_enabled") == "on",
                 smb_username=request.form.get("smb_username", config.smb.username),
                 smb_password=request.form.get("smb_password", config.smb.password),
+                compression_mode=request.form.get("compression_mode", config.storage.compression.mode),
+                compression_algorithm=request.form.get("compression_algorithm", config.storage.compression.algorithm),
+                compression_level=request.form.get("compression_level", str(config.storage.compression.level)),
+                compression_min_savings_percent=request.form.get("compression_min_savings_percent", str(config.storage.compression.min_savings_percent)),
+                compression_skip_incompressible=request.form.get("compression_skip_incompressible") == "on",
             )
             chunk_store.limit_bytes = config.storage.limit_bytes
+            chunk_store.configure_compression(
+                mode=config.storage.compression.mode,
+                algorithm=config.storage.compression.algorithm,
+                level=config.storage.compression.level,
+                min_savings_percent=config.storage.compression.min_savings_percent,
+                min_savings_bytes=config.storage.compression.min_savings_bytes,
+                skip_incompressible=config.storage.compression.skip_incompressible,
+            )
             _configure_relay_transport()
             _sync_peer_connector_settings()
             relay_note = ", PHP-Relay deaktiviert" if not config.network.relay_urls else f", {len(config.network.relay_urls)} PHP-Relay(s) aktiv"
             message = (
                 f"Einstellungen gespeichert: {client_type_label(config.node.client_type)}, "
                 f"{bytes_to_gib(config.storage.limit_bytes):g} GB freigegeben{relay_note}, "
+                f"Komprimierung {config.storage.compression.mode}/{config.storage.compression.algorithm}, "
                 f"SMB {'aktiv' if config.smb.enabled else 'aus'} auf Port {config.smb.port}"
             )
             if _is_ajax_request():

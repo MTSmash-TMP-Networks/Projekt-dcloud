@@ -27,6 +27,13 @@ DEFAULT_RELAY_CHUNK_SIZE_BYTES = 512 * 1024
 DEFAULT_PUBLIC_RELAY_URL = "https://support.tmp-networks.de/dcstorage/dcloud_relay.php"
 DEFAULT_BACKUP_RELAY_URL = "http://dcloud.byethost12.com/dcloud_relay.php"
 DEFAULT_PUBLIC_RELAY_URLS = [DEFAULT_PUBLIC_RELAY_URL, DEFAULT_BACKUP_RELAY_URL]
+VALID_COMPRESSION_MODES = {"auto", "fast", "balanced", "max", "off"}
+VALID_COMPRESSION_ALGORITHMS = {"auto", "zstd", "zlib", "none"}
+DEFAULT_COMPRESSION_MODE = "auto"
+DEFAULT_COMPRESSION_ALGORITHM = "zlib"
+DEFAULT_COMPRESSION_LEVEL = 1
+DEFAULT_COMPRESSION_MIN_SAVINGS_PERCENT = 3.0
+DEFAULT_COMPRESSION_MIN_SAVINGS_BYTES = 64 * 1024
 
 
 
@@ -38,11 +45,22 @@ class NodeConfig:
 
 
 @dataclass
+class CompressionConfig:
+    mode: str = DEFAULT_COMPRESSION_MODE
+    algorithm: str = DEFAULT_COMPRESSION_ALGORITHM
+    level: int = DEFAULT_COMPRESSION_LEVEL
+    min_savings_percent: float = DEFAULT_COMPRESSION_MIN_SAVINGS_PERCENT
+    min_savings_bytes: int = DEFAULT_COMPRESSION_MIN_SAVINGS_BYTES
+    skip_incompressible: bool = True
+
+
+@dataclass
 class StorageConfig:
     path: Path
     limit_bytes: int
     min_free_bytes: int
     chunk_size_bytes: int
+    compression: CompressionConfig = field(default_factory=CompressionConfig)
 
 
 @dataclass
@@ -167,6 +185,34 @@ def validate_shared_storage_bytes(value: int) -> int:
     return value
 
 
+def normalize_compression_mode(value: Any) -> str:
+    mode = str(value or DEFAULT_COMPRESSION_MODE).strip().lower()
+    if mode not in VALID_COMPRESSION_MODES:
+        raise ValueError("Komprimierungsmodus muss auto, fast, balanced, max oder off sein")
+    return mode
+
+
+def normalize_compression_algorithm(value: Any) -> str:
+    algorithm = str(value or DEFAULT_COMPRESSION_ALGORITHM).strip().lower()
+    if algorithm not in VALID_COMPRESSION_ALGORITHMS:
+        raise ValueError("Komprimierungsalgorithmus muss auto, zstd, zlib oder none sein")
+    return algorithm
+
+
+def normalize_compression_level(value: Any, mode: str = DEFAULT_COMPRESSION_MODE) -> int:
+    if value in {None, ""}:
+        return {"fast": 1, "balanced": 3, "max": 10}.get(mode, DEFAULT_COMPRESSION_LEVEL)
+    return max(1, min(22, int(value)))
+
+
+def normalize_min_savings_percent(value: Any) -> float:
+    return max(0.0, min(30.0, float(value if value not in {None, ""} else DEFAULT_COMPRESSION_MIN_SAVINGS_PERCENT)))
+
+
+def normalize_min_savings_bytes(value: Any) -> int:
+    return max(0, min(16 * 1024 * 1024, int(value if value not in {None, ""} else DEFAULT_COMPRESSION_MIN_SAVINGS_BYTES)))
+
+
 def _as_list(value: Any, default: list[Any]) -> list[Any]:
     if value is None:
         return list(default)
@@ -267,11 +313,25 @@ def load_config(config_path: str | Path = "config.yml", *, create_if_missing: bo
         candidate = Path(value).expanduser()
         return candidate if candidate.is_absolute() else (base_dir / candidate).resolve()
 
+    compression_raw = storage_raw.get("compression", {})
+    if not isinstance(compression_raw, dict):
+        compression_raw = {}
+    compression_mode = normalize_compression_mode(compression_raw.get("mode", DEFAULT_COMPRESSION_MODE))
+    compression = CompressionConfig(
+        mode=compression_mode,
+        algorithm=normalize_compression_algorithm(compression_raw.get("algorithm", DEFAULT_COMPRESSION_ALGORITHM)),
+        level=normalize_compression_level(compression_raw.get("level", ""), compression_mode),
+        min_savings_percent=normalize_min_savings_percent(compression_raw.get("min_savings_percent", DEFAULT_COMPRESSION_MIN_SAVINGS_PERCENT)),
+        min_savings_bytes=normalize_min_savings_bytes(compression_raw.get("min_savings_bytes", DEFAULT_COMPRESSION_MIN_SAVINGS_BYTES)),
+        skip_incompressible=bool(compression_raw.get("skip_incompressible", True)),
+    )
+
     storage = StorageConfig(
         path=as_path(str(storage_raw.get("path", "./storage"))),
         limit_bytes=int(storage_raw.get("limit_bytes", 50 * GIB)),
         min_free_bytes=int(storage_raw.get("min_free_bytes", 1 * GIB)),
         chunk_size_bytes=int(storage_raw.get("chunk_size_bytes", 4 * 1024**2)),
+        compression=compression,
     )
     if storage.limit_bytes <= 0 or storage.chunk_size_bytes <= 0:
         raise ValueError("Storage limit and chunk size must be positive")
@@ -370,10 +430,26 @@ def update_runtime_settings(
     smb_enabled: bool | str | int | None = None,
     smb_username: str | None = None,
     smb_password: str | None = None,
+    compression_mode: str | None = None,
+    compression_algorithm: str | None = None,
+    compression_level: str | int | None = None,
+    compression_min_savings_percent: str | float | None = None,
+    compression_skip_incompressible: bool | str | int | None = None,
 ) -> AppConfig:
     """Persist editable desktop settings and update the live config object."""
     normalized_type = normalize_client_type(client_type)
     storage_limit_bytes = validate_shared_storage_bytes(gib_to_bytes(shared_storage_gb))
+    new_compression_mode = normalize_compression_mode(compression_mode if compression_mode is not None else config.storage.compression.mode)
+    new_compression_algorithm = normalize_compression_algorithm(compression_algorithm if compression_algorithm is not None else config.storage.compression.algorithm)
+    new_compression_level = normalize_compression_level(compression_level if compression_level is not None else config.storage.compression.level, new_compression_mode)
+    new_min_savings_percent = normalize_min_savings_percent(
+        compression_min_savings_percent if compression_min_savings_percent is not None else config.storage.compression.min_savings_percent
+    )
+    new_skip_incompressible = (
+        bool(compression_skip_incompressible)
+        if compression_skip_incompressible is not None
+        else config.storage.compression.skip_incompressible
+    )
     relay_values = relay_server_urls if relay_server_urls is not None else relay_server_url
     relay_is_enabled = bool(relay_enabled) if relay_enabled is not None else bool(config.network.relay_urls)
     if relay_is_enabled:
@@ -404,6 +480,14 @@ def update_runtime_settings(
 
     raw["node"]["client_type"] = normalized_type
     raw["storage"]["limit_bytes"] = storage_limit_bytes
+    raw["storage"]["compression"] = {
+        "mode": new_compression_mode,
+        "algorithm": new_compression_algorithm,
+        "level": new_compression_level,
+        "min_savings_percent": new_min_savings_percent,
+        "min_savings_bytes": config.storage.compression.min_savings_bytes,
+        "skip_incompressible": new_skip_incompressible,
+    }
     raw["network"]["relay_url"] = DEFAULT_PUBLIC_RELAY_URL
     raw["network"]["relay_urls"] = normalized_relay_urls
     raw["network"]["relay_secret"] = normalized_relay_secret
@@ -414,6 +498,14 @@ def update_runtime_settings(
 
     config.node.client_type = normalized_type
     config.storage.limit_bytes = storage_limit_bytes
+    config.storage.compression = CompressionConfig(
+        mode=new_compression_mode,
+        algorithm=new_compression_algorithm,
+        level=new_compression_level,
+        min_savings_percent=new_min_savings_percent,
+        min_savings_bytes=config.storage.compression.min_savings_bytes,
+        skip_incompressible=new_skip_incompressible,
+    )
     config.network.relay_url = normalized_relay_urls[0] if normalized_relay_urls else DEFAULT_PUBLIC_RELAY_URL
     config.network.relay_urls = normalized_relay_urls
     config.network.relay_secret = normalized_relay_secret

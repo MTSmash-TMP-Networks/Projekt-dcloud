@@ -82,6 +82,13 @@ storage:
   limit_bytes: 53687091200 # freigegebener Speicher, Minimum 5 GiB
   min_free_bytes: 1073741824
   chunk_size_bytes: 4194304
+  compression:
+    mode: auto # auto, fast, balanced, max, off
+    algorithm: zlib # zstd optional, wenn alle Peers das Paket zstandard haben
+    level: 1
+    min_savings_percent: 3.0
+    min_savings_bytes: 65536
+    skip_incompressible: true
 web:
   host: 0.0.0.0 # Peer-API im LAN erreichbar; lokal weiter über 127.0.0.1 nutzbar
   port: 8787
@@ -211,7 +218,7 @@ Damit entsteht eine Baumstruktur ohne zentralen Server: Außen sichtbare Nodes k
 2. Benutzer wählt eine Datei im Desktop-Explorer aus.
 3. Der Client speichert die Datei temporär unter `storage/tmp/`.
 4. `ChunkStore` liest die Datei in Blöcken der konfigurierten `chunk_size_bytes`; wenn die aktiven Speicherziele nur per PHP-Relay/Forwarder erreichbar sind, wird automatisch die kleinere `network.relay_chunk_size_bytes` verwendet.
-5. Jeder Chunk wird komprimiert, danach wird SHA-256 über die tatsächlich gespeicherten Bytes berechnet.
+5. Jeder Chunk wird adaptiv komprimiert: `auto` überspringt bereits komprimierte Dateitypen und high-entropy Stichproben, nutzt standardmäßig kompatibles `zlib`; `zstd` kann optional aktiviert werden, wenn alle Speicher-Peers das Python-Paket `zstandard` haben. Komprimierte Bytes werden nur übernommen, wenn mindestens die konfigurierte Mindest-Ersparnis erreicht wird. Danach wird SHA-256 über die tatsächlich gespeicherten Bytes berechnet.
 6. Der Upload-Plan rotiert die Chunks über den lokalen Knoten und alle aktiven Speicher-Peers. Sobald mindestens ein Speicher-Peer vorhanden ist, wird jeder Chunk nach Möglichkeit mit zwei Speicherorten im Manifest abgelegt. Remote-Ziele erhalten den komprimierten Chunk über `/api/p2p/chunks/<hash>`.
 7. Kann ein Remote-Peer den Chunk nicht annehmen, wird der nächste Zielknoten versucht. Falls die gewünschte Redundanz nicht erreicht wird, wird lokal eine Sicherheitskopie gespeichert und im Manifest als Fallback markiert.
 8. `ManifestStore` erstellt ein signiertes Manifest mit Datei-Metadaten, Chunk-Liste, konkreten Chunk-Locations, Placement-Status und Access-Liste.
@@ -219,6 +226,11 @@ Damit entsteht eine Baumstruktur ohne zentralen Server: Außen sichtbare Nodes k
 10. Beim Löschen einer eigenen Datei sendet der Besitzer eine signierte Delete-Nachricht an alle Peers, die laut Manifest Chunks oder Freigaben halten könnten. Diese Peers löschen das Manifest und alle nicht mehr referenzierten Chunks. Offline-Peers werden später nachsynchronisiert.
 
 Die Upload-UI zeigt dabei zwei Ebenen: zuerst den Browser-Transfer zur lokalen Web-App und anschließend die lokale Serververarbeitung. Sobald das lokale Manifest geschrieben ist, ist der Upload für den Nutzer abgeschlossen; der gleiche Statusdialog zeigt danach weiter die asynchrone Hintergrund-Replikation an, ohne den Upload-Request oder das Dashboard zu blockieren.
+
+
+### Komprimierung
+
+Die Einstellung `storage.compression` steuert neue Uploads. Alte Manifest-Chunks bleiben kompatibel: `zlib` und unkomprimierte Chunks werden weiterhin gelesen, `zstd`-Chunks benötigen das optionale Python-Paket `zstandard`. Empfohlen ist `mode: auto` und `algorithm: zlib`; dadurch werden ZIP/MP4/JPG/PDF/ähnliche Dateien nicht unnötig komprimiert, während Text-, Log- und Office-artige Daten weiterhin Speicher sparen. `zstd` ist schneller/besser, sollte aber erst aktiviert werden, wenn alle Speicher-Peers das optionale Paket installiert haben. Auf OpenWrt bleibt das Paket `zstandard` optional, damit das Autoupdate nicht an nativen Builds scheitert.
 
 ## Storage-Layout
 

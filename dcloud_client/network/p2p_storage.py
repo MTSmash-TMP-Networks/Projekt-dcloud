@@ -1006,7 +1006,11 @@ def distribute_file_chunks(
                 total_chunks=total_chunks,
                 raw_bytes_processed=result.raw_bytes,
             )
-            stored_data, compression = chunk_store.prepare_chunk_data(raw)
+            stored_data, compression = chunk_store.prepare_chunk_data(
+                raw,
+                file_name=getattr(source_path, "name", None),
+                file_size=source_size,
+            )
             digest = chunk_store.digest_for_stored_data(stored_data)
             locations: list[str] = []
 

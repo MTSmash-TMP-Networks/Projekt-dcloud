@@ -737,6 +737,36 @@
           </section>
 
           <section class="settings-panel">
+            <h3>Komprimierung</h3>
+            <label for="settings-compression-mode">Modus</label>
+            <select id="settings-compression-mode" name="compression_mode">
+              <option value="auto" {% if settings_json.compressionMode == 'auto' %}selected{% endif %}>Automatisch</option>
+              <option value="fast" {% if settings_json.compressionMode == 'fast' %}selected{% endif %}>Schnell</option>
+              <option value="balanced" {% if settings_json.compressionMode == 'balanced' %}selected{% endif %}>Ausgewogen</option>
+              <option value="max" {% if settings_json.compressionMode == 'max' %}selected{% endif %}>Maximal</option>
+              <option value="off" {% if settings_json.compressionMode == 'off' %}selected{% endif %}>Aus</option>
+            </select>
+            <label for="settings-compression-algorithm">Algorithmus</label>
+            <select id="settings-compression-algorithm" name="compression_algorithm">
+              <option value="auto" {% if settings_json.compressionAlgorithm == 'auto' %}selected{% endif %}>Auto: zlib-kompatibel</option>
+              <option value="zstd" {% if settings_json.compressionAlgorithm == 'zstd' %}selected{% endif %}>Zstandard (optional)</option>
+              <option value="zlib" {% if settings_json.compressionAlgorithm == 'zlib' %}selected{% endif %}>zlib kompatibel</option>
+              <option value="none" {% if settings_json.compressionAlgorithm == 'none' %}selected{% endif %}>Keine Komprimierung</option>
+            </select>
+            <div class="settings-inline">
+              <label for="settings-compression-level">Level</label>
+              <input id="settings-compression-level" type="number" name="compression_level" min="1" max="22" step="1" value="{{ settings_json.compressionLevel }}">
+              <label for="settings-compression-min-savings">Mindest-Ersparnis</label>
+              <input id="settings-compression-min-savings" type="number" name="compression_min_savings_percent" min="0" max="30" step="0.5" value="{{ settings_json.compressionMinSavingsPercent }}">
+              <span>%</span>
+            </div>
+            <label style="display:flex;align-items:center;gap:.45rem;">
+              <input id="settings-compression-skip" type="checkbox" name="compression_skip_incompressible" {% if settings_json.compressionSkipIncompressible %}checked{% endif %}> Bereits komprimierte Dateien automatisch überspringen
+            </label>
+            <p class="settings-note">Aktiv: <strong id="settings-compression-active">{{ settings_json.compressionActiveLabel }}</strong>. Auto prüft Dateityp und Stichprobe, damit große Videos, ZIPs, PDFs usw. nicht unnötig CPU kosten. Zstd nur aktivieren, wenn alle Speicher-Peers das Paket zstandard haben.</p>
+          </section>
+
+          <section class="settings-panel">
             <h3>PHP-Vermittlung / Forwarder für Internet-Peers</h3>
             <label style="display:flex;align-items:center;gap:.45rem;">
               <input id="settings-relay-enabled" type="checkbox" name="relay_enabled" {% if settings_json.relayEnabled %}checked{% endif %}> PHP-Vermittlung aktivieren
@@ -1228,6 +1258,18 @@
           storageGbInput.min = String(settings.minSharedStorageGb || 5);
           storageGbInput.value = String(Math.max(settings.minSharedStorageGb || 5, Math.round(Number(settings.sharedStorageGb || 5))));
         }
+        const compressionModeInput = document.getElementById("settings-compression-mode");
+        if(compressionModeInput && document.activeElement !== compressionModeInput) compressionModeInput.value = settings.compressionMode || "auto";
+        const compressionAlgorithmInput = document.getElementById("settings-compression-algorithm");
+        if(compressionAlgorithmInput && document.activeElement !== compressionAlgorithmInput) compressionAlgorithmInput.value = settings.compressionAlgorithm || "auto";
+        const compressionLevelInput = document.getElementById("settings-compression-level");
+        if(compressionLevelInput && document.activeElement !== compressionLevelInput) compressionLevelInput.value = String(settings.compressionLevel || 1);
+        const compressionSavingsInput = document.getElementById("settings-compression-min-savings");
+        if(compressionSavingsInput && document.activeElement !== compressionSavingsInput) compressionSavingsInput.value = String(settings.compressionMinSavingsPercent ?? 3);
+        const compressionSkipInput = document.getElementById("settings-compression-skip");
+        if(compressionSkipInput && document.activeElement !== compressionSkipInput) compressionSkipInput.checked = settings.compressionSkipIncompressible !== false;
+        const compressionActive = document.getElementById("settings-compression-active");
+        if(compressionActive) compressionActive.textContent = settings.compressionActiveLabel || `${settings.compressionMode || "auto"} · ${settings.compressionAlgorithm || "auto"}`;
         const relayUrlInput = document.getElementById("settings-relay-url");
         if(relayUrlInput) relayUrlInput.value = settings.fixedRelayUrlsText || settings.fixedRelayUrl || settings.relayUrl || "";
         const relayUrlsInput = document.getElementById("settings-relay-urls");

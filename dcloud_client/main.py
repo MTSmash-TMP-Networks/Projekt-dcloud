@@ -68,6 +68,12 @@ def main() -> None:
         limit_bytes=config.storage.limit_bytes,
         min_free_bytes=config.storage.min_free_bytes,
         chunk_size=config.storage.chunk_size_bytes,
+        compression_mode=config.storage.compression.mode,
+        compression_algorithm=config.storage.compression.algorithm,
+        compression_level=config.storage.compression.level,
+        compression_min_savings_percent=config.storage.compression.min_savings_percent,
+        compression_min_savings_bytes=config.storage.compression.min_savings_bytes,
+        compression_skip_incompressible=config.storage.compression.skip_incompressible,
     )
     chunk_store.initialize()
 
