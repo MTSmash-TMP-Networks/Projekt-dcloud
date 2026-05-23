@@ -39,6 +39,7 @@ from ..identity import NodeIdentity
 from ..manifests import DEFAULT_FOLDER, FileManifest, ManifestStore, sanitize_folder_path
 from ..network.http_relay import HttpRelayClient, HttpRelayTransport, RelayHttpResponse, RELAY_HOST
 from ..network.p2p_storage import (
+    CHUNK_UPLOAD_PACK_MAGIC,
     P2PStorageClient,
     build_manifest_deletion,
     build_manifest_revocation,
@@ -1977,6 +1978,65 @@ def create_app(
             _sync_peer_connector_settings()
             return jsonify({"ok": True, "hash": info.hash, "stored_size": info.stored_size, "state": state_payload()})
         except (ValueError, StorageError) as exc:
+            return jsonify({"ok": False, "message": str(exc), "state": state_payload()}), 400
+
+    def _parse_chunk_upload_pack(body: bytes) -> list[dict[str, Any]]:
+        if not body.startswith(CHUNK_UPLOAD_PACK_MAGIC):
+            raise StorageError("Ungültiges Chunk-Upload-Pack")
+        offset = len(CHUNK_UPLOAD_PACK_MAGIC)
+        chunks: list[dict[str, Any]] = []
+        while offset < len(body):
+            line_end = body.find(b"\n", offset)
+            if line_end < 0:
+                raise StorageError("Chunk-Upload-Pack ist unvollständig")
+            line = body[offset:line_end].decode("ascii", errors="strict").strip()
+            offset = line_end + 1
+            if not line:
+                continue
+            parts = line.split(" ")
+            if len(parts) != 5:
+                raise StorageError("Chunk-Upload-Pack enthält ungültige Metadaten")
+            digest, original_size_raw, stored_size_raw, index_raw, compression_raw = parts
+            original_size = int(original_size_raw)
+            stored_size = int(stored_size_raw)
+            index = int(index_raw)
+            if original_size <= 0 or stored_size < 0:
+                raise StorageError("Chunk-Upload-Pack enthält ungültige Größen")
+            end = offset + stored_size
+            if end > len(body):
+                raise StorageError("Chunk-Upload-Pack Nutzdaten sind unvollständig")
+            chunks.append(
+                {
+                    "digest": digest,
+                    "original_size": original_size,
+                    "stored_size": stored_size,
+                    "index": index,
+                    "compression": None if compression_raw == "-" else compression_raw,
+                    "data": body[offset:end],
+                }
+            )
+            offset = end
+        if not chunks:
+            raise StorageError("Chunk-Upload-Pack enthält keine Chunks")
+        return chunks
+
+    @app.post("/api/p2p/chunks/batch/pack/upload")
+    def api_p2p_put_chunks_pack() -> Response:
+        try:
+            chunks = _parse_chunk_upload_pack(request.get_data())
+            stored: list[str] = []
+            for item in chunks:
+                info = chunk_store.write_stored_chunk(
+                    item["data"],
+                    original_size=int(item["original_size"]),
+                    index=int(item["index"]),
+                    compression=item.get("compression"),
+                    digest=str(item["digest"]),
+                )
+                stored.append(info.hash)
+            _sync_peer_connector_settings()
+            return jsonify({"ok": True, "stored": stored, "stored_count": len(stored), "state": state_payload()})
+        except (ValueError, TypeError, UnicodeDecodeError, StorageError) as exc:
             return jsonify({"ok": False, "message": str(exc), "state": state_payload()}), 400
 
     @app.post("/api/p2p/chunks/batch")
