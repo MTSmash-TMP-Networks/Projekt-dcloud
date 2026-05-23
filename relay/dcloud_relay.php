@@ -707,6 +707,7 @@ function dcloud_sanitize_peer($peer, string $nodeId): array {
         'relay_urls' => $relayUrls,
         'relay_tokens' => dcloud_sanitize_relay_tokens($peer['relay_tokens'] ?? []),
         'external_ip' => substr((string)($peer['external_ip'] ?? $peer['public_ip'] ?? ''), 0, 128),
+        'internal_ip' => substr((string)($peer['internal_ip'] ?? $peer['local_ip'] ?? $peer['lan_ip'] ?? $peer['private_ip'] ?? ''), 0, 128),
         'relay_seen_at' => time(),
         'via_relay' => true,
     ];
@@ -765,7 +766,7 @@ function dcloud_register(array $input): void {
         $existing = isset($peers[$nodeId]) && is_array($peers[$nodeId]) ? $peers[$nodeId] : [];
         $sanitized = dcloud_sanitize_peer($peer, $nodeId);
 
-        foreach (['public_key', 'client_type', 'shared_storage_bytes', 'free_storage_bytes', 'accepts_peer_storage', 'relay_url', 'relay_urls', 'relay_tokens', 'web_port', 'udp_port', 'external_ip'] as $key) {
+        foreach (['public_key', 'client_type', 'shared_storage_bytes', 'free_storage_bytes', 'accepts_peer_storage', 'relay_url', 'relay_urls', 'relay_tokens', 'web_port', 'udp_port', 'external_ip', 'internal_ip'] as $key) {
             $newValue = $sanitized[$key] ?? null;
             $emptyNewValue = $newValue === null || $newValue === '' || $newValue === [] || $newValue === 0 || $newValue === false;
             if ($emptyNewValue && array_key_exists($key, $existing)) {

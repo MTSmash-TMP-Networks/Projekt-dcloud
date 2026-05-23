@@ -98,6 +98,22 @@ def build_folder_tree(manifests: list[FileManifest], folders: list[str] | None =
     ]
 
 
+
+def _best_internal_advertise_ip(preferred_host: str) -> str:
+    """Return a LAN-reachable source IP for relay metadata when possible."""
+    host = (preferred_host or "").strip()
+    if host and host not in {"0.0.0.0", "::", ""}:
+        return host
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+            sock.connect(("8.8.8.8", 80))
+            ip = str(sock.getsockname()[0]).strip()
+            if ip and ip != "0.0.0.0":
+                return ip
+    except OSError:
+        pass
+    return host or "127.0.0.1"
+
 def create_app(
     config: AppConfig,
     identity: NodeIdentity,
@@ -673,7 +689,7 @@ def create_app(
                         "shared_storage_bytes": config.storage.limit_bytes,
                         "free_storage_bytes": chunk_store.stats().free_limit_bytes,
                         "accepts_peer_storage": _accepts_peer_storage(_list_active_peers()),
-                        "internal_ip": active_host,
+                        "internal_ip": _best_internal_advertise_ip(active_host),
                     },
                 )
                 relay_clients[desired_url] = relay_client
