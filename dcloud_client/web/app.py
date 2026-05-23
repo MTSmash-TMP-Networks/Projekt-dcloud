@@ -130,7 +130,8 @@ def create_app(
     disabled_peer_lock = threading.RLock()
     disabled_peers_path = chunk_store.root / "disabled_peers.json"
     disabled_peers: dict[str, dict[str, Any]] = {}
-    chat_messages: dict[str, deque[dict[str, Any]]] = defaultdict(lambda: deque(maxlen=120))
+    chat_messages: dict[str, deque[dict[str, Any]]] = defaultdict(lambda: deque(maxlen=240))
+    chat_unread: dict[str, int] = defaultdict(int)
     replication_repair_lock = threading.Lock()
     last_replication_repair_at = 0.0
     replication_queue: deque[dict[str, Any]] = deque()
@@ -1372,26 +1373,103 @@ def create_app(
             limit = 12
         return jsonify({"uploads": upload_progress.list_recent(include_finished=include_finished, limit=limit)})
 
+    def _chat_summary_payload() -> dict[str, Any]:
+        peers = _list_active_peers()
+        conversations = []
+        total_unread = 0
+        for peer in peers:
+            messages = list(chat_messages.get(peer.node_id, []))
+            last_message = messages[-1] if messages else None
+            unread = int(chat_unread.get(peer.node_id, 0))
+            total_unread += unread
+            conversations.append({
+                "peer_id": peer.node_id,
+                "display_name": peer.to_dict().get("display_name") or peer.name or peer.node_id[:12],
+                "unread": unread,
+                "last_message": last_message,
+            })
+        return {"ok": True, "total_unread": total_unread, "conversations": conversations}
+
+    def _safe_chat_attachment(payload: dict[str, Any], peer_id: str) -> dict[str, Any] | None:
+        attachment = payload.get("attachment")
+        if not isinstance(attachment, dict):
+            return None
+        kind = str(attachment.get("kind", "")).strip().lower()
+        if kind == "image":
+            name = str(attachment.get("name", "Bild")).strip()[:120] or "Bild"
+            mime = str(attachment.get("mime", "image/png")).strip()[:80] or "image/png"
+            data_url = str(attachment.get("data_url", "")).strip()
+            if not data_url.startswith("data:image/") or len(data_url) > 4_500_000:
+                raise StorageError("Bildanhang ist zu groß oder ungültig. Maximal ca. 3 MiB pro Chat-Bild.")
+            return {"kind": "image", "name": name, "mime": mime, "data_url": data_url}
+        if kind == "file":
+            manifest_id = str(attachment.get("manifest_id", "")).strip()
+            if not manifest_id:
+                raise StorageError("Dateianhang fehlt")
+            manifest = manifest_store.load(manifest_id)
+            if not manifest_store.may_access(manifest, identity.node_id):
+                raise StorageError("Datei ist auf diesem Knoten nicht sichtbar")
+            if manifest.owner_node_id == identity.node_id:
+                manifest = manifest_store.set_shared(manifest.manifest_id, True, identity, shared_with=[peer_id])
+                peer = next((item for item in _list_active_peers() if item.node_id == peer_id), None)
+                if peer is not None:
+                    p2p_client.post_manifest(peer, manifest)
+            return {
+                "kind": "file",
+                "manifest_id": manifest.manifest_id,
+                "file_name": manifest.file_name,
+                "file_size": manifest.file_size,
+                "download_url": url_for("download", manifest_id=manifest.manifest_id),
+            }
+        raise StorageError("Unbekannter Chat-Anhang")
+
+    @app.get("/api/chat/summary")
+    def api_chat_summary() -> Response:
+        return jsonify(_chat_summary_payload())
+
     @app.get("/api/chat")
     def api_chat_list() -> Response:
         peer_id = str(request.args.get("peer_id", "")).strip()
         if not peer_id:
             return jsonify({"ok": False, "message": "peer_id fehlt"}), 400
-        return jsonify({"ok": True, "peerId": peer_id, "messages": list(chat_messages.get(peer_id, []))})
+        chat_unread[peer_id] = 0
+        return jsonify({"ok": True, "peerId": peer_id, "messages": list(chat_messages.get(peer_id, [])), "summary": _chat_summary_payload()})
+
+    @app.post("/api/chat/read")
+    def api_chat_mark_read() -> Response:
+        payload = request.get_json(silent=True) or {}
+        peer_id = str(payload.get("peer_id", "")).strip()
+        if peer_id:
+            chat_unread[peer_id] = 0
+        return jsonify(_chat_summary_payload())
 
     @app.post("/api/chat/send")
     def api_chat_send() -> Response:
         payload = request.get_json(silent=True) or {}
         peer_id = str(payload.get("peer_id", "")).strip()
         text = str(payload.get("text", "")).strip()
-        if not peer_id or not text:
-            return jsonify({"ok": False, "message": "peer_id und text sind erforderlich"}), 400
+        if not peer_id:
+            return jsonify({"ok": False, "message": "peer_id fehlt"}), 400
+        attachment = None
+        try:
+            attachment = _safe_chat_attachment(payload, peer_id)
+        except StorageError as exc:
+            return jsonify({"ok": False, "message": str(exc)}), 400
+        if not text and not attachment:
+            return jsonify({"ok": False, "message": "Nachricht oder Anhang erforderlich"}), 400
         peers = _list_active_peers()
         peer = next((item for item in peers if item.node_id == peer_id), None)
         if peer is None:
             return jsonify({"ok": False, "message": "Peer ist nicht aktiv erreichbar"}), 404
         now = datetime.now(timezone.utc).isoformat()
-        outgoing = {"from_node_id": identity.node_id, "to_node_id": peer_id, "text": text, "created_at": now}
+        outgoing = {
+            "id": uuid4().hex,
+            "from_node_id": identity.node_id,
+            "to_node_id": peer_id,
+            "text": text,
+            "attachment": attachment,
+            "created_at": now,
+        }
         transfer = p2p_client._post_json_to_peer(  # noqa: SLF001
             peer,
             path="/api/p2p/chat",
@@ -1403,7 +1481,7 @@ def create_app(
             return jsonify({"ok": False, "message": transfer.message or "Chat konnte nicht zugestellt werden"}), 502
         local_event = {**outgoing, "direction": "out"}
         chat_messages[peer_id].append(local_event)
-        return jsonify({"ok": True, "message": local_event})
+        return jsonify({"ok": True, "message": local_event, "summary": _chat_summary_payload()})
 
     def _requested_storage_peers() -> list[Any]:
         available_peers = _eligible_storage_peers()
@@ -2878,18 +2956,26 @@ def create_app(
         from_node_id = str(payload.get("from_node_id", "")).strip()
         to_node_id = str(payload.get("to_node_id", "")).strip()
         text = str(payload.get("text", "")).strip()
-        if not from_node_id or not to_node_id or not text:
+        attachment = payload.get("attachment") if isinstance(payload.get("attachment"), dict) else None
+        if not from_node_id or not to_node_id or (not text and not attachment):
             return jsonify({"ok": False, "message": "Ungültige Chat-Nachricht"}), 400
         if to_node_id != identity.node_id:
             return jsonify({"ok": False, "message": "Nachricht war nicht für diesen Peer bestimmt"}), 400
+        if attachment and attachment.get("kind") == "image":
+            data_url = str(attachment.get("data_url", ""))
+            if not data_url.startswith("data:image/") or len(data_url) > 4_500_000:
+                return jsonify({"ok": False, "message": "Bildanhang ist zu groß oder ungültig"}), 400
         event = {
+            "id": str(payload.get("id") or uuid4().hex),
             "from_node_id": from_node_id,
             "to_node_id": to_node_id,
             "text": text,
+            "attachment": attachment,
             "created_at": datetime.now(timezone.utc).isoformat(),
             "direction": "in",
         }
         chat_messages[from_node_id].append(event)
+        chat_unread[from_node_id] += 1
         return jsonify({"ok": True})
 
     @app.post("/files/<manifest_id>/delete")

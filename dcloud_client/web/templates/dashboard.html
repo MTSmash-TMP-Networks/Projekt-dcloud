@@ -97,6 +97,7 @@
       z-index:1;
     }
     .desk-item{
+      position:relative;
       width:var(--tile-w);
       height:var(--tile-h);
       display:flex;
@@ -394,10 +395,27 @@
     .chat-peer-btn.active, .chat-peer-btn:hover{ background:rgba(255,255,255,.78); border-color:rgba(91,144,231,.28); }
     .chat-main{ display:flex; flex-direction:column; min-height:0; }
     .chat-messages{ flex:1; overflow:auto; padding:14px; background:rgba(248,251,255,.72); }
-    .chat-msg{ margin-bottom:10px; max-width:78%; padding:9px 11px; border-radius:14px; background:#fff; border:1px solid rgba(136,166,212,.28); box-shadow:0 8px 18px rgba(17,54,104,.08); }
-    .chat-msg.out{ margin-left:auto; background:#e8f2ff; }
-    .chat-form{ display:flex; gap:9px; border-top:1px solid var(--line); padding:11px; background:rgba(255,255,255,.78); }
-    .chat-input{ flex:1; border:1px solid rgba(112,142,190,.44); border-radius:13px; padding:.6rem .75rem; background:#fff; }
+    .chat-msg{ margin-bottom:10px; max-width:78%; padding:9px 11px; border-radius:18px; background:#fff; border:1px solid rgba(136,166,212,.28); box-shadow:0 8px 18px rgba(17,54,104,.08); white-space:pre-wrap; }
+    .chat-msg.out{ margin-left:auto; background:linear-gradient(135deg,#e8f2ff,#d9ebff); }
+    .chat-meta{ display:block; margin-top:5px; font-size:.72rem; color:#668; white-space:nowrap; }
+    .chat-attachment{ margin-top:8px; border-radius:14px; overflow:hidden; border:1px solid rgba(91,144,231,.24); background:rgba(255,255,255,.62); }
+    .chat-attachment img{ display:block; max-width:260px; max-height:220px; object-fit:cover; }
+    .chat-file-card{ display:flex; gap:9px; align-items:center; padding:9px 10px; text-decoration:none; color:#173053; }
+    .chat-file-card strong{ display:block; font-size:.92rem; }
+    .chat-file-card small{ color:#65728a; }
+    .chat-form{ display:flex; align-items:center; gap:8px; border-top:1px solid var(--line); padding:10px; background:rgba(255,255,255,.78); position:relative; }
+    .chat-input{ flex:1; border:1px solid rgba(112,142,190,.44); border-radius:16px; padding:.68rem .82rem; background:#fff; min-width:0; }
+    .chat-tool-btn{ width:38px; height:38px; border:1px solid rgba(112,142,190,.35); border-radius:14px; background:rgba(255,255,255,.78); cursor:pointer; box-shadow:0 8px 18px rgba(17,54,104,.08); }
+    .chat-tool-btn:hover{ transform:translateY(-1px); background:#fff; }
+    .chat-emoji-picker{ position:absolute; left:10px; bottom:58px; display:none; grid-template-columns:repeat(8, 34px); gap:5px; padding:10px; border-radius:18px; border:1px solid rgba(116,148,196,.35); background:rgba(255,255,255,.96); box-shadow:0 22px 50px rgba(22,56,112,.20); z-index:30; }
+    .chat-emoji-picker.open{ display:grid; }
+    .chat-emoji-picker button{ border:0; background:transparent; font-size:1.25rem; border-radius:10px; padding:4px; cursor:pointer; }
+    .chat-emoji-picker button:hover{ background:#eef5ff; }
+    .chat-peer-btn{ position:relative; }
+    .chat-peer-name{ display:block; font-weight:700; }
+    .chat-peer-preview{ display:block; font-size:.78rem; color:#667899; margin-top:2px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+    .badge-dot{ position:absolute; min-width:20px; height:20px; right:8px; top:8px; padding:0 5px; border-radius:999px; background:#e81123; color:#fff; font-size:.72rem; font-weight:800; display:inline-flex; align-items:center; justify-content:center; box-shadow:0 0 0 3px rgba(255,255,255,.88); }
+    .app-icon .badge-dot{ right:10px; top:8px; }
 
     .transfer-panel{
       position:absolute;
@@ -504,7 +522,7 @@
         <span class="glyph">⚙️</span><span class="label">Einstellungen</span>
       </button>
       <button class="desk-item app-icon" data-app="chat" type="button">
-        <span class="glyph">💬</span><span class="label">Peer-Chat</span>
+        <span class="glyph">💬</span><span class="label">Peer-Chat</span><span class="badge-dot" id="chat-app-badge" hidden>1</span>
       </button>
     </div>
 
@@ -740,7 +758,12 @@
           <div class="chat-main">
             <div class="chat-messages" id="chat-messages"></div>
             <form class="chat-form" id="chat-form">
-              <input class="chat-input" id="chat-input" placeholder="Nachricht eingeben…" />
+              <div class="chat-emoji-picker" id="chat-emoji-picker" aria-label="Emoji auswählen"></div>
+              <button class="chat-tool-btn" id="chat-emoji-btn" type="button" title="Emoji auswählen">😊</button>
+              <button class="chat-tool-btn" id="chat-image-btn" type="button" title="Bild senden">🖼️</button>
+              <button class="chat-tool-btn" id="chat-file-btn" type="button" title="dcloud-Datei teilen">📎</button>
+              <input type="file" id="chat-image-input" accept="image/*" hidden />
+              <input class="chat-input" id="chat-input" placeholder="Nachricht eingeben…" autocomplete="off" />
               <button class="explorer-btn" type="submit">Senden</button>
             </form>
           </div>
@@ -993,6 +1016,8 @@
         chat:"💬 Peer-Chat"
       };
       let activeChatPeerId = "";
+      let chatSummary = { total_unread: 0, conversations: [] };
+      let pendingChatAttachment = null;
       let transferExpanded = true;
 
       function normalizeFolderPath(value){
@@ -1087,6 +1112,38 @@
         if(Number.isNaN(parsed.getTime())) return String(value);
         return parsed.toLocaleString("de-DE");
       }
+      function flattenVisibleFiles(){
+        const files = [];
+        (appState.folderTree || []).forEach(folder => {
+          (folder.files || []).forEach(file => files.push(file));
+        });
+        return files;
+      }
+      function chatPreview(msg){
+        if(!msg) return "Noch keine Nachrichten";
+        if(msg.attachment?.kind === "image") return "🖼️ Bild" + (msg.text ? ` · ${msg.text}` : "");
+        if(msg.attachment?.kind === "file") return "📎 " + (msg.attachment.file_name || "Datei");
+        return msg.text || "Nachricht";
+      }
+      function updateChatBadge(total){
+        const badge = document.getElementById("chat-app-badge");
+        if(!badge) return;
+        const count = Number(total || 0);
+        badge.hidden = count <= 0;
+        badge.textContent = count > 99 ? "99+" : String(count);
+      }
+      async function refreshChatSummary(){
+        try{
+          const response = await fetch("/api/chat/summary", { cache:"no-store" });
+          const data = await response.json();
+          if(data.ok){
+            chatSummary = data;
+            updateChatBadge(data.total_unread);
+            renderChatPeers();
+          }
+        }catch(error){}
+      }
+
       function showToast(message, type="success"){
         const wrap = document.getElementById("notifications");
         const toast = document.createElement("div");
@@ -1354,17 +1411,53 @@
         const list = document.getElementById("chat-peer-list");
         if(!list) return;
         const peers = appState.peers || [];
+        const summaryByPeer = new Map((chatSummary.conversations || []).map(item => [item.peer_id, item]));
         list.innerHTML = "";
         if(!peers.length){ list.textContent = "Keine aktiven Peers."; return; }
         if(!activeChatPeerId || !peers.some(peer => peer.node_id === activeChatPeerId)) activeChatPeerId = peers[0].node_id;
         peers.forEach(peer => {
+          const summary = summaryByPeer.get(peer.node_id) || {};
           const btn = document.createElement("button");
           btn.type = "button";
           btn.className = "chat-peer-btn" + (activeChatPeerId === peer.node_id ? " active" : "");
-          btn.textContent = peer.display_name || peer.name || String(peer.node_id || "Peer").slice(0, 12);
-          btn.onclick = () => { activeChatPeerId = peer.node_id; renderChatPeers(); loadChatMessages(); };
+          const name = document.createElement("span");
+          name.className = "chat-peer-name";
+          name.textContent = peer.display_name || peer.name || String(peer.node_id || "Peer").slice(0, 12);
+          const preview = document.createElement("span");
+          preview.className = "chat-peer-preview";
+          preview.textContent = chatPreview(summary.last_message);
+          btn.append(name, preview);
+          const unread = Number(summary.unread || 0);
+          if(unread > 0){
+            const badge = document.createElement("span");
+            badge.className = "badge-dot";
+            badge.textContent = unread > 99 ? "99+" : String(unread);
+            btn.appendChild(badge);
+          }
+          btn.onclick = async () => { activeChatPeerId = peer.node_id; renderChatPeers(); await loadChatMessages(); };
           list.appendChild(btn);
         });
+      }
+
+      function renderChatAttachment(bubble, attachment){
+        if(!attachment) return;
+        const wrap = document.createElement("div");
+        wrap.className = "chat-attachment";
+        if(attachment.kind === "image") {
+          const img = document.createElement("img");
+          img.src = attachment.data_url || "";
+          img.alt = attachment.name || "Chat-Bild";
+          wrap.appendChild(img);
+        } else if(attachment.kind === "file") {
+          const link = document.createElement("a");
+          link.className = "chat-file-card";
+          link.href = attachment.download_url || `/download/${encodeURIComponent(attachment.manifest_id || "")}`;
+          link.innerHTML = `<span>📎</span><span><strong></strong><small></small></span>`;
+          link.querySelector("strong").textContent = attachment.file_name || "dcloud-Datei";
+          link.querySelector("small").textContent = formatBytes(attachment.file_size || 0) + " · Herunterladen";
+          wrap.appendChild(link);
+        }
+        bubble.appendChild(wrap);
       }
 
       async function loadChatMessages(){
@@ -1373,11 +1466,21 @@
         const response = await fetch(`/api/chat?peer_id=${encodeURIComponent(activeChatPeerId)}`, { cache:"no-store" });
         const data = await response.json();
         if(!data.ok || !box) return;
+        if(data.summary){ chatSummary = data.summary; updateChatBadge(data.summary.total_unread); renderChatPeers(); }
         box.innerHTML = "";
         (data.messages || []).forEach(msg => {
           const bubble = document.createElement("div");
           bubble.className = "chat-msg" + (msg.direction === "out" ? " out" : "");
-          bubble.textContent = msg.text || "";
+          if(msg.text){
+            const text = document.createElement("div");
+            text.textContent = msg.text || "";
+            bubble.appendChild(text);
+          }
+          renderChatAttachment(bubble, msg.attachment);
+          const meta = document.createElement("span");
+          meta.className = "chat-meta";
+          meta.textContent = (msg.direction === "out" ? "Gesendet" : "Empfangen") + " · " + formatDateTime(msg.created_at);
+          bubble.appendChild(meta);
           box.appendChild(bubble);
         });
         box.scrollTop = box.scrollHeight;
@@ -2650,11 +2753,11 @@ ${file.name}`)) return;
         event.preventDefault();
         const input = document.getElementById("chat-input");
         const text = String(input.value || "").trim();
-        if(!text || !activeChatPeerId) return;
+        if((!text && !pendingChatAttachment) || !activeChatPeerId) return;
         const response = await fetch("/api/chat/send", {
           method:"POST",
           headers:{ "Content-Type":"application/json", "Accept":"application/json" },
-          body: JSON.stringify({ peer_id: activeChatPeerId, text })
+          body: JSON.stringify({ peer_id: activeChatPeerId, text, attachment: pendingChatAttachment })
         });
         const payload = await response.json();
         if(!response.ok || !payload.ok){
@@ -2662,7 +2765,50 @@ ${file.name}`)) return;
           return;
         }
         input.value = "";
+        pendingChatAttachment = null;
         await loadChatMessages();
+      });
+      const emojiPicker = document.getElementById("chat-emoji-picker");
+      const emojis = "😀 😃 😄 😁 😊 😍 😎 🤩 😂 😉 👍 👌 🙌 👏 ❤️ 🔥 🎉 🚀 ✅ ❗ ❓ 📎 🖼️".split(" ");
+      emojis.forEach(emoji => {
+        const btn = document.createElement("button");
+        btn.type = "button";
+        btn.textContent = emoji;
+        btn.addEventListener("click", () => {
+          const input = document.getElementById("chat-input");
+          input.value += emoji;
+          input.focus();
+          emojiPicker.classList.remove("open");
+        });
+        emojiPicker.appendChild(btn);
+      });
+      document.getElementById("chat-emoji-btn").addEventListener("click", () => emojiPicker.classList.toggle("open"));
+      document.getElementById("chat-image-btn").addEventListener("click", () => document.getElementById("chat-image-input").click());
+      document.getElementById("chat-image-input").addEventListener("change", event => {
+        const file = event.target.files && event.target.files[0];
+        if(!file) return;
+        if(file.size > 3 * 1024 * 1024){ showToast("Chat-Bilder sind auf ca. 3 MiB begrenzt", "warning"); return; }
+        const reader = new FileReader();
+        reader.onload = () => {
+          pendingChatAttachment = { kind:"image", name:file.name, mime:file.type || "image/png", data_url:String(reader.result || "") };
+          const input = document.getElementById("chat-input");
+          if(!input.value.trim()) input.value = "Bild";
+          showToast("Bild ist angehängt. Mit Senden verschicken.", "success");
+        };
+        reader.readAsDataURL(file);
+        event.target.value = "";
+      });
+      document.getElementById("chat-file-btn").addEventListener("click", () => {
+        const files = flattenVisibleFiles();
+        if(!files.length){ showToast("Keine dcloud-Dateien zum Teilen vorhanden", "warning"); return; }
+        const preview = files.slice(0, 20).map((file, index) => `${index + 1}: ${file.file_name} (${formatBytes(file.file_size)})`).join("\n");
+        const choice = window.prompt(`Welche dcloud-Datei teilen?\n${preview}\n\nNummer eingeben:`);
+        const index = Number(choice) - 1;
+        if(!Number.isInteger(index) || !files[index]) return;
+        pendingChatAttachment = { kind:"file", manifest_id:files[index].manifest_id };
+        const input = document.getElementById("chat-input");
+        if(!input.value.trim()) input.value = `Datei geteilt: ${files[index].file_name}`;
+        showToast("Datei wird beim Senden für den Peer freigegeben.", "success");
       });
       const settingsForm = document.getElementById("settings-form");
       const relayEnabledInput = document.getElementById("settings-relay-enabled");
@@ -2829,7 +2975,8 @@ ${file.name}`)) return;
       updateQueueDisplay();
       updateTaskbar();
       restorePersistedUploads().catch(() => {});
-      setInterval(() => { refreshState().catch(() => {}); if(!windows.chat.hidden) loadChatMessages().catch(() => {}); }, 5000);
+      refreshChatSummary().catch(() => {});
+      setInterval(() => { refreshState().catch(() => {}); refreshChatSummary().catch(() => {}); if(!windows.chat.hidden) loadChatMessages().catch(() => {}); }, 5000);
       setInterval(() => { refreshLogs().catch(() => {}); }, 15000);
     })();
   </script>
