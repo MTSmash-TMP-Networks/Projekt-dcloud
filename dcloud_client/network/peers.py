@@ -49,6 +49,7 @@ class Peer:
     web_port: int | None = None
     free_storage_bytes: int | None = None
     relay_url: str | None = None
+    public_ip: str | None = None
     last_seen: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 
     def endpoint_key(self) -> tuple[str, int, str | None]:
@@ -76,6 +77,7 @@ class Peer:
             "web_port": self.web_port,
             "free_storage_bytes": self.free_storage_bytes,
             "relay_url": self.relay_url,
+            "public_ip": self.public_ip,
             "transport": "relay" if self.host == "__relay__" else ("direct+relay" if self.relay_url else "direct"),
             "display_name": display_name_for_peer(self.node_id, self.name),
             "last_seen": self.last_seen.isoformat(),
@@ -142,6 +144,7 @@ class InMemoryPeerProvider:
                     peer.accepts_peer_storage if peer.accepts_peer_storage is not None else existing.accepts_peer_storage
                 )
                 peer.web_port = peer.web_port if peer.web_port is not None else existing.web_port
+                peer.public_ip = peer.public_ip if peer.public_ip is not None else existing.public_ip
                 peer.free_storage_bytes = (
                     peer.free_storage_bytes if peer.free_storage_bytes is not None else existing.free_storage_bytes
                 )

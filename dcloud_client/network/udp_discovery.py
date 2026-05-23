@@ -352,6 +352,7 @@ class UdpDiscoveryTransport:
             web_port=int(message["web_port"]) if str(message.get("web_port", "")).isdigit() else None,
             free_storage_bytes=int(message["free_storage_bytes"]) if str(message.get("free_storage_bytes", "")).isdigit() else None,
             relay_url=relay_urls[0] if relay_urls else None,
+            public_ip=str(message.get("public_ip") or "").strip() or None,
         )
 
     def _ingest_peer_payload(self, raw_peers: object, sender_node_id: str) -> list[Peer]:
@@ -400,6 +401,7 @@ class UdpDiscoveryTransport:
                 web_port=int(raw_peer["web_port"]) if str(raw_peer.get("web_port", "")).isdigit() else None,
                 free_storage_bytes=int(raw_peer["free_storage_bytes"]) if str(raw_peer.get("free_storage_bytes", "")).isdigit() else None,
                 relay_url=relay_urls[0] if relay_urls else None,
+                public_ip=str(raw_peer.get("public_ip") or "").strip() or None,
             )
         except (KeyError, TypeError, ValueError):
             return None

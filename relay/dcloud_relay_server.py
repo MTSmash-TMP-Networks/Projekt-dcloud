@@ -158,6 +158,7 @@ def sanitize_peer(peer: Any, node_id: str) -> dict[str, Any]:
         "relay_url": relay_urls[0] if relay_urls else "",
         "relay_urls": relay_urls,
         "relay_tokens": peer.get("relay_tokens", []) if isinstance(peer.get("relay_tokens"), list) else [],
+        "public_ip": str(peer.get("public_ip", ""))[:80],
         "relay_seen_at": _now(),
         "via_relay": True,
     }
@@ -247,7 +248,8 @@ class Handler(BaseHTTPRequestHandler):
         peers = {nid: p for nid, p in peers.items() if isinstance(p, dict) and now - int(p.get("relay_seen_at") or 0) <= PEER_TTL_SECONDS}
         existing = peers.get(node_id, {}) if isinstance(peers.get(node_id), dict) else {}
         peer = sanitize_peer(data.get("peer"), node_id)
-        for key in ("public_key", "client_type", "shared_storage_bytes", "free_storage_bytes", "accepts_peer_storage", "relay_url", "relay_urls", "web_port", "udp_port"):
+        peer["public_ip"] = str(self.client_address[0] if self.client_address else "")[:80]
+        for key in ("public_key", "client_type", "shared_storage_bytes", "free_storage_bytes", "accepts_peer_storage", "relay_url", "relay_urls", "web_port", "udp_port", "public_ip"):
             if peer.get(key) in (None, "", [], 0, False) and key in existing:
                 peer[key] = existing[key]
         peers[node_id] = peer

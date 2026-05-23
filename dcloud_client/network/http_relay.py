@@ -432,6 +432,7 @@ def peer_from_relay_payload(raw: object, *, relay_url: str, own_node_id: str | N
         web_port=optional_int("web_port"),
         free_storage_bytes=optional_int("free_storage_bytes"),
         relay_url=relay_url.rstrip("/"),
+        public_ip=str(raw.get("public_ip") or raw.get("remote_addr") or "").strip() or None,
     )
 
 

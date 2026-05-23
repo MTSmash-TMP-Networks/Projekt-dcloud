@@ -1265,7 +1265,7 @@
             const type = "Server";
             const storage = peer.accepts_peer_storage ? `P2P-Speicher aktiv · frei ${formatBytes(peer.free_storage_bytes || peer.shared_storage_bytes || 0)}` : "keine P2P-Ablage";
             const api = peer.web_port ? `API :${peer.web_port}` : "API unbekannt";
-            const route = peer.transport === "relay" ? "PHP-Relay" : (peer.transport === "direct+relay" ? `${peer.host}:${peer.udp_port} · Relay-Fallback` : `${peer.host}:${peer.udp_port}`);
+            const route = peerRouteLabel(peer);
             const age = Number(peer.last_seen_age_seconds || 0);
             const seen = age < 2 ? "gerade aktiv" : `vor ${Math.round(age)}s gesehen`;
             item.textContent = `${label} · ${type} · ${route} · ${api} · ${storage} · ${seen}`;
@@ -2045,6 +2045,18 @@
       function peerDisplayName(peer){
         return peer.display_name || peer.name || String(peer.node_id || "Peer").slice(0, 12);
       }
+      function peerRouteLabel(peer){
+        const hostPort = peer.host && peer.host !== "__relay__" ? `${peer.host}:${peer.udp_port || "?"}` : "";
+        const publicIp = String(peer.public_ip || "").trim();
+        if(peer.transport === "relay"){
+          return publicIp ? `${publicIp}:${peer.udp_port || "?"} · PHP-Relay` : "PHP-Relay";
+        }
+        if(peer.transport === "direct+relay"){
+          const direct = hostPort || (publicIp ? `${publicIp}:${peer.udp_port || "?"}` : "direkt");
+          return `${direct} · Relay-Fallback`;
+        }
+        return hostPort || (publicIp ? `${publicIp}:${peer.udp_port || "?"}` : "unbekannt");
+      }
       function openShareDialog(file){
         pendingShareFile = file;
         shareFileLabel.textContent = `${file.name} wird für einen Peer sichtbar gemacht.`;
@@ -2057,7 +2069,7 @@
           const option = document.createElement("option");
           option.value = peer.node_id;
           const type = "Server";
-          const route = peer.transport === "relay" ? "PHP-Relay" : `${peer.host}:${peer.udp_port}`;
+          const route = peerRouteLabel(peer);
           option.textContent = `${peerDisplayName(peer)} (${type}, ${route})`;
           sharePeerSelect.appendChild(option);
         });
@@ -2167,7 +2179,7 @@ ${file.name}`)) return;
         (appState.peers || []).forEach(peer => {
           const option = document.createElement("option");
           option.value = peer.node_id;
-          option.textContent = `${peerDisplayName(peer)} (${peer.host}:${peer.udp_port})`;
+          option.textContent = `${peerDisplayName(peer)} (${peerRouteLabel(peer)})`;
           movePeerSelect.appendChild(option);
         });
         if(!movePeerSelect.options.length){

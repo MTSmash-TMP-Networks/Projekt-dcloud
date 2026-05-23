@@ -168,6 +168,29 @@ function dcloud_accept_header(): string {
     return strtolower((string)($_SERVER['HTTP_ACCEPT'] ?? ''));
 }
 
+
+function dcloud_public_client_ip(): string {
+    $candidates = [];
+    foreach (['HTTP_CF_CONNECTING_IP', 'HTTP_X_REAL_IP', 'REMOTE_ADDR'] as $key) {
+        $value = trim((string)($_SERVER[$key] ?? ''));
+        if ($value !== '') $candidates[] = $value;
+    }
+    $forwarded = (string)($_SERVER['HTTP_X_FORWARDED_FOR'] ?? '');
+    foreach (explode(',', $forwarded) as $part) {
+        $value = trim($part);
+        if ($value !== '') $candidates[] = $value;
+    }
+    $fallback = '';
+    foreach ($candidates as $candidate) {
+        if (filter_var($candidate, FILTER_VALIDATE_IP) === false) continue;
+        if ($fallback === '') $fallback = $candidate;
+        if (filter_var($candidate, FILTER_VALIDATE_IP, FILTER_FLAG_NO_PRIV_RANGE | FILTER_FLAG_NO_RES_RANGE) !== false) {
+            return $candidate;
+        }
+    }
+    return $fallback;
+}
+
 function dcloud_is_browser_request(): bool {
     $accept = dcloud_accept_header();
     // Typical browsers send text/html. API clients often send */* or application/json.
@@ -670,6 +693,7 @@ function dcloud_sanitize_peer($peer, string $nodeId): array {
         'relay_url' => $relayUrls[0] ?? '',
         'relay_urls' => $relayUrls,
         'relay_tokens' => dcloud_sanitize_relay_tokens($peer['relay_tokens'] ?? []),
+        'public_ip' => substr((string)($peer['public_ip'] ?? ''), 0, 80),
         'relay_seen_at' => time(),
         'via_relay' => true,
     ];
@@ -727,7 +751,9 @@ function dcloud_register(array $input): void {
         $existing = isset($peers[$nodeId]) && is_array($peers[$nodeId]) ? $peers[$nodeId] : [];
         $sanitized = dcloud_sanitize_peer($peer, $nodeId);
 
-        foreach (['public_key', 'client_type', 'shared_storage_bytes', 'free_storage_bytes', 'accepts_peer_storage', 'relay_url', 'relay_urls', 'relay_tokens', 'web_port', 'udp_port'] as $key) {
+        $sanitized['public_ip'] = dcloud_public_client_ip();
+
+        foreach (['public_key', 'client_type', 'shared_storage_bytes', 'free_storage_bytes', 'accepts_peer_storage', 'relay_url', 'relay_urls', 'relay_tokens', 'web_port', 'udp_port', 'public_ip'] as $key) {
             $newValue = $sanitized[$key] ?? null;
             $emptyNewValue = $newValue === null || $newValue === '' || $newValue === [] || $newValue === 0 || $newValue === false;
             if ($emptyNewValue && array_key_exists($key, $existing)) {
