@@ -812,6 +812,17 @@ def create_app(
             payload.append({"name": folder["name"], "files": files})
         return payload
 
+
+    def _peer_payload(peer: Any) -> dict[str, Any]:
+        payload = peer.to_dict()
+        if payload.get("accepts_peer_storage") is None:
+            payload["accepts_peer_storage"] = True
+        if payload.get("shared_storage_bytes") is None:
+            payload["shared_storage_bytes"] = 0
+        if payload.get("free_storage_bytes") is None:
+            payload["free_storage_bytes"] = payload.get("shared_storage_bytes", 0)
+        return payload
+
     def state_payload() -> dict[str, Any]:
         _sync_peer_connector_settings()
         stats = chunk_store.stats()
@@ -829,7 +840,7 @@ def create_app(
             "settings": settings_payload(stats, peers),
             "network": network_payload(),
             "networkCapacity": _network_storage_capacity(stats, peers),
-            "peers": [peer.to_dict() for peer in peers],
+            "peers": [_peer_payload(peer) for peer in peers],
             "fileCount": len(manifests),
             "folders": folders,
             "folderTree": folder_tree_json(tree),
@@ -849,7 +860,7 @@ def create_app(
             stats=stats,
             stats_json=stats_payload(stats),
             peers=_list_active_peers(),
-            peers_json=[peer.to_dict() for peer in _list_active_peers()],
+            peers_json=[_peer_payload(peer) for peer in _list_active_peers()],
             settings_json=settings_payload(stats),
             network_json=network_payload(),
             manifests=manifests,
