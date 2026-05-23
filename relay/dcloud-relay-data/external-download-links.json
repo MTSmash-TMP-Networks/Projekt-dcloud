@@ -1,0 +1,10 @@
+{
+    "GRgx2N9o72Brkutl0yLPO-rm8Ts7oDNd": {
+        "target_node_id": "node1",
+        "local_token": "abcDEF123456",
+        "file_name": "x.txt",
+        "created_at": 1779555792,
+        "expires_at": 1779555852,
+        "creator_node_id": "node1"
+    }
+}
