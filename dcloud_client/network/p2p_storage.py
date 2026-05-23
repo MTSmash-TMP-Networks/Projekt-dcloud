@@ -27,6 +27,7 @@ REVOCATION_ACTION = "revoke_share"
 FILE_DELETE_ACTION = "delete_file"
 DEFAULT_MIN_REPLICAS_WITH_PEERS = 2
 DEFAULT_CHUNK_BATCH_SIZE = 8
+CHUNK_PACK_MAGIC = b"DCLOUD-CHUNK-PACK-1\n"
 
 
 @dataclass
@@ -435,26 +436,98 @@ class P2PStorageClient:
                 LOG.debug("Peer returned invalid base64 for chunk batch item %s", digest[:12])
         return chunks
 
+    def _decode_chunk_pack_response(self, response_body: bytes) -> dict[str, bytes]:
+        """Decode the binary batch format used for high-throughput downloads.
+
+        Format:
+            DCLOUD-CHUNK-PACK-1\n
+            <digest> <stored-size>\n
+            <stored bytes>
+
+        Repeating the size-prefixed header lets arbitrary encrypted/compressed
+        chunk bytes pass through without JSON/base64 overhead.
+        """
+        if not response_body.startswith(CHUNK_PACK_MAGIC):
+            raise StorageError("Peer returned an invalid chunk-pack response")
+        chunks: dict[str, bytes] = {}
+        offset = len(CHUNK_PACK_MAGIC)
+        total = len(response_body)
+        while offset < total:
+            line_end = response_body.find(b"\n", offset)
+            if line_end < 0:
+                break
+            line = response_body[offset:line_end].decode("ascii", errors="strict").strip()
+            offset = line_end + 1
+            if not line:
+                continue
+            try:
+                digest, size_text = line.split(" ", 1)
+                size = int(size_text)
+            except (ValueError, TypeError) as exc:
+                raise StorageError("Peer returned a corrupt chunk-pack header") from exc
+            if size < 0 or offset + size > total:
+                raise StorageError("Peer returned a truncated chunk-pack body")
+            chunks[digest] = response_body[offset:offset + size]
+            offset += size
+        return chunks
+
+    def _get_chunks_pack(self, peer: Peer, *, data: bytes, headers: dict[str, str], timeout: float) -> dict[str, bytes]:
+        path = "/api/p2p/chunks/batch/pack"
+        direct_error: Exception | None = None
+        pack_headers = {**headers, "Accept": "application/octet-stream"}
+
+        if peer.host != RELAY_HOST:
+            url = f"{self.api_base(peer)}{path}"
+            req = request.Request(url, data=data, headers=pack_headers, method="POST")
+            try:
+                with request.urlopen(req, timeout=timeout) as response:
+                    if not 200 <= response.status < 300:
+                        raise StorageError(f"Peer {peer.node_id} returned HTTP {response.status} for chunk pack")
+                    return self._decode_chunk_pack_response(response.read())
+            except (OSError, error.URLError, error.HTTPError, StorageError) as exc:
+                direct_error = exc
+                LOG.debug("Direct chunk-pack download from peer %s failed", peer.node_id, exc_info=True)
+
+        if self._relay_available(peer):
+            relay_client = self._relay_client_for(peer)
+            if relay_client is not None:
+                try:
+                    relay_timeout = max(45.0, min(float(timeout or 60.0), 120.0))
+                    response = relay_client.direct_proxy_request_raw(
+                        peer, method="POST", path=path, headers=pack_headers, body=data, timeout=relay_timeout
+                    )
+                    if 200 <= response.status_code < 300:
+                        return self._decode_chunk_pack_response(response.body)
+                    direct_error = StorageError(f"Peer {peer.node_id} returned relay HTTP {response.status_code} for chunk pack")
+                except (RelayError, StorageError) as exc:
+                    direct_error = exc
+                    LOG.debug("Raw PHP chunk-pack proxy from peer %s failed", peer.node_id, exc_info=True)
+
+        raise StorageError(f"Chunk-Pack konnte von Peer {peer.node_id} nicht geladen werden: {direct_error}") from direct_error
+
     def get_chunks_batch(self, peer: Peer, *, digests: list[str], timeout: float | None = None) -> dict[str, bytes]:
         """Fetch multiple stored chunks from one peer with a single peer/API call.
 
-        The method keeps the old single-chunk path as a fallback elsewhere, but
-        uses a compact JSON/base64 envelope here so it can also pass through the
-        existing PHP forwarder/mailbox relay safely. Peers may return fewer
-        chunks than requested when some digests are missing or the response would
-        become too large; callers should retry remaining chunks on another peer
-        or fall back to get_chunk().
+        Newer peers use a binary chunk-pack endpoint first. It avoids base64, so
+        one larger request is usually much faster than many small chunk requests.
+        The JSON/base64 endpoint and finally the old single-chunk API remain as
+        compatibility fallbacks in the caller.
         """
         unique_digests = list(dict.fromkeys(str(digest).strip() for digest in digests if str(digest).strip()))
         if not unique_digests:
             return {}
 
-        path = "/api/p2p/chunks/batch/download"
         data = json.dumps({"digests": unique_digests}, separators=(",", ":"), sort_keys=True).encode("utf-8")
         headers = {"Content-Type": "application/json", "Accept": "application/json"}
-        request_timeout = timeout if timeout is not None else max(self.timeout, 60.0)
-        direct_error: Exception | None = None
+        request_timeout = timeout if timeout is not None else max(self.timeout, 90.0)
 
+        try:
+            return self._get_chunks_pack(peer, data=data, headers=headers, timeout=float(request_timeout))
+        except StorageError as pack_error:
+            LOG.debug("Chunk-pack fast path from peer %s failed; falling back to JSON batch: %s", peer.node_id, pack_error)
+            direct_error: Exception | None = pack_error
+
+        path = "/api/p2p/chunks/batch/download"
         if peer.host != RELAY_HOST:
             url = f"{self.api_base(peer)}{path}"
             req = request.Request(url, data=data, headers=headers, method="POST")

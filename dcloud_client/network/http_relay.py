@@ -362,6 +362,31 @@ class HttpRelayClient:
             body=body_bytes,
         )
 
+    def _raw_proxy_payload(
+        self,
+        peer: Peer,
+        *,
+        method: str,
+        path: str,
+        headers: dict[str, str] | None = None,
+        body: bytes = b"",
+        timeout: float | None = None,
+        action: str = "direct_proxy_request",
+    ) -> tuple[dict[str, Any], float]:
+        self._validate_forward_target(peer, method, path)
+        wait_timeout = float(timeout if timeout is not None else self.request_timeout)
+        payload = {
+            "action": action,
+            "target_node_id": str(peer.node_id),
+            "to_node_id": str(peer.node_id),
+            "method": method.upper(),
+            "path": path,
+            "headers": {str(key): str(value) for key, value in (headers or {}).items()},
+            "body_base64": base64.b64encode(body).decode("ascii"),
+            "timeout_seconds": max(1.0, min(wait_timeout, 120.0)),
+        }
+        return payload, wait_timeout
+
     def direct_proxy_request(
         self,
         peer: Peer,
@@ -378,22 +403,103 @@ class HttpRelayClient:
         relay server can reach the peer's public IP and web port. If the peer is
         behind CGNAT/firewall, callers should fall back to ``forward_request``.
         """
-        self._validate_forward_target(peer, method, path)
-        wait_timeout = float(timeout if timeout is not None else self.request_timeout)
-        payload = self._post_json(
-            {
-                "action": "direct_proxy_request",
-                "target_node_id": str(peer.node_id),
-                "to_node_id": str(peer.node_id),
-                "method": method.upper(),
-                "path": path,
-                "headers": {str(key): str(value) for key, value in (headers or {}).items()},
-                "body_base64": base64.b64encode(body).decode("ascii"),
-                "timeout_seconds": max(1.0, min(wait_timeout, 120.0)),
-            },
-            timeout=max(self.timeout, min(wait_timeout + 5.0, 130.0)),
+        payload, wait_timeout = self._raw_proxy_payload(
+            peer, method=method, path=path, headers=headers, body=body, timeout=timeout
         )
-        return self._response_from_relay_payload(payload.get("response", {}))
+        response_payload = self._post_json(payload, timeout=max(self.timeout, min(wait_timeout + 5.0, 130.0)))
+        return self._response_from_relay_payload(response_payload.get("response", {}))
+
+    def _send_raw_proxy_json(self, payload: dict[str, Any], *, timeout: float) -> RelayHttpResponse:
+        action = str(payload.get("action", ""))
+        if action != "health":
+            self.ensure_access_token()
+        full_payload = {
+            "protocol": "dcloud-relay-v1",
+            "node_id": self.identity.node_id,
+            "secret": self.secret,
+            **payload,
+        }
+        if action != "health" and self.access_token:
+            full_payload["relay_token"] = self.access_token
+        data = json.dumps(full_payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        req = request.Request(
+            self.relay_url,
+            data=data,
+            headers={"Content-Type": "application/json", "Accept": "application/octet-stream"},
+            method="POST",
+        )
+        try:
+            with request.urlopen(req, timeout=timeout) as response:
+                return RelayHttpResponse(
+                    status_code=int(response.status),
+                    headers={str(k): str(v) for k, v in response.headers.items()},
+                    body=response.read(),
+                )
+        except error.HTTPError as exc:
+            body_bytes = b""
+            try:
+                body_bytes = exc.read()
+            except Exception:
+                body_bytes = b""
+            token_error = exc.code == 403 and b"token" in body_bytes.lower()
+            if action != "health" and token_error:
+                self.refresh_access_token()
+                full_payload["relay_token"] = self.access_token
+                data = json.dumps(full_payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+                retry_req = request.Request(
+                    self.relay_url,
+                    data=data,
+                    headers={"Content-Type": "application/json", "Accept": "application/octet-stream"},
+                    method="POST",
+                )
+                try:
+                    with request.urlopen(retry_req, timeout=timeout) as response:
+                        return RelayHttpResponse(
+                            status_code=int(response.status),
+                            headers={str(k): str(v) for k, v in response.headers.items()},
+                            body=response.read(),
+                        )
+                except error.HTTPError as retry_exc:
+                    retry_body = retry_exc.read()
+                    return RelayHttpResponse(
+                        status_code=int(retry_exc.code),
+                        headers={str(k): str(v) for k, v in retry_exc.headers.items()},
+                        body=retry_body,
+                    )
+            return RelayHttpResponse(
+                status_code=int(exc.code),
+                headers={str(k): str(v) for k, v in exc.headers.items()},
+                body=body_bytes,
+            )
+        except (OSError, error.URLError) as exc:
+            raise RelayError(f"Relay nicht erreichbar: {exc}") from exc
+
+    def direct_proxy_request_raw(
+        self,
+        peer: Peer,
+        *,
+        method: str,
+        path: str,
+        headers: dict[str, str] | None = None,
+        body: bytes = b"",
+        timeout: float | None = None,
+    ) -> RelayHttpResponse:
+        """Forward a peer API request through PHP and return the raw target body.
+
+        Large binary batch downloads avoid the older JSON/base64 response wrapper
+        this way, which reduces memory usage and transfer size through the PHP
+        forwarder. Mailbox relay still uses the normal encoded response path.
+        """
+        payload, wait_timeout = self._raw_proxy_payload(
+            peer,
+            method=method,
+            path=path,
+            headers=headers,
+            body=body,
+            timeout=timeout,
+            action="direct_proxy_request_raw",
+        )
+        return self._send_raw_proxy_json(payload, timeout=max(self.timeout, min(wait_timeout + 5.0, 130.0)))
 
     def forward_request(
         self,

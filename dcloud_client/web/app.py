@@ -1535,8 +1535,11 @@ def create_app(
             missing.pop(digest, None)
             return True
 
-        batch_size = 12
-        batch_byte_budget = 12 * 1024 * 1024
+        # Large files should not require one HTTP/PHP roundtrip per chunk.
+        # Keep batches big enough to move a typical 50-100 MiB file in one or
+        # two requests, while still limiting memory pressure on small hosts.
+        batch_size = 128
+        batch_byte_budget = 96 * 1024 * 1024
         for node_id in peer_order:
             if not missing:
                 break
@@ -1689,9 +1692,9 @@ def create_app(
                 fetched = max(0, missing_total - missing_chunks)
                 batch_size = int(event.get("batch_size") or 0)
                 server_percent = 18.0 + (fetched / max(1, missing_total)) * 40.0
-                status = f"Fehlende Chunks werden gebündelt geladen… {fetched}/{missing_total}"
+                status = f"Fehlende Chunks werden in großen Blöcken geladen… {fetched}/{missing_total}"
                 if batch_size:
-                    status += f" (+{batch_size})"
+                    status += f" (+{batch_size} Chunks)"
             elif phase == "fetch_chunk":
                 server_percent = 12.0 + ((max(0, current_chunk - 1) + 0.65) / max(1, total)) * 45.0
                 status = f"Einzel-Fallback: fehlender Chunk wird geladen… {current_chunk}/{total}"
@@ -1807,16 +1810,59 @@ def create_app(
             abort(404)
         return Response(data, mimetype="application/octet-stream")
 
+    def _chunk_batch_digests_from_request() -> list[str]:
+        payload = request.get_json(force=True)
+        raw_digests = payload.get("digests", []) if isinstance(payload, dict) else []
+        if not isinstance(raw_digests, list) or not raw_digests:
+            raise StorageError("Batch payload must include at least one digest")
+        return list(dict.fromkeys(str(digest).strip() for digest in raw_digests if str(digest).strip()))
+
+    @app.post("/api/p2p/chunks/batch/pack")
+    def api_p2p_get_chunks_pack() -> Response:
+        try:
+            digests = _chunk_batch_digests_from_request()
+        except (ValueError, StorageError, TypeError) as exc:
+            return jsonify({"ok": False, "message": str(exc), "state": state_payload()}), 400
+
+        max_chunks = 128
+        max_payload_bytes = 96 * 1024 * 1024
+        pack_magic = b"DCLOUD-CHUNK-PACK-1\n"
+
+        def generate():
+            yielded = 0
+            payload_bytes = 0
+            yield pack_magic
+            for digest in digests:
+                if yielded >= max_chunks:
+                    break
+                try:
+                    data = chunk_store.read_stored_chunk(digest)
+                except StorageError:
+                    continue
+                if yielded and payload_bytes + len(data) > max_payload_bytes:
+                    break
+                header = f"{digest} {len(data)}\n".encode("ascii", errors="strict")
+                yield header
+                yield data
+                yielded += 1
+                payload_bytes += len(data)
+
+        return Response(
+            generate(),
+            mimetype="application/octet-stream",
+            headers={
+                "X-DCloud-Pack-Format": "chunk-pack-v1",
+                "X-DCloud-Max-Chunks": str(max_chunks),
+                "X-DCloud-Max-Payload-Bytes": str(max_payload_bytes),
+            },
+        )
+
     @app.post("/api/p2p/chunks/batch/download")
     def api_p2p_get_chunks_batch() -> Response:
         try:
-            payload = request.get_json(force=True)
-            raw_digests = payload.get("digests", []) if isinstance(payload, dict) else []
-            if not isinstance(raw_digests, list) or not raw_digests:
-                raise StorageError("Batch payload must include at least one digest")
-            digests = list(dict.fromkeys(str(digest).strip() for digest in raw_digests if str(digest).strip()))
-            max_chunks = 16
-            max_payload_bytes = 16 * 1024 * 1024
+            digests = _chunk_batch_digests_from_request()
+            max_chunks = 128
+            max_payload_bytes = 96 * 1024 * 1024
             chunks_payload: list[dict[str, Any]] = []
             missing: list[str] = []
             payload_bytes = 0
