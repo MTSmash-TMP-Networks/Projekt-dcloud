@@ -1,1 +1,0 @@
-{"node1":{"node_id":"node1","public_key":"","name":"test","udp_port":6881,"web_port":8787,"protocol_magic":"DCLOUD1","client_type":"server","shared_storage_bytes":0,"free_storage_bytes":0,"accepts_peer_storage":false,"relay_url":"","relay_urls":[],"relay_tokens":[],"public_ip":"127.0.0.1","relay_seen_at":1779555792,"via_relay":true}}
