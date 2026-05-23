@@ -27,6 +27,7 @@ except ImportError:
 from ..config import (
     AppConfig,
     DEFAULT_PUBLIC_RELAY_URL,
+    DEFAULT_PUBLIC_RELAY_URLS,
     MIN_SHARED_STORAGE_GB,
     bytes_to_gib,
     client_type_label,
@@ -550,6 +551,8 @@ def create_app(
             "sharedStorageBytes": config.storage.limit_bytes,
             "freeSharedStorageBytes": current_stats.free_limit_bytes,
             "fixedRelayUrl": DEFAULT_PUBLIC_RELAY_URL,
+            "fixedRelayUrls": DEFAULT_PUBLIC_RELAY_URLS.copy(),
+            "fixedRelayUrlsText": "\n".join(DEFAULT_PUBLIC_RELAY_URLS),
             "relayUrl": config.network.relay_url,
             "relayUrls": list(config.network.relay_urls),
             "additionalRelayUrls": extra_relay_urls(config.network.relay_urls),
@@ -592,7 +595,7 @@ def create_app(
             client = relay_clients.get(url)
             statuses.append({
                 "url": url,
-                "fixed": url == DEFAULT_PUBLIC_RELAY_URL,
+                "fixed": url in DEFAULT_PUBLIC_RELAY_URLS,
                 "status": status,
                 "lastError": last_error,
                 "tokenMode": "automatic-daily",
@@ -626,6 +629,8 @@ def create_app(
             "peerTimeoutSeconds": getattr(config.network, "peer_timeout_seconds", 35),
             "peerCleanupIntervalSeconds": getattr(config.network, "peer_cleanup_interval_seconds", 5),
             "fixedRelayUrl": DEFAULT_PUBLIC_RELAY_URL,
+            "fixedRelayUrls": DEFAULT_PUBLIC_RELAY_URLS.copy(),
+            "fixedRelayUrlsText": "\n".join(DEFAULT_PUBLIC_RELAY_URLS),
             "relayUrl": config.network.relay_url,
             "relayUrls": _relay_url_list(),
             "additionalRelayUrls": extra_relay_urls(config.network.relay_urls),

@@ -106,9 +106,10 @@ network:
   startup_discovery_interval_seconds: 2
   peer_timeout_seconds: 35 # Offline-Peers nach ca. 3 verpassten Discovery-Runden entfernen
   peer_cleanup_interval_seconds: 5
-  relay_url: "https://support.tmp-networks.de/dcstorage/dcloud_relay.php" # festes öffentliches Standard-Relay
+  relay_url: "https://support.tmp-networks.de/dcstorage/dcloud_relay.php" # primäres öffentliches Standard-Relay
   relay_urls:
-    - "https://support.tmp-networks.de/dcstorage/dcloud_relay.php" # zusätzliche Relays werden ergänzt und verteilt
+    - "https://support.tmp-networks.de/dcstorage/dcloud_relay.php" # primäres Standard-Relay
+    - "http://dcloud.byethost12.com/dcloud_relay.php" # festes Backup-Relay
   relay_secret: "" # deprecated: Tages-Token werden automatisch vom PHP-Relay erzeugt
   relay_poll_interval_seconds: 1
   relay_request_timeout_seconds: 180
@@ -136,7 +137,7 @@ Für normale LANs reicht der Broadcast `255.255.255.255`. Falls ein Netzwerk ger
 
 Für Peers in unterschiedlichen Heimnetzwerken wird ein PHP-Webserver als Vermittlungs- und Relay-Pfad genutzt. Das ist kein echter UDP-TURN-Server wie bei WebRTC. Ab Relay-Version **1.3.0** gibt es zwei Pfade: Zuerst versucht der Client einen direkten PHP-HTTP-Forwarder, bei dem der Webserver die P2P-API-Anfrage unmittelbar an die beim Relay registrierte öffentliche Peer-IP und den Web-Port weiterleitet. Dabei werden keine einzelnen Chunk-Dateien auf dem Relay abgelegt. Wenn der Ziel-Peer aus Sicht des Webservers nicht erreichbar ist, etwa wegen CGNAT, Firewall oder fehlender Portfreigabe, fällt der Client automatisch auf die bisherige HTTP-Mailbox zurück: Jeder Client holt dann eingehende P2P-API-Anfragen aus seiner Queue und schreibt Antworten zurück. Dadurch bleiben Manifest-Freigaben, Revocations, Datei-Löschungen und Chunk-Transfers auch ohne direkt erreichbaren eingehenden Port möglich.
 
-Das öffentliche Standard-Relay `https://support.tmp-networks.de/dcstorage/dcloud_relay.php` ist fest im Client aktiv. In den Einstellungen können zusätzliche Relay-URLs eingetragen werden. Diese zusätzlichen Relays werden in `network.relay_urls` gespeichert, bei der nächsten Discovery an andere Peers verteilt und von diesen automatisch ebenfalls genutzt. Dadurch bleibt das Netzwerk erreichbar, selbst wenn einzelne Relay-Server später ausfallen oder einzelne Nutzer eigene Relays hosten.
+Das öffentliche Standard-Relay `https://support.tmp-networks.de/dcstorage/dcloud_relay.php` und das Backup-Relay `http://dcloud.byethost12.com/dcloud_relay.php` sind fest im Client aktiv, solange PHP-Vermittlung nicht bewusst deaktiviert wurde. In den Einstellungen können zusätzliche Relay-URLs eingetragen werden. Diese zusätzlichen Relays werden in `network.relay_urls` gespeichert, bei der nächsten Discovery an andere Peers verteilt und von diesen automatisch ebenfalls genutzt. Dadurch bleibt das Netzwerk erreichbar, selbst wenn einzelne Relay-Server später ausfallen oder einzelne Nutzer eigene Relays hosten.
 
 Einrichtung für ein eigenes Zusatz-Relay:
 
@@ -161,7 +162,7 @@ cd relay
 python3 dcloud_relay_server.py --host 0.0.0.0 --port 8788
 ```
 
-Danach kannst du per nginx/Apache/Plesk eine HTTPS-URL auf diesen Port weiterleiten und diese URL in den dcloud-Einstellungen als weiteres Relay eintragen. Das feste PHP-Relay bleibt weiterhin aktiv; die Python-Relay-URL wird wie alle Zusatz-Relays im Netzwerk verteilt.
+Danach kannst du per nginx/Apache/Plesk eine HTTPS-URL auf diesen Port weiterleiten und diese URL in den dcloud-Einstellungen als weiteres Relay eintragen. Die festen PHP-Relays bleiben weiterhin aktiv; die Python-Relay-URL wird wie alle Zusatz-Relays im Netzwerk verteilt.
 
 
 

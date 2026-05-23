@@ -741,12 +741,12 @@
             <label style="display:flex;align-items:center;gap:.45rem;">
               <input id="settings-relay-enabled" type="checkbox" name="relay_enabled" {% if settings_json.relayEnabled %}checked{% endif %}> PHP-Vermittlung aktivieren
             </label>
-            <label for="settings-relay-url">Festes Standard-Relay</label>
-            <input id="settings-relay-url" type="url" value="{{ settings_json.fixedRelayUrl }}" readonly>
+            <label for="settings-relay-url">Feste Standard-/Backup-Relays</label>
+            <textarea id="settings-relay-url" rows="2" readonly>{{ settings_json.fixedRelayUrlsText }}</textarea>
             <label for="settings-relay-urls">Weitere Relay-URLs hinzufügen</label>
             <textarea id="settings-relay-urls" name="relay_server_urls" rows="3" placeholder="https://deine-domain.de/dcloud_relay.php">{{ settings_json.additionalRelayUrlsText }}</textarea>
             <p class="settings-note"><strong>Relay-Zugriff:</strong> <span id="settings-relay-token-mode">{{ settings_json.relayTokenLabel }}</span>. Der Tages-Schlüssel wird automatisch vom Relay erzeugt, täglich erneuert und vom Client bei Bedarf direkt abgerufen.</p>
-            <p class="settings-note" id="settings-relay-note">Das Standard-Relay ist fest hinterlegt. Zusätzliche Relays dienen als Vermittlung und Forwarder für Internet-Peers. Direkte Verbindungen werden weiterhin bevorzugt; der Mailbox-Relay bleibt nur Fallback.</p>
+            <p class="settings-note" id="settings-relay-note">Das Standard-Relay und das Backup-Relay sind fest hinterlegt. Zusätzliche Relays dienen als Vermittlung und Forwarder für Internet-Peers. Direkte Verbindungen werden weiterhin bevorzugt; der Mailbox-Relay bleibt nur Fallback.</p>
           </section>
 
           <section class="settings-panel">
@@ -1229,7 +1229,7 @@
           storageGbInput.value = String(Math.max(settings.minSharedStorageGb || 5, Math.round(Number(settings.sharedStorageGb || 5))));
         }
         const relayUrlInput = document.getElementById("settings-relay-url");
-        if(relayUrlInput) relayUrlInput.value = settings.fixedRelayUrl || settings.relayUrl || "";
+        if(relayUrlInput) relayUrlInput.value = settings.fixedRelayUrlsText || settings.fixedRelayUrl || settings.relayUrl || "";
         const relayUrlsInput = document.getElementById("settings-relay-urls");
         if(relayUrlsInput && document.activeElement !== relayUrlsInput) relayUrlsInput.value = settings.additionalRelayUrlsText || "";
         const relayEnabledInput = document.getElementById("settings-relay-enabled");

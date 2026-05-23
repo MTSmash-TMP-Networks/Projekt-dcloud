@@ -25,6 +25,8 @@ DEFAULT_RELAY_POLL_INTERVAL_SECONDS = 1
 DEFAULT_RELAY_REQUEST_TIMEOUT_SECONDS = 180
 DEFAULT_RELAY_CHUNK_SIZE_BYTES = 512 * 1024
 DEFAULT_PUBLIC_RELAY_URL = "https://support.tmp-networks.de/dcstorage/dcloud_relay.php"
+DEFAULT_BACKUP_RELAY_URL = "http://dcloud.byethost12.com/dcloud_relay.php"
+DEFAULT_PUBLIC_RELAY_URLS = [DEFAULT_PUBLIC_RELAY_URL, DEFAULT_BACKUP_RELAY_URL]
 
 
 
@@ -72,7 +74,7 @@ class NetworkConfig:
     peer_timeout_seconds: int = DEFAULT_PEER_TIMEOUT_SECONDS
     peer_cleanup_interval_seconds: int = DEFAULT_PEER_CLEANUP_INTERVAL_SECONDS
     relay_url: str = DEFAULT_PUBLIC_RELAY_URL
-    relay_urls: list[str] = field(default_factory=lambda: [DEFAULT_PUBLIC_RELAY_URL])
+    relay_urls: list[str] = field(default_factory=lambda: DEFAULT_PUBLIC_RELAY_URLS.copy())
     relay_secret: str = ""  # deprecated; bundled relays use automatic daily tokens
     relay_poll_interval_seconds: float = DEFAULT_RELAY_POLL_INTERVAL_SECONDS
     relay_request_timeout_seconds: int = DEFAULT_RELAY_REQUEST_TIMEOUT_SECONDS
@@ -221,7 +223,7 @@ def _iter_relay_url_candidates(value: Any) -> list[str]:
 def normalize_relay_urls(values: Any, *, include_default: bool = True) -> list[str]:
     result: list[str] = []
     if include_default:
-        result.append(DEFAULT_PUBLIC_RELAY_URL)
+        result.extend(DEFAULT_PUBLIC_RELAY_URLS)
     for raw in _iter_relay_url_candidates(values):
         url = normalize_relay_url(raw)
         if url and url not in result:
@@ -230,7 +232,8 @@ def normalize_relay_urls(values: Any, *, include_default: bool = True) -> list[s
 
 
 def extra_relay_urls(values: Any) -> list[str]:
-    return [url for url in normalize_relay_urls(values, include_default=True) if url != DEFAULT_PUBLIC_RELAY_URL]
+    fixed_relays = set(DEFAULT_PUBLIC_RELAY_URLS)
+    return [url for url in normalize_relay_urls(values, include_default=True) if url not in fixed_relays]
 
 
 def normalize_relay_secret(value: str | None) -> str:
@@ -285,11 +288,14 @@ def load_config(config_path: str | Path = "config.yml", *, create_if_missing: bo
     relay_url_key_present = "relay_url" in network_raw
     if relay_urls_key_present:
         # `relay_urls: []` is an explicit user choice from the dashboard to
-        # disable PHP relay usage. Do not merge the legacy `relay_url` value
-        # back in, otherwise the relay is silently re-enabled after reload.
-        relay_urls_loaded = normalize_relay_urls(network_raw.get("relay_urls", []), include_default=False)
+        # disable PHP relay usage. For non-empty relay lists, keep the built-in
+        # primary + backup relays available so existing installations gain new
+        # default relays without manually editing config.yml.
+        relay_values = network_raw.get("relay_urls", [])
+        relay_urls_loaded = normalize_relay_urls(relay_values, include_default=bool(_iter_relay_url_candidates(relay_values)))
     elif relay_url_key_present:
-        relay_urls_loaded = normalize_relay_urls(network_raw.get("relay_url", ""), include_default=False)
+        relay_value = network_raw.get("relay_url", "")
+        relay_urls_loaded = normalize_relay_urls(relay_value, include_default=bool(_iter_relay_url_candidates(relay_value)))
     else:
         relay_urls_loaded = normalize_relay_urls([], include_default=True)
     relay_primary_url = relay_urls_loaded[0] if relay_urls_loaded else DEFAULT_PUBLIC_RELAY_URL
