@@ -203,6 +203,7 @@ class P2PStorageClient:
         relay_client: HttpRelayClient | None = None,
         relay_clients: Mapping[str, HttpRelayClient] | None = None,
         peer_recovery_callback: Callable[[Peer], Peer | None] | None = None,
+        udp_chunk_sender: Callable[[Peer, dict[str, Any]], dict[str, Any] | None] | None = None,
     ) -> None:
         self.timeout = float(timeout)
         self.default_web_port = int(default_web_port)
@@ -210,6 +211,7 @@ class P2PStorageClient:
         self.relay_client = relay_client
         self.relay_clients: dict[str, HttpRelayClient] = {}
         self.peer_recovery_callback = peer_recovery_callback
+        self.udp_chunk_sender = udp_chunk_sender
         if relay_clients:
             self.set_relay_clients(relay_clients)
         elif relay_client is not None:
@@ -299,6 +301,40 @@ class P2PStorageClient:
             timeout=relay_client.request_timeout if timeout is None else timeout,
         )
 
+
+    def _try_udp_chunk_put(
+        self,
+        peer: Peer,
+        *,
+        digest: str,
+        stored_data: bytes,
+        original_size: int,
+        stored_size: int,
+        index: int,
+        compression: str | None,
+    ) -> PeerTransferResult | None:
+        if self.udp_chunk_sender is None or peer.host == RELAY_HOST:
+            return None
+        if len(stored_data) > 48 * 1024:
+            return None
+        payload = {
+            "type": "chunk_put",
+            "digest": digest,
+            "original_size": int(original_size),
+            "stored_size": int(stored_size),
+            "index": int(index),
+            "compression": compression or "",
+            "data_b64": base64.b64encode(stored_data).decode("ascii"),
+        }
+        try:
+            response = self.udp_chunk_sender(peer, payload)
+        except Exception as exc:
+            LOG.debug("UDP chunk upload to peer %s failed", peer.node_id, exc_info=True)
+            return PeerTransferResult(peer.node_id, False, f"udp failed: {exc}")
+        if isinstance(response, dict) and response.get("ok"):
+            return PeerTransferResult(peer.node_id, True, "stored via udp")
+        return None
+
     def put_chunk(
         self,
         peer: Peer,
@@ -319,6 +355,17 @@ class P2PStorageClient:
         }
         if compression:
             headers["X-DCloud-Chunk-Compression"] = compression
+        udp_result = self._try_udp_chunk_put(
+            peer,
+            digest=digest,
+            stored_data=stored_data,
+            original_size=original_size,
+            stored_size=stored_size,
+            index=index,
+            compression=compression,
+        )
+        if udp_result is not None and udp_result.ok:
+            return udp_result
         if peer.host != RELAY_HOST:
             direct_exc: Exception | None = None
             for base in self.candidate_api_bases(peer):
@@ -376,6 +423,17 @@ class P2PStorageClient:
         data = json.dumps(payload, separators=(",", ":"), sort_keys=True).encode("utf-8")
         headers = {"Content-Type": "application/json", "Accept": "application/json"}
         response_payload: dict[str, Any] = {}
+        udp_result = self._try_udp_chunk_put(
+            peer,
+            digest=digest,
+            stored_data=stored_data,
+            original_size=original_size,
+            stored_size=stored_size,
+            index=index,
+            compression=compression,
+        )
+        if udp_result is not None and udp_result.ok:
+            return udp_result
         if peer.host != RELAY_HOST:
             url = f"{self.api_base(peer)}{path}"
             req = request.Request(url, data=data, headers=headers, method="POST")
@@ -414,6 +472,17 @@ class P2PStorageClient:
     def get_chunk(self, peer: Peer, *, digest: str) -> bytes:
         path = f"/api/p2p/chunks/{parse.quote(digest)}"
         direct_error: Exception | None = None
+        udp_result = self._try_udp_chunk_put(
+            peer,
+            digest=digest,
+            stored_data=stored_data,
+            original_size=original_size,
+            stored_size=stored_size,
+            index=index,
+            compression=compression,
+        )
+        if udp_result is not None and udp_result.ok:
+            return udp_result
         if peer.host != RELAY_HOST:
             for base in self.candidate_api_bases(peer):
                 req = request.Request(f"{base}{path}", headers={"Accept": "application/octet-stream"}, method="GET")
@@ -449,6 +518,17 @@ class P2PStorageClient:
     def _post_json_to_peer(self, peer: Peer, *, path: str, payload: dict[str, Any], success_message: str, log_message: str) -> PeerTransferResult:
         data = json.dumps(payload, sort_keys=True).encode("utf-8")
         headers = {"Content-Type": "application/json", "Accept": "application/json"}
+        udp_result = self._try_udp_chunk_put(
+            peer,
+            digest=digest,
+            stored_data=stored_data,
+            original_size=original_size,
+            stored_size=stored_size,
+            index=index,
+            compression=compression,
+        )
+        if udp_result is not None and udp_result.ok:
+            return udp_result
         if peer.host != RELAY_HOST:
             url = f"{self.api_base(peer)}{path}"
             req = request.Request(url, data=data, headers=headers, method="POST")
