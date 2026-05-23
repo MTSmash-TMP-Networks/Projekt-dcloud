@@ -417,6 +417,76 @@ class P2PStorageClient:
                 results.append(PeerTransferResult(peer.node_id, False, f"chunk {digest[:12]} not acknowledged"))
         return results
 
+    def _decode_chunk_batch_response(self, response_payload: dict[str, Any]) -> dict[str, bytes]:
+        raw_chunks = response_payload.get("chunks", []) if isinstance(response_payload, dict) else []
+        chunks: dict[str, bytes] = {}
+        if not isinstance(raw_chunks, list):
+            return chunks
+        for item in raw_chunks:
+            if not isinstance(item, dict):
+                continue
+            digest = str(item.get("digest", "")).strip()
+            encoded = str(item.get("stored_data_b64", ""))
+            if not digest or not encoded:
+                continue
+            try:
+                chunks[digest] = base64.b64decode(encoded.encode("ascii"), validate=True)
+            except Exception:
+                LOG.debug("Peer returned invalid base64 for chunk batch item %s", digest[:12])
+        return chunks
+
+    def get_chunks_batch(self, peer: Peer, *, digests: list[str], timeout: float | None = None) -> dict[str, bytes]:
+        """Fetch multiple stored chunks from one peer with a single peer/API call.
+
+        The method keeps the old single-chunk path as a fallback elsewhere, but
+        uses a compact JSON/base64 envelope here so it can also pass through the
+        existing PHP forwarder/mailbox relay safely. Peers may return fewer
+        chunks than requested when some digests are missing or the response would
+        become too large; callers should retry remaining chunks on another peer
+        or fall back to get_chunk().
+        """
+        unique_digests = list(dict.fromkeys(str(digest).strip() for digest in digests if str(digest).strip()))
+        if not unique_digests:
+            return {}
+
+        path = "/api/p2p/chunks/batch/download"
+        data = json.dumps({"digests": unique_digests}, separators=(",", ":"), sort_keys=True).encode("utf-8")
+        headers = {"Content-Type": "application/json", "Accept": "application/json"}
+        request_timeout = timeout if timeout is not None else max(self.timeout, 60.0)
+        direct_error: Exception | None = None
+
+        if peer.host != RELAY_HOST:
+            url = f"{self.api_base(peer)}{path}"
+            req = request.Request(url, data=data, headers=headers, method="POST")
+            try:
+                with request.urlopen(req, timeout=request_timeout) as response:
+                    if not 200 <= response.status < 300:
+                        raise StorageError(f"Peer {peer.node_id} returned HTTP {response.status} for chunk batch")
+                    payload = json.loads(response.read().decode("utf-8", errors="replace"))
+                    return self._decode_chunk_batch_response(payload)
+            except (OSError, error.URLError, error.HTTPError, StorageError, json.JSONDecodeError) as exc:
+                direct_error = exc
+                LOG.debug("Direct chunk batch download from peer %s failed", peer.node_id, exc_info=True)
+
+        if self._relay_available(peer):
+            last_error: Exception | None = None
+            for attempt in range(2):
+                try:
+                    relay_timeout = max(45.0, min(float(request_timeout or 60.0), 90.0))
+                    response = self._forward_via_relay(peer, method="POST", path=path, headers=headers, body=data, timeout=relay_timeout)
+                    if 200 <= response.status_code < 300:
+                        payload = json.loads(response.body.decode("utf-8", errors="replace"))
+                        return self._decode_chunk_batch_response(payload)
+                    last_error = StorageError(f"Peer {peer.node_id} returned relay HTTP {response.status_code} for chunk batch")
+                except (RelayError, json.JSONDecodeError) as exc:
+                    last_error = exc
+                    LOG.debug("Relay chunk batch download from peer %s failed on attempt %s", peer.node_id, attempt + 1, exc_info=True)
+                if attempt == 0:
+                    time.sleep(0.4)
+            raise StorageError(f"Chunk-Batch konnte über Relay von Peer {peer.node_id} nicht geladen werden: {last_error}") from last_error
+
+        raise StorageError(f"Chunk-Batch konnte von Peer {peer.node_id} nicht geladen werden: {direct_error}") from direct_error
+
     def get_chunk(self, peer: Peer, *, digest: str) -> bytes:
         path = f"/api/p2p/chunks/{parse.quote(digest)}"
         url = f"{self.api_base(peer)}{path}"

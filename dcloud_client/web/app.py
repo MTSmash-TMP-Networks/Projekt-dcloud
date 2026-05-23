@@ -1482,6 +1482,9 @@ def create_app(
         all_peers = list(peers_by_id.values())
         chunks = sorted(manifest.chunks, key=lambda item: int(item["index"]))
         total_chunks = len(chunks)
+        chunks_by_digest = {str(chunk["hash"]): chunk for chunk in chunks}
+        missing: dict[str, dict[str, Any]] = {}
+
         for position, chunk in enumerate(chunks, start=1):
             digest = str(chunk["hash"])
             if progress_callback is not None:
@@ -1493,7 +1496,135 @@ def create_app(
                         "digest": digest,
                     }
                 )
-            if chunk_store.chunk_path(digest).exists():
+            if not chunk_store.chunk_path(digest).exists():
+                missing[digest] = chunk
+
+        if not missing:
+            return
+
+        missing_total = len(missing)
+        restored_digests: set[str] = set()
+        peer_candidates: dict[str, list[str]] = defaultdict(list)
+        peer_order: list[str] = []
+
+        for chunk in missing.values():
+            digest = str(chunk["hash"])
+            candidate_ids = [str(node_id) for node_id in chunk.get("locations", []) if str(node_id)]
+            candidate_ids.extend(peer.node_id for peer in all_peers)
+            seen: set[str] = set()
+            for node_id in candidate_ids:
+                if node_id == identity.node_id or node_id in seen or node_id not in peers_by_id:
+                    continue
+                seen.add(node_id)
+                peer_candidates[node_id].append(digest)
+                if node_id not in peer_order:
+                    peer_order.append(node_id)
+
+        def write_restored_chunk(digest: str, stored_data: bytes) -> bool:
+            chunk = chunks_by_digest.get(digest)
+            if chunk is None or chunk_store.chunk_path(digest).exists():
+                return False
+            chunk_store.write_stored_chunk(
+                stored_data,
+                original_size=int(chunk["size"]),
+                index=int(chunk["index"]),
+                compression=str(chunk.get("compression")) if chunk.get("compression") else None,
+                digest=digest,
+            )
+            restored_digests.add(digest)
+            missing.pop(digest, None)
+            return True
+
+        batch_size = 12
+        batch_byte_budget = 12 * 1024 * 1024
+        for node_id in peer_order:
+            if not missing:
+                break
+            peer = peers_by_id.get(node_id)
+            if peer is None:
+                continue
+            peer_name = peer.to_dict().get("display_name") or peer.node_id[:12]
+            candidate_digests = [digest for digest in peer_candidates.get(node_id, []) if digest in missing]
+            batch: list[str] = []
+            estimated_bytes = 0
+            for digest in candidate_digests:
+                if digest not in missing:
+                    continue
+                chunk = missing[digest]
+                estimated_size = int(chunk.get("stored_size") or chunk.get("size") or 0)
+                if batch and (len(batch) >= batch_size or estimated_bytes + estimated_size > batch_byte_budget):
+                    if progress_callback is not None:
+                        progress_callback(
+                            {
+                                "phase": "fetch_chunk_batch",
+                                "current_chunk": len(restored_digests),
+                                "total_chunks": total_chunks,
+                                "missing_chunks": len(missing),
+                                "missing_total": missing_total,
+                                "batch_size": len(batch),
+                                "current_peer": peer_name,
+                            }
+                        )
+                    try:
+                        received = p2p_client.get_chunks_batch(peer, digests=batch)
+                    except StorageError:
+                        received = {}
+                    for received_digest, stored_data in received.items():
+                        write_restored_chunk(received_digest, stored_data)
+                    if received and progress_callback is not None:
+                        progress_callback(
+                            {
+                                "phase": "fetch_chunk_batch",
+                                "current_chunk": len(restored_digests),
+                                "total_chunks": total_chunks,
+                                "missing_chunks": len(missing),
+                                "missing_total": missing_total,
+                                "batch_size": len(received),
+                                "current_peer": peer_name,
+                            }
+                        )
+                    batch = []
+                    estimated_bytes = 0
+                batch.append(digest)
+                estimated_bytes += estimated_size
+            if batch:
+                if progress_callback is not None:
+                    progress_callback(
+                        {
+                            "phase": "fetch_chunk_batch",
+                            "current_chunk": len(restored_digests),
+                            "total_chunks": total_chunks,
+                            "missing_chunks": len(missing),
+                            "missing_total": missing_total,
+                            "batch_size": len(batch),
+                            "current_peer": peer_name,
+                        }
+                    )
+                try:
+                    received = p2p_client.get_chunks_batch(peer, digests=batch)
+                except StorageError:
+                    received = {}
+                for received_digest, stored_data in received.items():
+                    write_restored_chunk(received_digest, stored_data)
+                if received and progress_callback is not None:
+                    progress_callback(
+                        {
+                            "phase": "fetch_chunk_batch",
+                            "current_chunk": len(restored_digests),
+                            "total_chunks": total_chunks,
+                            "missing_chunks": len(missing),
+                            "missing_total": missing_total,
+                            "batch_size": len(received),
+                            "current_peer": peer_name,
+                        }
+                    )
+
+        # Conservative fallback: if a peer/server is older and does not know the
+        # batch endpoint yet, still try the previous single-chunk API so mixed
+        # versions keep working.
+        for position, chunk in enumerate(chunks, start=1):
+            digest = str(chunk["hash"])
+            if digest not in missing:
                 continue
             tried: set[str] = set()
             restored = False
@@ -1518,15 +1649,9 @@ def create_app(
                     )
                 try:
                     stored_data = p2p_client.get_chunk(peer, digest=digest)
-                    chunk_store.write_stored_chunk(
-                        stored_data,
-                        original_size=int(chunk["size"]),
-                        index=int(chunk["index"]),
-                        compression=str(chunk.get("compression")) if chunk.get("compression") else None,
-                        digest=digest,
-                    )
-                    restored = True
-                    break
+                    restored = write_restored_chunk(digest, stored_data) or chunk_store.chunk_path(digest).exists()
+                    if restored:
+                        break
                 except StorageError:
                     continue
             if not restored:
@@ -1558,9 +1683,18 @@ def create_app(
             if phase == "restore_chunk":
                 server_percent = 60.0 + (current_chunk / max(1, total)) * 38.0
                 status = f"Datei wird zusammengesetzt… Chunk {current_chunk}/{total}"
+            elif phase == "fetch_chunk_batch":
+                missing_chunks = int(event.get("missing_chunks") or 0)
+                missing_total = int(event.get("missing_total") or missing_chunks or 1)
+                fetched = max(0, missing_total - missing_chunks)
+                batch_size = int(event.get("batch_size") or 0)
+                server_percent = 18.0 + (fetched / max(1, missing_total)) * 40.0
+                status = f"Fehlende Chunks werden gebündelt geladen… {fetched}/{missing_total}"
+                if batch_size:
+                    status += f" (+{batch_size})"
             elif phase == "fetch_chunk":
                 server_percent = 12.0 + ((max(0, current_chunk - 1) + 0.65) / max(1, total)) * 45.0
-                status = f"Fehlender Chunk wird vom Peer geladen… {current_chunk}/{total}"
+                status = f"Einzel-Fallback: fehlender Chunk wird geladen… {current_chunk}/{total}"
             else:
                 server_percent = 8.0 + (current_chunk / max(1, total)) * 20.0
                 status = f"Chunks werden geprüft… {current_chunk}/{total}"
@@ -1672,6 +1806,55 @@ def create_app(
         except StorageError:
             abort(404)
         return Response(data, mimetype="application/octet-stream")
+
+    @app.post("/api/p2p/chunks/batch/download")
+    def api_p2p_get_chunks_batch() -> Response:
+        try:
+            payload = request.get_json(force=True)
+            raw_digests = payload.get("digests", []) if isinstance(payload, dict) else []
+            if not isinstance(raw_digests, list) or not raw_digests:
+                raise StorageError("Batch payload must include at least one digest")
+            digests = list(dict.fromkeys(str(digest).strip() for digest in raw_digests if str(digest).strip()))
+            max_chunks = 16
+            max_payload_bytes = 16 * 1024 * 1024
+            chunks_payload: list[dict[str, Any]] = []
+            missing: list[str] = []
+            payload_bytes = 0
+            truncated = False
+            for digest in digests:
+                if len(chunks_payload) >= max_chunks:
+                    truncated = True
+                    break
+                try:
+                    data = chunk_store.read_stored_chunk(digest)
+                except StorageError:
+                    missing.append(digest)
+                    continue
+                if chunks_payload and payload_bytes + len(data) > max_payload_bytes:
+                    truncated = True
+                    break
+                chunks_payload.append(
+                    {
+                        "digest": digest,
+                        "stored_size": len(data),
+                        "stored_data_b64": base64.b64encode(data).decode("ascii"),
+                    }
+                )
+                payload_bytes += len(data)
+            return jsonify(
+                {
+                    "ok": True,
+                    "chunks": chunks_payload,
+                    "returned_count": len(chunks_payload),
+                    "requested_count": len(digests),
+                    "missing": missing,
+                    "truncated": truncated,
+                    "payload_bytes": payload_bytes,
+                    "state": state_payload(),
+                }
+            )
+        except (ValueError, StorageError, TypeError) as exc:
+            return jsonify({"ok": False, "message": str(exc), "state": state_payload()}), 400
 
     @app.post("/api/p2p/chunks/<digest>")
     def api_p2p_put_chunk(digest: str) -> Response:

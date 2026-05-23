@@ -1896,7 +1896,7 @@
         document.getElementById("transfer-peers").textContent = "Peer-Quellen werden geprüft";
         const localLine = document.getElementById("transfer-local");
         if(localLine) localLine.textContent = "Download-Zwischendatei";
-        document.getElementById("transfer-detail").textContent = "Bei großen oder verteilten Dateien kann es dauern, bis alle fehlenden Chunks geladen und die Datei zusammengesetzt ist. Der Browser-Download startet danach automatisch.";
+        document.getElementById("transfer-detail").textContent = "Fehlende Chunks werden jetzt gebündelt von Peers geladen und erst danach zusammengesetzt. Der Browser-Download startet automatisch, sobald die Datei vorbereitet ist.";
         renderTransferMetrics(["Chunks: —", "Remote-Quellen: —", "Zusammensetzen: —", "Status: Vorbereitung"]);
         setMiniProgress("client", 0);
         setMiniProgress("server", 0);
@@ -1952,20 +1952,20 @@
         document.getElementById("transfer-server").textContent = total ? `${Math.min(current, total)} / ${total} Chunk(s)` : "prüft Chunks…";
         document.getElementById("transfer-chunks").textContent = total ? `${Math.min(current, total)} / ${total}` : "—";
         document.getElementById("transfer-browser").textContent = progress.ok ? "Download startet…" : "wartet auf fertige Datei";
-        const peerText = progress.currentPeer ? `aktueller Peer: ${progress.currentPeer}` : "Peer-Quellen nach Bedarf";
+        const peerText = progress.currentPeer ? `aktuelle Quelle: ${progress.currentPeer}` : "Peer-Quellen nach Bedarf";
         document.getElementById("transfer-peers").textContent = peerText;
         document.getElementById("transfer-compression").textContent = "Dekomprimierung beim Wiederherstellen";
         renderTransferMetrics([
           total ? `Chunks: ${Math.min(current, total)}/${total}` : "Chunks: —",
           totalBytes ? `Dateigröße: ${formatBytes(totalBytes)}` : "Dateigröße: —",
           processed ? `Zusammengesetzt: ${formatBytes(processed)}` : "Zusammengesetzt: —",
-          progress.currentPeer ? `Quelle: ${progress.currentPeer}` : "Quelle: lokal/Peer-Fallback"
+          progress.currentPeer ? `Quelle: ${progress.currentPeer}` : "Quelle: lokal/Bündel-Fallback"
         ]);
         const lines = [];
         if(progress.status) lines.push(progress.status);
         if(progress.message) lines.push(progress.message);
         if(totalBytes) lines.push(`Datei: ${formatBytes(totalBytes)}`);
-        if(progress.currentPeer) lines.push(`Aktuelles Ziel: ${progress.currentPeer}`);
+        if(progress.currentPeer) lines.push(`Aktuelle Quelle: ${progress.currentPeer}`);
         document.getElementById("transfer-detail").textContent = lines.join("\n") || "Download wird vorbereitet…";
       }
       async function pollDownloadProgress(){
