@@ -9,7 +9,7 @@ import os
 import shutil
 import tempfile
 import zlib
-from typing import Any, BinaryIO, Iterable
+from typing import Any, BinaryIO, Callable, Iterable
 
 
 class StorageError(RuntimeError):
@@ -240,18 +240,40 @@ class ChunkStore:
             return zlib.decompress(data)
         raise StorageError(f"Unsupported chunk compression {compression}")
 
-    def restore_chunks(self, chunk_hashes: Iterable[str | dict[str, Any]], target: Path) -> Path:
+    def restore_chunks(
+        self,
+        chunk_hashes: Iterable[str | dict[str, Any]],
+        target: Path,
+        *,
+        progress_callback: Callable[[dict[str, Any]], None] | None = None,
+    ) -> Path:
         target.parent.mkdir(parents=True, exist_ok=True)
+        chunks = list(chunk_hashes)
+        total_chunks = len(chunks)
+        bytes_written = 0
         fd, tmp_name = tempfile.mkstemp(prefix="restore-", suffix=".tmp", dir=self.tmp_dir)
         try:
             with os.fdopen(fd, "wb") as handle:
-                for chunk in chunk_hashes:
+                for position, chunk in enumerate(chunks, start=1):
                     if isinstance(chunk, dict):
                         digest = str(chunk["hash"])
                         compression = chunk.get("compression")
-                        handle.write(self.read_chunk(digest, str(compression) if compression else None))
+                        raw_data = self.read_chunk(digest, str(compression) if compression else None)
                     else:
-                        handle.write(self.read_chunk(chunk))
+                        digest = str(chunk)
+                        raw_data = self.read_chunk(digest)
+                    handle.write(raw_data)
+                    bytes_written += len(raw_data)
+                    if progress_callback is not None:
+                        progress_callback(
+                            {
+                                "phase": "restore_chunk",
+                                "current_chunk": position,
+                                "total_chunks": total_chunks,
+                                "raw_bytes_processed": bytes_written,
+                                "digest": digest,
+                            }
+                        )
                 handle.flush()
                 os.fsync(handle.fileno())
             Path(tmp_name).replace(target)

@@ -968,6 +968,9 @@
       let currentUploadXhr = null;
       let currentUploadPoll = null;
       let currentUploadId = null;
+      let currentDownloadPoll = null;
+      let currentDownloadId = null;
+      let currentDownloadStarted = false;
       let selectedStoragePeerIds = new Set();
       const uploadQueue = [];
       let uploadWorkerRunning = false;
@@ -1462,7 +1465,7 @@
           access.className = "tile-meta";
           access.textContent = file.shared ? "🌐 freigegeben" : "🔒 privat";
           tile.append(name, meta, access);
-          tile.addEventListener("dblclick", () => { window.location.href = file.downloadUrl; });
+          tile.addEventListener("dblclick", () => { startDownload(file).catch(error => showToast(error.message, "error")); });
           tile.addEventListener("click", () => selectExplorerTile(tile, { kind:"file", file }));
           tile.addEventListener("contextmenu", event => {
             event.preventDefault();
@@ -1730,6 +1733,12 @@
           currentUploadPoll = null;
         }
       }
+      function stopDownloadPolling(){
+        if(currentDownloadPoll){
+          clearInterval(currentDownloadPoll);
+          currentDownloadPoll = null;
+        }
+      }
       function setMiniProgress(kind, percent){
         const safe = Math.max(0, Math.min(100, Number(percent || 0)));
         const bar = document.getElementById(`transfer-${kind}-progress`);
@@ -1854,6 +1863,8 @@
         showTransferPanel();
         setTransferPanelExpanded(true);
         resetTransferDetails(file);
+        const icon = document.querySelector(".transfer-icon");
+        if(icon) icon.textContent = "⬆️";
         document.getElementById("transfer-title").textContent = "Datei wird hochgeladen";
         document.getElementById("transfer-subtitle").textContent = "Kopieren nach dcloud Datenspeicher";
         document.getElementById("transfer-name").textContent = file.name;
@@ -1863,6 +1874,35 @@
         document.getElementById("transfer-progress").style.width = "0%";
         const cancel = document.getElementById("transfer-cancel");
         cancel.textContent = "Abbrechen";
+        cancel.disabled = false;
+      }
+      function showDownload(file){
+        stopDownloadPolling();
+        showTransferPanel();
+        setTransferPanelExpanded(true);
+        resetTransferDetails(file);
+        const icon = document.querySelector(".transfer-icon");
+        if(icon) icon.textContent = "⬇️";
+        currentDownloadId = null;
+        currentDownloadStarted = false;
+        document.getElementById("transfer-title").textContent = "Download wird vorbereitet";
+        document.getElementById("transfer-subtitle").textContent = "Chunks werden geprüft und bei Bedarf von Peers geladen";
+        document.getElementById("transfer-name").textContent = file.name;
+        document.getElementById("transfer-target").textContent = "Browser-Download";
+        document.getElementById("transfer-status").textContent = "Download wird angefordert…";
+        document.getElementById("transfer-browser").textContent = "wartet auf vorbereitete Datei";
+        document.getElementById("transfer-server").textContent = "Chunks werden geprüft…";
+        document.getElementById("transfer-compression").textContent = "Dekomprimierung beim Zusammensetzen";
+        document.getElementById("transfer-peers").textContent = "Peer-Quellen werden geprüft";
+        const localLine = document.getElementById("transfer-local");
+        if(localLine) localLine.textContent = "Download-Zwischendatei";
+        document.getElementById("transfer-detail").textContent = "Bei großen oder verteilten Dateien kann es dauern, bis alle fehlenden Chunks geladen und die Datei zusammengesetzt ist. Der Browser-Download startet danach automatisch.";
+        renderTransferMetrics(["Chunks: —", "Remote-Quellen: —", "Zusammensetzen: —", "Status: Vorbereitung"]);
+        setMiniProgress("client", 0);
+        setMiniProgress("server", 0);
+        setMiniProgress("peer", 0);
+        const cancel = document.getElementById("transfer-cancel");
+        cancel.textContent = "Einklappen";
         cancel.disabled = false;
       }
       function updateTransfer(percent, status){
@@ -1894,6 +1934,84 @@
         cancel.textContent = "Schließen";
         cancel.disabled = false;
         refreshState().catch(() => {});
+      }
+      function applyDownloadProgress(progress){
+        if(!progress) return;
+        const shownPercent = Math.max(lastTransferPercent, Number(progress.percent || progress.serverPercent || 0));
+        updateTransfer(shownPercent, progress.status || progress.message || "Download wird vorbereitet…");
+        const total = Number(progress.totalChunks || 0);
+        const current = Number(progress.currentChunk || 0);
+        const totalBytes = Number(progress.totalBytes || 0);
+        const processed = Number(progress.rawBytesProcessed || 0);
+        setMiniProgress("client", progress.active === false && progress.ok ? 100 : 0);
+        setMiniProgress("server", Math.max(0, Math.min(100, Number(progress.serverPercent || shownPercent || 0))));
+        setMiniProgress("peer", total ? Math.min(100, (Math.min(current, total) / total) * 100) : shownPercent);
+        document.getElementById("transfer-subtitle").textContent = progress.active === false
+          ? (progress.ok ? "Fertig vorbereitet – Browser-Download startet" : "Download-Vorbereitung fehlgeschlagen")
+          : "Chunks werden geprüft, von Peers geladen und lokal zusammengesetzt";
+        document.getElementById("transfer-server").textContent = total ? `${Math.min(current, total)} / ${total} Chunk(s)` : "prüft Chunks…";
+        document.getElementById("transfer-chunks").textContent = total ? `${Math.min(current, total)} / ${total}` : "—";
+        document.getElementById("transfer-browser").textContent = progress.ok ? "Download startet…" : "wartet auf fertige Datei";
+        const peerText = progress.currentPeer ? `aktueller Peer: ${progress.currentPeer}` : "Peer-Quellen nach Bedarf";
+        document.getElementById("transfer-peers").textContent = peerText;
+        document.getElementById("transfer-compression").textContent = "Dekomprimierung beim Wiederherstellen";
+        renderTransferMetrics([
+          total ? `Chunks: ${Math.min(current, total)}/${total}` : "Chunks: —",
+          totalBytes ? `Dateigröße: ${formatBytes(totalBytes)}` : "Dateigröße: —",
+          processed ? `Zusammengesetzt: ${formatBytes(processed)}` : "Zusammengesetzt: —",
+          progress.currentPeer ? `Quelle: ${progress.currentPeer}` : "Quelle: lokal/Peer-Fallback"
+        ]);
+        const lines = [];
+        if(progress.status) lines.push(progress.status);
+        if(progress.message) lines.push(progress.message);
+        if(totalBytes) lines.push(`Datei: ${formatBytes(totalBytes)}`);
+        if(progress.currentPeer) lines.push(`Aktuelles Ziel: ${progress.currentPeer}`);
+        document.getElementById("transfer-detail").textContent = lines.join("\n") || "Download wird vorbereitet…";
+      }
+      async function pollDownloadProgress(){
+        if(!currentDownloadId) return;
+        try{
+          const response = await fetch(`/api/downloads/${encodeURIComponent(currentDownloadId)}/status`, { headers:{ "Accept":"application/json" } });
+          if(!response.ok) return;
+          const progress = await response.json();
+          applyDownloadProgress(progress);
+          if(progress.active === false){
+            stopDownloadPolling();
+            if(progress.ok){
+              const url = progress.details && progress.details.downloadUrl;
+              document.getElementById("transfer-title").textContent = "Download startet";
+              updateTransfer(100, progress.message || "Download ist vorbereitet");
+              if(url && !currentDownloadStarted){
+                currentDownloadStarted = true;
+                window.location.href = url;
+              }
+            }else{
+              document.getElementById("transfer-title").textContent = "Download fehlgeschlagen";
+              showToast(progress.message || "Download fehlgeschlagen", "error");
+            }
+          }
+        }catch(error){
+          // Polling ist nur Zusatzinformation; beim nächsten Takt wird erneut versucht.
+        }
+      }
+      function startDownloadPolling(){
+        stopDownloadPolling();
+        currentDownloadPoll = setInterval(pollDownloadProgress, 500);
+        pollDownloadProgress();
+      }
+      async function startDownload(file){
+        if(!file || !file.id) return;
+        showDownload(file);
+        const response = await fetch(`/api/downloads/${encodeURIComponent(file.id)}/prepare`, {
+          method:"POST",
+          headers:{ "X-Requested-With":"XMLHttpRequest", "Accept":"application/json" }
+        });
+        const payload = await response.json();
+        if(!response.ok || !payload.ok) throw new Error(payload.message || "Download konnte nicht vorbereitet werden");
+        currentDownloadId = payload.downloadId;
+        currentDownloadStarted = false;
+        applyDownloadProgress(payload.progress);
+        startDownloadPolling();
       }
       function uploadFile(file, folder, doneCallback=null){
         const targetFolder = normalizeFolderPath(folder || DEFAULT_FOLDER);
@@ -2141,7 +2259,18 @@
       }
       function closeShareDialog(){ shareDialog.hidden = true; pendingShareFile = null; }
       async function shareFileWithPeer(file, peerNodeId){
-        await ajaxPost(file.shareUrl, { next:"/", shared:"on", peer_node_id: peerNodeId || "*" });
+        const previousId = file.id;
+        const payload = await ajaxPost(file.shareUrl, { next:"/", shared:"on", peer_node_id: peerNodeId || "*" });
+        const nextId = payload && payload.manifest && payload.manifest.manifest_id;
+        if(nextId && nextId !== previousId){
+          const replacement = findFileById(nextId);
+          if(replacement){
+            refreshSelectedFileReference(previousId, replacement);
+          }else{
+            applyManifestIdentity(file, payload && payload.manifest);
+            refreshSelectedFileReference(previousId, file);
+          }
+        }
       }
       async function toggleShare(file){
         if(file.shared){
@@ -2425,9 +2554,9 @@ ${file.name}`)) return;
       document.getElementById("ctxOpen").onclick = () => {
         closeCtx();
         if(selectedTarget.kind === "folder") openExplorerAt(selectedTarget.path);
-        if(selectedTarget.kind === "file") window.location.href = selectedTarget.file.downloadUrl;
+        if(selectedTarget.kind === "file") startDownload(selectedTarget.file).catch(error => showToast(error.message, "error"));
       };
-      document.getElementById("ctxDownload").onclick = () => { closeCtx(); if(selectedTarget.kind === "file") window.location.href = selectedTarget.file.downloadUrl; };
+      document.getElementById("ctxDownload").onclick = () => { closeCtx(); if(selectedTarget.kind === "file") startDownload(selectedTarget.file).catch(error => showToast(error.message, "error")); };
       document.getElementById("ctxShare").onclick = () => { closeCtx(); if(selectedTarget.kind === "file") toggleShare(selectedTarget.file).catch(error => showToast(error.message, "error")); };
       document.getElementById("ctxOffload").onclick = () => { closeCtx(); if(selectedTarget.kind === "file") offloadFile(selectedTarget.file).catch(error => showToast(error.message, "error")); };
       const ctxMoveFolderBtn = document.getElementById("ctxMoveFolder");
@@ -2497,6 +2626,11 @@ ${file.name}`)) return;
           stopUploadPolling();
           currentUploadXhr.abort();
           currentUploadXhr = null;
+        }else if(currentDownloadPoll){
+          stopDownloadPolling();
+          currentDownloadId = null;
+          document.getElementById("transfer-status").textContent = "Download-Status ausgeblendet; Server kann noch vorbereiten.";
+          setTransferPanelExpanded(false);
         }else{
           setTransferPanelExpanded(!transferExpanded);
         }
@@ -2529,11 +2663,11 @@ ${file.name}`)) return;
         }
         if(event.key === "Enter"){
           if(selectedTarget.kind === "folder") openExplorerAt(selectedTarget.path);
-          if(selectedTarget.kind === "file") window.location.href = selectedTarget.file.downloadUrl;
+          if(selectedTarget.kind === "file") startDownload(selectedTarget.file).catch(error => showToast(error.message, "error"));
         }
         if(event.ctrlKey && (event.key === "s" || event.key === "S") && selectedTarget.kind === "file"){
           event.preventDefault();
-          window.location.href = selectedTarget.file.downloadUrl;
+          startDownload(selectedTarget.file).catch(error => showToast(error.message, "error"));
         }
         if(event.ctrlKey && (event.key === "o" || event.key === "O") && selectedTarget.kind === "file" && selectedTarget.file.owner){
           event.preventDefault();

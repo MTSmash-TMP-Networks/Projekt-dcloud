@@ -10,7 +10,7 @@ import json
 import os
 import tempfile
 import time
-from typing import Any
+from typing import Any, Callable
 
 from .crypto import b64decode, sha256_hex, sign_bytes, verify_signature
 from .identity import NodeIdentity
@@ -633,9 +633,11 @@ class ManifestStore:
         if not path.exists():
             if self._restore_from_backup(path):
                 self._append_audit_event("restore_from_backup", {"manifest_id": manifest_id, "path": str(path)})
-            elif self._restore_from_trash(path):
-                self._append_audit_event("restore_from_trash", {"manifest_id": manifest_id, "path": str(path)})
             else:
+                # Do not resurrect retired/deleted manifests automatically.
+                # Sharing, moving and peer-offloading re-sign manifests and move the
+                # previous manifest id to .trash. A stale browser action against the
+                # old id must not bring that old entry back into the active file list.
                 self._append_audit_event("read_missing", {"manifest_id": manifest_id})
                 raise StorageError(f"Manifest {manifest_id} not found")
         raw_data = json.loads(path.read_text(encoding="utf-8"))
@@ -665,11 +667,16 @@ class ManifestStore:
             signature,
         )
 
-    def restore(self, manifest_id: str, target: Path | None = None) -> Path:
+    def restore(
+        self,
+        manifest_id: str,
+        target: Path | None = None,
+        progress_callback: Callable[[dict[str, Any]], None] | None = None,
+    ) -> Path:
         manifest = self.load(manifest_id)
         output = target or (self.chunk_store.downloads_dir / manifest.file_name)
         chunks = sorted(manifest.chunks, key=lambda item: int(item["index"]))
-        return self.chunk_store.restore_chunks(chunks, output)
+        return self.chunk_store.restore_chunks(chunks, output, progress_callback=progress_callback)
 
     def delete(self, manifest_id: str, *, delete_unreferenced_chunks: bool = True) -> None:
         manifest = self.load(manifest_id)

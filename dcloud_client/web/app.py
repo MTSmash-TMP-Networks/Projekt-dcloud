@@ -115,6 +115,9 @@ def create_app(
     relay_lock = threading.RLock()
     p2p_client = P2PStorageClient(default_web_port=config.web.port)
     upload_progress = UploadProgressTracker(persist_dir=chunk_store.tmp_dir / "upload_progress")
+    download_progress = UploadProgressTracker(persist_dir=chunk_store.tmp_dir / "download_progress")
+    download_results: dict[str, dict[str, Any]] = {}
+    download_lock = threading.RLock()
     chat_messages: dict[str, deque[dict[str, Any]]] = defaultdict(lambda: deque(maxlen=120))
     replication_repair_lock = threading.Lock()
     last_replication_repair_at = 0.0
@@ -228,7 +231,10 @@ def create_app(
     def _list_active_peers() -> list[Any]:
         if peer_connector is not None and hasattr(peer_connector, "prune_stale_peers"):
             peer_connector.prune_stale_peers()
-        return peer_provider.list_peers()
+        # The local node must never appear as a share/storage target. If a relay or
+        # stale discovery packet reports our own node id, sending a shared manifest
+        # back to ourselves can resurrect old manifest ids and duplicate files.
+        return [peer for peer in peer_provider.list_peers() if getattr(peer, "node_id", None) != identity.node_id]
 
     def stats_payload(stats: StorageStats) -> dict[str, int | str]:
         smb_root_path = str(app.config.get("DCLOUD_SMB_ROOT") or config.storage.path)
@@ -1152,7 +1158,7 @@ def create_app(
         return redirect(redirect_target)
 
     def _share_target_peers(target_value: str) -> tuple[list[Any], list[str]]:
-        peers = _list_active_peers()
+        peers = [peer for peer in _list_active_peers() if peer.node_id != identity.node_id]
         target_value = (target_value or "*").strip()
         if target_value in {"*", "all", "alle"}:
             return peers, ["*"]
@@ -1471,11 +1477,22 @@ def create_app(
             flash(f"Peer konnte nicht kontaktiert werden: {exc}", "error")
         return redirect(url_for("dashboard"))
 
-    def _ensure_manifest_chunks_available(manifest: FileManifest) -> None:
+    def _ensure_manifest_chunks_available(manifest: FileManifest, progress_callback: Any | None = None) -> None:
         peers_by_id = {peer.node_id: peer for peer in _list_active_peers()}
         all_peers = list(peers_by_id.values())
-        for chunk in sorted(manifest.chunks, key=lambda item: int(item["index"])):
+        chunks = sorted(manifest.chunks, key=lambda item: int(item["index"]))
+        total_chunks = len(chunks)
+        for position, chunk in enumerate(chunks, start=1):
             digest = str(chunk["hash"])
+            if progress_callback is not None:
+                progress_callback(
+                    {
+                        "phase": "check_chunk",
+                        "current_chunk": position,
+                        "total_chunks": total_chunks,
+                        "digest": digest,
+                    }
+                )
             if chunk_store.chunk_path(digest).exists():
                 continue
             tried: set[str] = set()
@@ -1489,6 +1506,16 @@ def create_app(
                 peer = peers_by_id.get(node_id)
                 if peer is None:
                     continue
+                if progress_callback is not None:
+                    progress_callback(
+                        {
+                            "phase": "fetch_chunk",
+                            "current_chunk": position,
+                            "total_chunks": total_chunks,
+                            "digest": digest,
+                            "current_peer": peer.to_dict().get("display_name") or peer.node_id[:12],
+                        }
+                    )
                 try:
                     stored_data = p2p_client.get_chunk(peer, digest=digest)
                     chunk_store.write_stored_chunk(
@@ -1504,6 +1531,127 @@ def create_app(
                     continue
             if not restored:
                 raise StorageError(f"Chunk {digest[:12]} ist aktuell auf keinem aktiven Peer erreichbar")
+
+    def _download_status_payload(download_id: str) -> dict[str, Any]:
+        payload = download_progress.get(download_id)
+        with download_lock:
+            result = dict(download_results.get(download_id, {}))
+        if result:
+            details = dict(payload.get("details") or {})
+            details.update(
+                {
+                    "downloadUrl": f"/api/downloads/{download_id}/file",
+                    "fileName": result.get("file_name", ""),
+                    "manifestId": result.get("manifest_id", ""),
+                }
+            )
+            payload["details"] = details
+        return payload
+
+    def _download_progress_handler(download_id: str, manifest: FileManifest):
+        total_chunks = max(1, len(manifest.chunks))
+
+        def handle(event: dict[str, Any]) -> None:
+            phase = str(event.get("phase") or "download")
+            current_chunk = int(event.get("current_chunk") or 0)
+            total = int(event.get("total_chunks") or total_chunks)
+            if phase == "restore_chunk":
+                server_percent = 60.0 + (current_chunk / max(1, total)) * 38.0
+                status = f"Datei wird zusammengesetzt… Chunk {current_chunk}/{total}"
+            elif phase == "fetch_chunk":
+                server_percent = 12.0 + ((max(0, current_chunk - 1) + 0.65) / max(1, total)) * 45.0
+                status = f"Fehlender Chunk wird vom Peer geladen… {current_chunk}/{total}"
+            else:
+                server_percent = 8.0 + (current_chunk / max(1, total)) * 20.0
+                status = f"Chunks werden geprüft… {current_chunk}/{total}"
+            download_progress.update(
+                download_id,
+                phase=phase,
+                status=status,
+                percent=min(99.0, server_percent),
+                server_percent=min(99.0, server_percent),
+                total_bytes=manifest.file_size,
+                raw_bytes_processed=int(event.get("raw_bytes_processed") or 0),
+                current_chunk=current_chunk,
+                total_chunks=total,
+                current_peer=str(event.get("current_peer") or ""),
+            )
+
+        return handle
+
+    def _prepare_download_background(download_id: str, manifest_id: str) -> None:
+        try:
+            manifest = manifest_store.load(manifest_id)
+            if not manifest_store.may_access(manifest, identity.node_id):
+                raise StorageError("Keine Berechtigung für diese Datei")
+            progress_handler = _download_progress_handler(download_id, manifest)
+            download_progress.update(
+                download_id,
+                phase="download_prepare",
+                status="Download wird vorbereitet…",
+                percent=3,
+                server_percent=3,
+                total_bytes=manifest.file_size,
+                total_chunks=len(manifest.chunks),
+                target_count=len({str(node_id) for chunk in manifest.chunks for node_id in chunk.get("locations", []) if str(node_id)}),
+            )
+            _ensure_manifest_chunks_available(manifest, progress_callback=progress_handler)
+            safe_name = secure_filename(manifest.file_name) or "download.bin"
+            output = chunk_store.downloads_dir / f"{download_id}-{safe_name}"
+            manifest_store.restore(manifest.manifest_id, target=output, progress_callback=progress_handler)
+            with download_lock:
+                download_results[download_id] = {
+                    "path": str(output),
+                    "file_name": manifest.file_name,
+                    "manifest_id": manifest.manifest_id,
+                }
+            download_progress.finish(
+                download_id,
+                ok=True,
+                message="Download ist vorbereitet und startet jetzt.",
+                details={"downloadUrl": f"/api/downloads/{download_id}/file"},
+            )
+        except Exception as exc:
+            download_progress.finish(download_id, ok=False, message=str(exc))
+
+    @app.post("/api/downloads/<manifest_id>/prepare")
+    def api_prepare_download(manifest_id: str) -> Response:
+        try:
+            manifest = manifest_store.load(manifest_id)
+            if not manifest_store.may_access(manifest, identity.node_id):
+                return jsonify({"ok": False, "message": "Keine Berechtigung für diese Datei"}), 404
+        except StorageError as exc:
+            return jsonify({"ok": False, "message": str(exc)}), 404
+        download_id = _safe_upload_id(f"dl-{uuid4().hex}")
+        download_progress.start(download_id, file_name=manifest.file_name, folder_path=manifest.folder_path, total_bytes=manifest.file_size)
+        download_progress.update(
+            download_id,
+            phase="download_prepare",
+            status="Download wird vorbereitet…",
+            percent=1,
+            server_percent=1,
+            total_chunks=len(manifest.chunks),
+        )
+        thread = threading.Thread(target=_prepare_download_background, args=(download_id, manifest.manifest_id), daemon=True)
+        thread.start()
+        return jsonify({"ok": True, "downloadId": download_id, "progress": _download_status_payload(download_id)})
+
+    @app.get("/api/downloads/<download_id>/status")
+    def api_download_status(download_id: str) -> Response:
+        return jsonify(_download_status_payload(_safe_upload_id(download_id)))
+
+    @app.get("/api/downloads/<download_id>/file")
+    def api_download_file(download_id: str) -> Response:
+        safe_id = _safe_upload_id(download_id)
+        progress = download_progress.get(safe_id)
+        if not progress.get("ok"):
+            abort(409, str(progress.get("message") or "Download ist noch nicht vorbereitet"))
+        with download_lock:
+            result = dict(download_results.get(safe_id, {}))
+        path = Path(str(result.get("path") or ""))
+        if not result or not path.exists():
+            abort(404)
+        return send_file(path, as_attachment=True, download_name=str(result.get("file_name") or path.name))
 
     @app.get("/download/<manifest_id>")
     def download(manifest_id: str) -> Response:
@@ -1652,6 +1800,8 @@ def create_app(
                 raise StorageError("Manifest share has already been revoked")
             if manifest_store.is_file_deleted(manifest.manifest_id, manifest.owner_node_id):
                 raise StorageError("Manifest has already been deleted by its owner")
+            if manifest.owner_node_id == identity.node_id:
+                return jsonify({"ok": True, "manifest_id": manifest.manifest_id, "ignored": "own_manifest", "state": state_payload()})
             manifest_store.save_imported(manifest)
             return jsonify({"ok": True, "manifest_id": manifest.manifest_id, "state": state_payload()})
         except (ValueError, TypeError, StorageError) as exc:
