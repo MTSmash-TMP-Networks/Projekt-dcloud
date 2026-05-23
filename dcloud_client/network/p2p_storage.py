@@ -666,25 +666,51 @@ class P2PStorageClient:
 
 
 def _rank_peers_by_speed(peers: list[Peer], p2p_client: P2PStorageClient) -> list[Peer]:
-    """Return only reachable peers sorted by fastest health-check response first."""
+    """Return storage candidates with fast direct peers first and relay peers kept.
+
+    The previous health probe only tested a direct HTTP ``/healthz`` route. That
+    accidentally removed PHP-relay peers from upload targets because relay peers
+    often have ``host == RELAY_HOST`` and are only reachable through the
+    forwarder/mailbox path. The upload then stored every chunk locally and never
+    created the intended safety replica. Direct peers are still ranked by a cheap
+    health check, but relay-routable peers are kept as valid storage candidates
+    so ``put_chunk``/``put_chunks_batch`` can use the PHP forwarder or mailbox.
+    """
     ranked: list[tuple[float, Peer]] = []
+    relay_ranked: list[tuple[float, Peer]] = []
+
     for peer in peers:
-        started = time.perf_counter()
-        latency = float("inf")
-        try:
-            url = f"{p2p_client.api_base(peer)}/healthz"
-            req = request.Request(url, method="GET")
-            with request.urlopen(req, timeout=max(0.75, p2p_client.timeout * 0.75)) as response:
-                if 200 <= response.status < 300:
-                    latency = time.perf_counter() - started
-        except (OSError, error.URLError, error.HTTPError):
-            pass
-        # Exclude non-responsive peers so stale network ghosts do not block
-        # chunk uploads with repeated connection timeouts.
-        if latency != float("inf"):
-            ranked.append((latency, peer))
+        if peer.host != RELAY_HOST:
+            started = time.perf_counter()
+            try:
+                url = f"{p2p_client.api_base(peer)}/healthz"
+                req = request.Request(url, method="GET")
+                with request.urlopen(req, timeout=max(0.75, p2p_client.timeout * 0.75)) as response:
+                    if 200 <= response.status < 300:
+                        ranked.append((time.perf_counter() - started, peer))
+                        continue
+            except (OSError, error.URLError, error.HTTPError):
+                LOG.debug("Direct health check for peer %s failed; checking relay fallback", peer.node_id, exc_info=True)
+
+        if p2p_client._relay_available(peer):  # noqa: SLF001 - same module, intentional fast-path check
+            # Do not send a mailbox health request here. It would add latency to
+            # every upload start and can itself queue behind chunk traffic. The
+            # actual write call below already performs direct-proxy/mailbox
+            # retries and records per-chunk failures.
+            penalty = 1.0 if peer.host == RELAY_HOST else 1.5
+            relay_ranked.append((penalty, peer))
+
     ranked.sort(key=lambda item: item[0])
-    return [peer for _, peer in ranked]
+    relay_ranked.sort(key=lambda item: item[0])
+
+    ordered: list[Peer] = []
+    seen: set[str] = set()
+    for _latency, peer in [*ranked, *relay_ranked]:
+        if peer.node_id in seen:
+            continue
+        seen.add(peer.node_id)
+        ordered.append(peer)
+    return ordered
 
 def _rotated_targets(targets: list[Peer | None], target_ids: list[str], start_index: int) -> list[tuple[Peer | None, str]]:
     if not targets:
