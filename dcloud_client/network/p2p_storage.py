@@ -423,17 +423,6 @@ class P2PStorageClient:
         data = json.dumps(payload, separators=(",", ":"), sort_keys=True).encode("utf-8")
         headers = {"Content-Type": "application/json", "Accept": "application/json"}
         response_payload: dict[str, Any] = {}
-        udp_result = self._try_udp_chunk_put(
-            peer,
-            digest=digest,
-            stored_data=stored_data,
-            original_size=original_size,
-            stored_size=stored_size,
-            index=index,
-            compression=compression,
-        )
-        if udp_result is not None and udp_result.ok:
-            return udp_result
         if peer.host != RELAY_HOST:
             url = f"{self.api_base(peer)}{path}"
             req = request.Request(url, data=data, headers=headers, method="POST")
@@ -472,17 +461,6 @@ class P2PStorageClient:
     def get_chunk(self, peer: Peer, *, digest: str) -> bytes:
         path = f"/api/p2p/chunks/{parse.quote(digest)}"
         direct_error: Exception | None = None
-        udp_result = self._try_udp_chunk_put(
-            peer,
-            digest=digest,
-            stored_data=stored_data,
-            original_size=original_size,
-            stored_size=stored_size,
-            index=index,
-            compression=compression,
-        )
-        if udp_result is not None and udp_result.ok:
-            return udp_result
         if peer.host != RELAY_HOST:
             for base in self.candidate_api_bases(peer):
                 req = request.Request(f"{base}{path}", headers={"Accept": "application/octet-stream"}, method="GET")
@@ -518,17 +496,6 @@ class P2PStorageClient:
     def _post_json_to_peer(self, peer: Peer, *, path: str, payload: dict[str, Any], success_message: str, log_message: str) -> PeerTransferResult:
         data = json.dumps(payload, sort_keys=True).encode("utf-8")
         headers = {"Content-Type": "application/json", "Accept": "application/json"}
-        udp_result = self._try_udp_chunk_put(
-            peer,
-            digest=digest,
-            stored_data=stored_data,
-            original_size=original_size,
-            stored_size=stored_size,
-            index=index,
-            compression=compression,
-        )
-        if udp_result is not None and udp_result.ok:
-            return udp_result
         if peer.host != RELAY_HOST:
             url = f"{self.api_base(peer)}{path}"
             req = request.Request(url, data=data, headers=headers, method="POST")

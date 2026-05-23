@@ -185,9 +185,10 @@ def create_app(
 
     def _cleanup_storage_garbage(*, stale_tmp_age_seconds: int = 900) -> dict[str, int]:
         referenced_chunks = {
-            str(chunk["hash"])
+            str(chunk.get("hash", "")).strip()
             for manifest in manifest_store.list_manifests()
             for chunk in manifest.chunks
+            if str(chunk.get("hash", "")).strip()
         }
         removed_unreferenced_chunks = 0
         removed_stale_tmp_files = 0
@@ -359,15 +360,28 @@ def create_app(
                         stored_data = chunk_store.read_stored_chunk(digest)
                     except StorageError:
                         continue
+                    try:
+                        original_size = int(chunk.get("size", len(stored_data)))
+                    except (TypeError, ValueError):
+                        original_size = len(stored_data)
+                    try:
+                        stored_size = int(chunk.get("stored_size", len(stored_data)))
+                    except (TypeError, ValueError):
+                        stored_size = len(stored_data)
+                    try:
+                        chunk_index = int(chunk.get("index", 0))
+                    except (TypeError, ValueError):
+                        chunk_index = 0
+                    compression = str(chunk.get("compression")) if chunk.get("compression") else None
                     for peer_id, peer in peers_by_id.items():
                         transfer = p2p_client.put_chunk(
                             peer,
                             digest=digest,
                             stored_data=stored_data,
-                            original_size=int(chunk.get("size", len(stored_data))),
-                            stored_size=int(chunk.get("stored_size", len(stored_data))),
-                            index=int(chunk.get("index", 0)),
-                            compression=str(chunk.get("compression")) if chunk.get("compression") else None,
+                            original_size=original_size,
+                            stored_size=stored_size,
+                            index=chunk_index,
+                            compression=compression,
                         )
                         if transfer.ok:
                             chunk["locations"] = list(dict.fromkeys([*existing_locations, peer_id]))
@@ -1753,7 +1767,11 @@ def create_app(
                 removed_manifest = True
 
             removed_chunks = manifest_store.delete_chunks_if_unreferenced(
-                [str(chunk["hash"]) for chunk in deletion_manifest.chunks]
+                [
+                    str(chunk.get("hash", "")).strip()
+                    for chunk in deletion_manifest.chunks
+                    if str(chunk.get("hash", "")).strip()
+                ]
             )
             _sync_peer_connector_settings()
             return jsonify({
