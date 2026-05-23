@@ -10,7 +10,7 @@ declare(strict_types=1);
  * Landing page intentionally reveals only minimal information.
  */
 
-const DCLOUD_RELAY_VERSION = '1.5.0';
+const DCLOUD_RELAY_VERSION = '1.5.1';
 const DCLOUD_RELAY_TOKEN_ROTATION_SECONDS = 86400;
 const DCLOUD_PEER_TTL_SECONDS = 45;
 const DCLOUD_MESSAGE_TTL_SECONDS = 900;
@@ -22,6 +22,9 @@ const DCLOUD_DIRECT_PROXY_TIMEOUT_SECONDS = 90;
 const DCLOUD_CLEANUP_INTERVAL_SECONDS = 30;
 const DCLOUD_EXTERNAL_LINK_MAX_TTL_SECONDS = 3600;
 const DCLOUD_EXTERNAL_LINK_TOKEN_BYTES = 24;
+const DCLOUD_EXTERNAL_MAILBOX_TIMEOUT_SECONDS = 300;
+const DCLOUD_EXTERNAL_MAILBOX_MAX_FILE_BYTES = 190000000; // legacy JSON/base64 mailbox safety limit
+const DCLOUD_EXTERNAL_STREAM_CHUNK_TTL_SECONDS = 3900;
 
 $GLOBALS['DCLOUD_CURRENT_INPUT'] = [];
 
@@ -144,6 +147,348 @@ function dcloud_safe_public_token($value): string {
         dcloud_fail('Ungueltiger Download-Token', 404);
     }
     return $token;
+}
+
+
+function dcloud_path_is_allowed_for_mailbox(string $method, string $path): bool {
+    $method = strtoupper($method);
+    if (!in_array($method, ['GET', 'POST'], true)) return false;
+    if (strncmp($path, '/api/p2p/', 9) === 0) return true;
+    if ($method === 'GET' && preg_match('#^/api/external-relay/stream/[A-Za-z0-9_-]{12,200}/[A-Za-z0-9_.:-]{12,160}$#', $path) === 1) return true;
+    if ($method === 'GET' && preg_match('#^/external/[A-Za-z0-9_-]{12,200}$#', $path) === 1) return true;
+    return false;
+}
+
+
+function dcloud_remove_tree(string $dir): void {
+    if (!is_dir($dir)) return;
+    $items = scandir($dir);
+    if ($items !== false) {
+        foreach ($items as $item) {
+            if ($item === '.' || $item === '..') continue;
+            $path = $dir . DIRECTORY_SEPARATOR . $item;
+            if (is_dir($path)) {
+                dcloud_remove_tree($path);
+            } else {
+                @unlink($path);
+            }
+        }
+    }
+    @rmdir($dir);
+}
+
+function dcloud_external_stream_base_dir(): string {
+    $dir = dcloud_storage_dir() . DIRECTORY_SEPARATOR . 'external-streams';
+    if (!is_dir($dir) && !@mkdir($dir, 0700, true) && !is_dir($dir)) {
+        dcloud_fail('Relay-Stream-Verzeichnis konnte nicht erstellt werden', 500);
+    }
+    return $dir;
+}
+
+function dcloud_external_stream_dir(string $streamId): string {
+    $safe = dcloud_safe_filename($streamId);
+    $dir = dcloud_external_stream_base_dir() . DIRECTORY_SEPARATOR . $safe;
+    if (!is_dir($dir) && !@mkdir($dir, 0700, true) && !is_dir($dir)) {
+        dcloud_fail('Relay-Stream konnte nicht erstellt werden', 500);
+    }
+    return $dir;
+}
+
+function dcloud_external_stream_chunk_file(string $streamId, int $sequence): string {
+    return dcloud_external_stream_dir($streamId) . DIRECTORY_SEPARATOR . sprintf('chunk-%08d.bin', $sequence);
+}
+
+function dcloud_external_stream_cleanup(): void {
+    $base = dcloud_external_stream_base_dir();
+    $now = time();
+    foreach (glob($base . DIRECTORY_SEPARATOR . '*') ?: [] as $dir) {
+        if (!is_dir($dir)) continue;
+        $mtime = (int)@filemtime($dir);
+        if ($mtime <= 0 || $now - $mtime > DCLOUD_EXTERNAL_STREAM_CHUNK_TTL_SECONDS) {
+            dcloud_remove_tree($dir);
+        }
+    }
+}
+
+function dcloud_external_stream_write_atomic(string $path, string $data): void {
+    $tmp = $path . '.' . bin2hex(random_bytes(6)) . '.tmp';
+    if (file_put_contents($tmp, $data, LOCK_EX) === false) {
+        dcloud_fail('Relay-Stream konnte nicht geschrieben werden', 500);
+    }
+    if (!@rename($tmp, $path)) {
+        @unlink($tmp);
+        dcloud_fail('Relay-Stream-Datei konnte nicht ausgetauscht werden', 500);
+    }
+}
+
+function dcloud_external_stream_event(array $input): void {
+    $streamId = dcloud_safe_id(dcloud_first_string_value($input, ['stream_id', 'external_stream_id']), 'stream_id');
+    $action = dcloud_normalize_action((string)($input['action'] ?? ''));
+    $dir = dcloud_external_stream_dir($streamId);
+    @touch($dir);
+
+    if ($action === 'external_stream_start') {
+        $meta = [
+            'stream_id' => $streamId,
+            'file_name' => dcloud_safe_external_file_name($input['file_name'] ?? 'download.bin'),
+            'file_size' => max(0, (int)($input['file_size'] ?? 0)),
+            'content_type' => (string)($input['content_type'] ?? 'application/octet-stream'),
+            'created_at' => time(),
+        ];
+        dcloud_write_json_file($dir . DIRECTORY_SEPARATOR . 'meta.json', $meta);
+        dcloud_json_response(['ok' => true, 'stream_id' => $streamId, 'event' => 'start']);
+    }
+
+    if ($action === 'external_stream_chunk') {
+        $sequence = max(0, (int)($input['sequence'] ?? -1));
+        $bodyBase64 = (string)($input['body_base64'] ?? '');
+        $decoded = base64_decode($bodyBase64, true);
+        if ($decoded === false) {
+            dcloud_fail('Relay-Stream-Chunk ist ungueltig base64-kodiert', 400);
+        }
+        dcloud_external_stream_write_atomic(dcloud_external_stream_chunk_file($streamId, $sequence), $decoded);
+        dcloud_json_response(['ok' => true, 'stream_id' => $streamId, 'event' => 'chunk', 'sequence' => $sequence, 'bytes' => strlen($decoded)]);
+    }
+
+    if ($action === 'external_stream_finish') {
+        $done = [
+            'stream_id' => $streamId,
+            'chunks' => max(0, (int)($input['chunks'] ?? 0)),
+            'bytes' => max(0, (int)($input['bytes'] ?? 0)),
+            'finished_at' => time(),
+        ];
+        dcloud_write_json_file($dir . DIRECTORY_SEPARATOR . 'done.json', $done);
+        dcloud_json_response(['ok' => true, 'stream_id' => $streamId, 'event' => 'finish']);
+    }
+
+    if ($action === 'external_stream_error') {
+        $error = [
+            'stream_id' => $streamId,
+            'message' => substr((string)($input['message'] ?? 'Unbekannter externer Download-Fehler'), 0, 500),
+            'failed_at' => time(),
+        ];
+        dcloud_write_json_file($dir . DIRECTORY_SEPARATOR . 'error.json', $error);
+        dcloud_json_response(['ok' => true, 'stream_id' => $streamId, 'event' => 'error']);
+    }
+
+    dcloud_fail('Ungueltiges Relay-Stream-Ereignis', 400, ['action' => $action]);
+}
+
+function dcloud_send_external_stream_headers(array $meta, string $fallbackFileName, int $fallbackFileSize): void {
+    if (headers_sent()) return;
+    $fileName = dcloud_safe_external_file_name($meta['file_name'] ?? $fallbackFileName);
+    $fileSize = max(0, (int)($meta['file_size'] ?? $fallbackFileSize));
+    http_response_code(200);
+    header('Content-Type: application/octet-stream');
+    header('Content-Disposition: attachment; filename="' . addcslashes($fileName, "\\\"") . '"');
+    header('Cache-Control: no-store');
+    header('X-Accel-Buffering: no');
+    header('X-Content-Type-Options: nosniff');
+    header('X-DCloud-Relay-Mode: reverse_mailbox_stream');
+    if ($fileSize > 0) {
+        header('Content-Length: ' . $fileSize);
+    }
+    header('Connection: close');
+}
+
+function dcloud_external_download_via_stream_mailbox(string $targetNodeId, string $localToken, string $fileName, int $fileSize): void {
+    @set_time_limit(max(30, DCLOUD_EXTERNAL_MAILBOX_TIMEOUT_SECONDS + 60));
+    dcloud_external_stream_cleanup();
+    $streamId = bin2hex(random_bytes(16));
+    $requestId = bin2hex(random_bytes(16));
+    $fromNodeId = 'external-' . substr($requestId, 0, 16);
+    $envelope = [
+        'request_id' => $requestId,
+        'from_node_id' => $fromNodeId,
+        'to_node_id' => $targetNodeId,
+        'method' => 'GET',
+        'path' => '/api/external-relay/stream/' . rawurlencode($localToken) . '/' . rawurlencode($streamId),
+        'headers' => [
+            'Accept' => 'application/octet-stream',
+            'X-DCloud-External-Relay' => '1',
+            'X-DCloud-External-Stream-ID' => $streamId,
+        ],
+        'body_base64' => '',
+        'created_at' => time(),
+        'external_download' => true,
+    ];
+    $file = dcloud_queue_dir($targetNodeId) . DIRECTORY_SEPARATOR . time() . '-' . dcloud_safe_filename($requestId) . '.json';
+    dcloud_write_json_file($file, $envelope);
+
+    $dir = dcloud_external_stream_dir($streamId);
+    $metaFile = $dir . DIRECTORY_SEPARATOR . 'meta.json';
+    $doneFile = $dir . DIRECTORY_SEPARATOR . 'done.json';
+    $errorFile = $dir . DIRECTORY_SEPARATOR . 'error.json';
+    $deadline = microtime(true) + DCLOUD_EXTERNAL_MAILBOX_TIMEOUT_SECONDS;
+    $sequence = 0;
+    $headersSent = false;
+
+    while (microtime(true) < $deadline) {
+        if (file_exists($errorFile)) {
+            $error = dcloud_read_json_file($errorFile, []);
+            if (!$headersSent) {
+                dcloud_clear_all_output_buffers();
+                http_response_code(502);
+                header('Content-Type: text/plain; charset=utf-8');
+                header('Cache-Control: no-store');
+                echo (string)($error['message'] ?? 'Der dcloud-Node konnte den externen Download nicht bereitstellen.');
+                dcloud_remove_tree($dir);
+                dcloud_finalize_and_exit();
+            }
+            dcloud_remove_tree($dir);
+            dcloud_finalize_and_exit();
+        }
+
+        if (!$headersSent) {
+            if (file_exists($metaFile)) {
+                $meta = dcloud_read_json_file($metaFile, []);
+                dcloud_clear_all_output_buffers();
+                dcloud_send_external_stream_headers($meta, $fileName, $fileSize);
+                $headersSent = true;
+                @flush();
+            } else {
+                usleep(200000);
+                continue;
+            }
+        }
+
+        $chunkFile = dcloud_external_stream_chunk_file($streamId, $sequence);
+        if (file_exists($chunkFile)) {
+            $chunk = file_get_contents($chunkFile);
+            @unlink($chunkFile);
+            if ($chunk !== false && $chunk !== '') {
+                echo $chunk;
+                @flush();
+            }
+            $sequence++;
+            $deadline = microtime(true) + DCLOUD_EXTERNAL_MAILBOX_TIMEOUT_SECONDS;
+            continue;
+        }
+
+        if (file_exists($doneFile)) {
+            dcloud_remove_tree($dir);
+            dcloud_finalize_and_exit();
+        }
+        usleep(200000);
+    }
+
+    if (!$headersSent) {
+        dcloud_clear_all_output_buffers();
+        http_response_code(504);
+        header('Content-Type: text/plain; charset=utf-8');
+        header('Cache-Control: no-store');
+        echo 'Der dcloud-Node hat den externen Relay-Download nicht rechtzeitig gestartet. Bitte pruefen, ob dcloud laeuft und mit dem PHP-Relay verbunden ist.';
+    }
+    dcloud_remove_tree($dir);
+    dcloud_finalize_and_exit();
+}
+
+function dcloud_response_headers_to_browser(array $headers): array {
+    $out = [];
+    foreach ($headers as $name => $value) {
+        if (is_int($name)) {
+            if (!is_string($value) || strpos($value, ':') === false) continue;
+            [$name, $value] = explode(':', $value, 2);
+        }
+        $name = trim((string)$name);
+        if ($name === '') continue;
+        $lower = strtolower($name);
+        if ($lower === 'content-type' || $lower === 'content-disposition' || $lower === 'content-length' || strncmp($lower, 'x-dcloud-', 9) === 0) {
+            $out[$name] = trim((string)$value);
+        }
+    }
+    return $out;
+}
+
+function dcloud_send_mailbox_response_to_browser(array $response): void {
+    $statusCode = (int)($response['status_code'] ?? 502);
+    $headers = is_array($response['headers'] ?? null) ? dcloud_response_headers_to_browser($response['headers']) : [];
+    $bodyBase64 = (string)($response['body_base64'] ?? '');
+    $body = '';
+    if ($bodyBase64 !== '') {
+        $decoded = base64_decode($bodyBase64, true);
+        if ($decoded === false) {
+            dcloud_clear_all_output_buffers();
+            http_response_code(502);
+            header('Content-Type: text/plain; charset=utf-8');
+            header('Cache-Control: no-store');
+            echo 'Die Relay-Mailbox-Antwort enthaelt ungueltige Nutzdaten.';
+            dcloud_finalize_and_exit();
+        }
+        $body = $decoded;
+    }
+
+    dcloud_clear_all_output_buffers();
+    if (!headers_sent()) {
+        http_response_code($statusCode > 0 ? $statusCode : 502);
+        header('Cache-Control: no-store');
+        header('X-Accel-Buffering: no');
+        header('X-Content-Type-Options: nosniff');
+        header('X-DCloud-Relay-Mode: mailbox_external');
+        $contentType = $headers['Content-Type'] ?? ($headers['content-type'] ?? 'application/octet-stream');
+        header('Content-Type: ' . str_replace(["\r", "\n"], ' ', (string)$contentType));
+        $contentDisposition = $headers['Content-Disposition'] ?? ($headers['content-disposition'] ?? '');
+        if ($contentDisposition !== '') {
+            header('Content-Disposition: ' . str_replace(["\r", "\n"], ' ', (string)$contentDisposition));
+        }
+        $contentLength = $headers['Content-Length'] ?? ($headers['content-length'] ?? '');
+        if ($contentLength !== '' && preg_match('/^\d+$/', (string)$contentLength)) {
+            header('Content-Length: ' . (string)$contentLength);
+        } else {
+            header('Content-Length: ' . strlen($body));
+        }
+    }
+    echo $body;
+    dcloud_finalize_and_exit();
+}
+
+function dcloud_external_download_via_mailbox(string $targetNodeId, string $localToken): void {
+    @set_time_limit(max(30, DCLOUD_EXTERNAL_MAILBOX_TIMEOUT_SECONDS + 30));
+    $requestId = bin2hex(random_bytes(16));
+    $fromNodeId = 'external-' . substr($requestId, 0, 16);
+    $envelope = [
+        'request_id' => $requestId,
+        'from_node_id' => $fromNodeId,
+        'to_node_id' => $targetNodeId,
+        'method' => 'GET',
+        'path' => '/external/' . rawurlencode($localToken),
+        'headers' => [
+            'Accept' => 'application/octet-stream',
+            'X-DCloud-External-Relay' => '1',
+            'X-DCloud-Relay-Mailbox' => '1',
+        ],
+        'body_base64' => '',
+        'created_at' => time(),
+        'external_download' => true,
+    ];
+    $file = dcloud_queue_dir($targetNodeId) . DIRECTORY_SEPARATOR . time() . '-' . dcloud_safe_filename($requestId) . '.json';
+    dcloud_write_json_file($file, $envelope);
+
+    $deadline = microtime(true) + DCLOUD_EXTERNAL_MAILBOX_TIMEOUT_SECONDS;
+    $responseFile = dcloud_response_file($requestId);
+    do {
+        if (file_exists($responseFile)) {
+            $response = dcloud_read_json_file($responseFile, []);
+            @unlink($responseFile);
+            if (!$response || !dcloud_response_payload_is_valid($response) || (string)($response['request_id'] ?? '') !== $requestId) {
+                dcloud_clear_all_output_buffers();
+                http_response_code(502);
+                header('Content-Type: text/plain; charset=utf-8');
+                header('Cache-Control: no-store');
+                echo 'Die Relay-Mailbox hat eine ungueltige Download-Antwort erhalten.';
+                dcloud_finalize_and_exit();
+            }
+            dcloud_send_mailbox_response_to_browser($response);
+        }
+        usleep(200000);
+    } while (microtime(true) < $deadline);
+
+    dcloud_clear_all_output_buffers();
+    http_response_code(504);
+    header('Content-Type: text/plain; charset=utf-8');
+    header('Cache-Control: no-store');
+    echo 'Der dcloud-Node hat den externen Relay-Download nicht rechtzeitig beantwortet. Bitte pruefen, ob dcloud laeuft und mit dem PHP-Relay verbunden ist.';
+    dcloud_finalize_and_exit();
 }
 
 function dcloud_safe_external_file_name($value): string {
@@ -678,7 +1023,7 @@ function dcloud_envelope_is_valid(array $payload): bool {
     if (!dcloud_valid_id($payload['from_node_id'] ?? '') || !dcloud_valid_id($payload['to_node_id'] ?? '')) return false;
     $method = strtoupper((string)($payload['method'] ?? ''));
     $path = (string)($payload['path'] ?? '');
-    return in_array($method, ['GET', 'POST'], true) && strncmp($path, '/api/p2p/', 9) === 0;
+    return dcloud_path_is_allowed_for_mailbox($method, $path);
 }
 
 function dcloud_response_payload_is_valid(array $payload): bool {
@@ -710,6 +1055,7 @@ function dcloud_cleanup(): void {
     }
 
     dcloud_cleanup_external_links(true);
+    dcloud_external_stream_cleanup();
 }
 
 function dcloud_cleanup_if_due(): void {
@@ -1180,6 +1526,7 @@ function dcloud_create_external_download_link(array $input): void {
     $targetNodeId = dcloud_safe_id($targetNodeIdRaw, 'target_node_id');
     $localToken = dcloud_safe_public_token($input['local_token'] ?? ($input['token'] ?? ''));
     $fileName = dcloud_safe_external_file_name($input['file_name'] ?? 'download.bin');
+    $fileSize = max(0, (int)($input['file_size'] ?? 0));
     $now = time();
     $requestedTtl = (int)($input['ttl_seconds'] ?? 3600);
     $requestedTtl = max(1, min(DCLOUD_EXTERNAL_LINK_MAX_TTL_SECONDS, $requestedTtl));
@@ -1209,6 +1556,7 @@ function dcloud_create_external_download_link(array $input): void {
         'target_node_id' => $targetNodeId,
         'local_token' => $localToken,
         'file_name' => $fileName,
+        'file_size' => $fileSize,
         'created_at' => $now,
         'expires_at' => $expiresAt,
         'creator_node_id' => dcloud_safe_id((string)($input['node_id'] ?? $targetNodeId), 'node_id'),
@@ -1223,6 +1571,7 @@ function dcloud_create_external_download_link(array $input): void {
         'token' => $publicToken,
         'expires_at' => $expiresAt,
         'expiresInSeconds' => max(0, $expiresAt - $now),
+        'delivery_mode' => 'reverse_mailbox_stream',
         'message' => 'Relay-Download-Link wurde erstellt',
     ]);
 }
@@ -1252,13 +1601,15 @@ function dcloud_external_download_via_relay(string $token): void {
     }
     $targetNodeId = dcloud_safe_id((string)($item['target_node_id'] ?? ''), 'target_node_id');
     $localToken = dcloud_safe_public_token($item['local_token'] ?? '');
-    $peer = dcloud_find_active_peer($targetNodeId);
-    $url = dcloud_forward_target_url($peer, '/external/' . rawurlencode($localToken));
-    $headers = [
-        'Accept' => 'application/octet-stream',
-        'X-DCloud-External-Relay' => '1',
-    ];
-    dcloud_stream_direct_proxy_http($url, 'GET', $headers, '', DCLOUD_DIRECT_PROXY_TIMEOUT_SECONDS);
+    $fileName = dcloud_safe_external_file_name($item['file_name'] ?? 'download.bin');
+    $fileSize = max(0, (int)($item['file_size'] ?? 0));
+
+    // Externe Links muessen auch funktionieren, wenn der dcloud-Node hinter NAT,
+    // DS-Lite oder einer Firewall sitzt. Darum wird hier nicht der direkte
+    // PHP-Forwarder verwendet. Das Relay legt eine Stream-Anfrage in die normale
+    // Mailbox; der Node holt sie aktiv ab und schiebt die Datei in kleinen
+    // Paketen zum Relay, waehrend der Browser aus demselben Stream liest.
+    dcloud_external_download_via_stream_mailbox($targetNodeId, $localToken, $fileName, $fileSize);
 }
 
 function dcloud_register(array $input): void {
@@ -1345,8 +1696,8 @@ function dcloud_enqueue_request(array $input): void {
     $method = strtoupper((string)($input['method'] ?? 'GET'));
     $path = (string)($input['path'] ?? ($input['api_path'] ?? ''));
 
-    if (!in_array($method, ['GET', 'POST'], true) || strncmp($path, '/api/p2p/', 9) !== 0) {
-        dcloud_fail('Nur GET/POST auf /api/p2p/ sind erlaubt', 403, ['method' => $method, 'path' => $path]);
+    if (!dcloud_path_is_allowed_for_mailbox($method, $path)) {
+        dcloud_fail('Nur GET/POST auf /api/p2p/ oder externe Relay-Stream-Pfade sind erlaubt', 403, ['method' => $method, 'path' => $path]);
     }
 
     $bodyBase64 = (string)($input['body_base64'] ?? ($input['body'] ?? ''));
@@ -1532,6 +1883,12 @@ try {
 
         case 'create_external_download_link':
             dcloud_create_external_download_link($input);
+            break;
+        case 'external_stream_start':
+        case 'external_stream_chunk':
+        case 'external_stream_finish':
+        case 'external_stream_error':
+            dcloud_external_stream_event($input);
             break;
 
         case 'poll_requests':

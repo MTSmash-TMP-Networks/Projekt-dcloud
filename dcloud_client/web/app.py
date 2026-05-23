@@ -17,6 +17,7 @@ import base64
 import socket
 import time
 import subprocess
+import re
 
 from flask import Flask, Response, abort, flash, jsonify, redirect, render_template, request, send_file, url_for
 from werkzeug.utils import secure_filename
@@ -246,6 +247,7 @@ def create_app(
                     file_name=manifest.file_name,
                     expires_at=expires_at,
                     ttl_seconds=ttl_seconds,
+                    file_size=getattr(manifest, "file_size", 0),
                 )
             except Exception as exc:
                 results.append({
@@ -813,14 +815,100 @@ def create_app(
                 if hasattr(connector, name):
                     setattr(connector, name, value)
 
+    def _stream_external_download_to_relay(local_token: str, stream_id: str, relay_client: HttpRelayClient) -> RelayHttpResponse:
+        safe_token = "".join(char for char in str(local_token or "") if char.isalnum() or char in "-_")
+        if not safe_token or safe_token != local_token:
+            return RelayHttpResponse(404, {"Content-Type": "application/json"}, b'{"ok":false,"message":"Ungueltiger externer Download-Token"}')
+        try:
+            with external_link_lock:
+                _cleanup_external_download_links(persist=True)
+                item = dict(external_download_links.get(safe_token) or {})
+            if not item:
+                raise StorageError("Dieser Download-Link ist abgelaufen oder ungültig")
+            if float(item.get("expires_at") or 0) <= time.time():
+                with external_link_lock:
+                    external_download_links.pop(safe_token, None)
+                    _persist_external_download_links()
+                raise StorageError("Dieser Download-Link ist abgelaufen")
+            manifest = manifest_store.load(str(item.get("manifest_id") or ""))
+            if manifest.owner_node_id != identity.node_id:
+                raise StorageError("Nur der Eigentümer kann diesen externen Download bereitstellen")
+            _ensure_manifest_chunks_available(manifest)
+            output_path = manifest_store.restore(manifest.manifest_id)
+            file_size = output_path.stat().st_size if output_path.exists() else manifest.file_size
+            relay_client.post_external_stream_start(
+                stream_id=stream_id,
+                file_name=manifest.file_name,
+                file_size=file_size,
+                content_type="application/octet-stream",
+            )
+            sequence = 0
+            bytes_sent = 0
+            # Keep JSON/base64 POSTs comfortably below common shared-hosting
+            # post_max_size limits. The browser receives a continuous stream from
+            # PHP while the node uploads these small packets in the background.
+            chunk_size = 768 * 1024
+            with output_path.open("rb") as handle:
+                while True:
+                    block = handle.read(chunk_size)
+                    if not block:
+                        break
+                    relay_client.post_external_stream_chunk(stream_id=stream_id, sequence=sequence, data=block)
+                    bytes_sent += len(block)
+                    sequence += 1
+            relay_client.post_external_stream_finish(stream_id=stream_id, chunks=sequence, bytes_sent=bytes_sent)
+            return RelayHttpResponse(
+                status_code=200,
+                headers={"Content-Type": "application/json"},
+                body=json.dumps({"ok": True, "stream_id": stream_id, "chunks": sequence, "bytes": bytes_sent}).encode("utf-8"),
+            )
+        except Exception as exc:
+            try:
+                relay_client.post_external_stream_error(stream_id=stream_id, message=str(exc))
+            except Exception:
+                pass
+            return RelayHttpResponse(
+                status_code=500,
+                headers={"Content-Type": "application/json"},
+                body=json.dumps({"ok": False, "message": str(exc)}, ensure_ascii=False).encode("utf-8"),
+            )
+
     def _dispatch_relay_request(envelope: dict[str, Any]) -> RelayHttpResponse:
         method = str(envelope.get("method", "GET")).upper()
         path = str(envelope.get("path", ""))
-        if method not in {"GET", "POST"} or not path.startswith("/api/p2p/"):
+        raw_headers = envelope.get("headers", {})
+        allowed_headers: dict[str, str] = {}
+        if isinstance(raw_headers, dict):
+            for key, value in raw_headers.items():
+                key_text = str(key)
+                lower = key_text.lower()
+                if lower in {"content-type", "accept"} or lower.startswith("x-dcloud-"):
+                    allowed_headers[key_text] = str(value)
+        external_header = allowed_headers.get("X-DCloud-External-Relay") == "1"
+        stream_match = re.match(r"^/api/external-relay/stream/([A-Za-z0-9_-]{12,200})/([A-Za-z0-9_.:-]{12,160})$", path)
+        if method == "GET" and external_header and stream_match:
+            relay_url = str(envelope.get("_relay_url") or "")
+            with relay_lock:
+                relay_client = relay_clients.get(relay_url)
+            if relay_client is None:
+                return RelayHttpResponse(
+                    status_code=503,
+                    headers={"Content-Type": "application/json"},
+                    body=b'{"ok":false,"message":"Relay-Client fuer externen Stream ist nicht verfuegbar"}',
+                )
+            return _stream_external_download_to_relay(stream_match.group(1), stream_match.group(2), relay_client)
+
+        is_p2p_path = path.startswith("/api/p2p/") and method in {"GET", "POST"}
+        is_external_download = (
+            method == "GET"
+            and path.startswith("/external/")
+            and external_header
+        )
+        if not (is_p2p_path or is_external_download):
             return RelayHttpResponse(
                 status_code=403,
                 headers={"Content-Type": "application/json"},
-                body=b'{"ok":false,"message":"Relay darf nur P2P-API-Endpunkte aufrufen"}',
+                body=b'{"ok":false,"message":"Relay darf nur P2P-API-Endpunkte oder freigegebene externe Download-Tokens aufrufen"}',
             )
         try:
             body = base64.b64decode(str(envelope.get("body_base64", "")))
@@ -830,20 +918,24 @@ def create_app(
                 headers={"Content-Type": "application/json"},
                 body=b'{"ok":false,"message":"Relay-Nutzdaten sind ungueltig"}',
             )
-        raw_headers = envelope.get("headers", {})
-        allowed_headers: dict[str, str] = {}
-        if isinstance(raw_headers, dict):
-            for key, value in raw_headers.items():
-                key_text = str(key)
-                lower = key_text.lower()
-                if lower in {"content-type", "accept"} or lower.startswith("x-dcloud-"):
-                    allowed_headers[key_text] = str(value)
         with app.test_client() as relay_client_for_app:
             response = relay_client_for_app.open(path, method=method, headers=allowed_headers, data=body)
+            try:
+                body_bytes = response.get_data()
+            except RuntimeError:
+                response.direct_passthrough = False
+                body_bytes = response.get_data()
+        response_headers = {"Content-Type": response.content_type or "application/octet-stream"}
+        for header_name in ("Content-Disposition", "Content-Length"):
+            if header_name in response.headers:
+                response_headers[header_name] = str(response.headers[header_name])
+        for header_name, header_value in response.headers.items():
+            if str(header_name).lower().startswith("x-dcloud-"):
+                response_headers[str(header_name)] = str(header_value)
         return RelayHttpResponse(
             status_code=int(response.status_code),
-            headers={"Content-Type": response.content_type or "application/octet-stream"},
-            body=response.get_data(),
+            headers=response_headers,
+            body=body_bytes,
         )
 
     def _stop_relay_transport() -> None:

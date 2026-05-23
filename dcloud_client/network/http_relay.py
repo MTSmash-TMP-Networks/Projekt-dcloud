@@ -509,6 +509,7 @@ class HttpRelayClient:
         file_name: str,
         expires_at: float,
         ttl_seconds: int,
+        file_size: int | None = None,
     ) -> dict[str, Any]:
         """Publish a temporary public download link on this PHP relay.
 
@@ -525,6 +526,58 @@ class HttpRelayClient:
                 "file_name": str(file_name or "download"),
                 "expires_at": float(expires_at),
                 "ttl_seconds": max(1, min(3600, int(ttl_seconds))),
+                "file_size": max(0, int(file_size or 0)),
+            },
+            timeout=max(self.timeout, 10.0),
+        )
+
+    def post_external_stream_start(
+        self,
+        *,
+        stream_id: str,
+        file_name: str,
+        file_size: int,
+        content_type: str = "application/octet-stream",
+    ) -> dict[str, Any]:
+        return self._post_json(
+            {
+                "action": "external_stream_start",
+                "stream_id": str(stream_id),
+                "file_name": str(file_name or "download.bin"),
+                "file_size": max(0, int(file_size or 0)),
+                "content_type": str(content_type or "application/octet-stream"),
+            },
+            timeout=max(self.timeout, 10.0),
+        )
+
+    def post_external_stream_chunk(self, *, stream_id: str, sequence: int, data: bytes) -> dict[str, Any]:
+        return self._post_json(
+            {
+                "action": "external_stream_chunk",
+                "stream_id": str(stream_id),
+                "sequence": max(0, int(sequence)),
+                "body_base64": base64.b64encode(data).decode("ascii"),
+            },
+            timeout=max(self.timeout, 30.0),
+        )
+
+    def post_external_stream_finish(self, *, stream_id: str, chunks: int, bytes_sent: int) -> dict[str, Any]:
+        return self._post_json(
+            {
+                "action": "external_stream_finish",
+                "stream_id": str(stream_id),
+                "chunks": max(0, int(chunks)),
+                "bytes": max(0, int(bytes_sent)),
+            },
+            timeout=max(self.timeout, 10.0),
+        )
+
+    def post_external_stream_error(self, *, stream_id: str, message: str) -> dict[str, Any]:
+        return self._post_json(
+            {
+                "action": "external_stream_error",
+                "stream_id": str(stream_id),
+                "message": str(message or "Externer Relay-Download fehlgeschlagen")[:500],
             },
             timeout=max(self.timeout, 10.0),
         )
@@ -759,6 +812,7 @@ class HttpRelayTransport:
             self.active_request_workers += 1
         try:
             try:
+                envelope['_relay_url'] = self.relay_url
                 response = self.dispatcher(envelope)
             except Exception as exc:
                 LOG.debug("Relay-dispatched local request failed", exc_info=True)
