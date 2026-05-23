@@ -1189,16 +1189,17 @@ function dcloud_create_external_download_link(array $input): void {
         dcloud_fail('Relay-Link-Ablaufzeit ist bereits erreicht', 400);
     }
 
-    // The target must be registered and reachable from this PHP relay now.
-    // Otherwise the generated browser link would look public but fail for the
-    // recipient. This check is intentionally lightweight and uses /healthz,
-    // never the actual file endpoint.
-    $peer = dcloud_find_active_peer($targetNodeId);
-    $healthUrl = dcloud_forward_target_url($peer, '/healthz');
-    $health = dcloud_perform_direct_proxy_http($healthUrl, 'GET', ['Accept' => 'application/json'], '', 4);
-    $healthStatus = (int)($health['status_code'] ?? 0);
-    if ($healthStatus < 200 || $healthStatus >= 300) {
-        dcloud_fail('Ziel-Knoten ist vom PHP-Relay nicht direkt erreichbar; Relay-Link wurde nicht erstellt', 502, ['status_code' => $healthStatus]);
+    // Do not require a direct /healthz check during link creation. Many nodes
+    // are temporarily slow to accept inbound connections or use firewall rules
+    // that become valid only after the relay registration has settled. The link
+    // should still be a public relay URL; actual reachability is checked when
+    // the recipient opens the link, where we can return a clear download error.
+    try {
+        dcloud_find_active_peer($targetNodeId);
+    } catch (Throwable $ignored) {
+        // Keep creating the short-lived relay token. If the node is still not
+        // registered when the link is opened, external_download will fail with
+        // the normal target-peer message.
     }
 
     $publicToken = rtrim(strtr(base64_encode(random_bytes(DCLOUD_EXTERNAL_LINK_TOKEN_BYTES)), '+/', '-_'), '=');

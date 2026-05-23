@@ -218,8 +218,28 @@ def create_app(
         """
         results: list[dict[str, Any]] = []
         with relay_lock:
-            clients = list(relay_clients.items())
-        for relay_url, relay_client in clients:
+            clients_map: dict[str, HttpRelayClient] = dict(relay_clients)
+
+        # The public share link must prefer a relay URL even when the relay
+        # transport has not completed its first heartbeat yet.  Otherwise a
+        # locally opened dashboard (127.0.0.1/localhost) falls back to an
+        # unusable direct URL although relay URLs are configured.
+        try:
+            configured_urls = _relay_url_list()
+        except Exception:
+            configured_urls = []
+        for configured_url in configured_urls:
+            if configured_url in clients_map:
+                continue
+            clients_map[configured_url] = HttpRelayClient(
+                relay_url=configured_url,
+                identity=identity,
+                secret="",
+                timeout=5.0,
+                request_timeout=getattr(config.network, "relay_request_timeout_seconds", 90),
+            )
+
+        for relay_url, relay_client in clients_map.items():
             try:
                 payload = relay_client.create_external_download_link(
                     local_token=local_token,
