@@ -1,1 +1,0 @@
-{"time":"2026-05-23T17:03:12+00:00","type":"error","remote_addr":"127.0.0.1","payload":{"status":404,"returned_status":200,"message":"Ziel-Peer-Adresse ist nicht oeffentlich routbar; PHP-Forwarder wird aus Sicherheitsgruenden nicht verwendet","action":"external_download","public_ip":"127.0.0.1"}}
