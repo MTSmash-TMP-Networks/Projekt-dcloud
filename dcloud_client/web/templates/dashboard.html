@@ -842,40 +842,40 @@
 
     <aside class="transfer-panel" id="transfer-panel">
       <button class="transfer-toggle" id="transfer-toggle" type="button" aria-expanded="true">
-        <span>📋 Upload-Status</span>
+        <span>📋 Transfer-Status</span>
         <small id="transfer-toggle-label">Einklappen</small>
       </button>
       <div class="transfer-body" id="transfer-body">
       <div class="transfer-content">
         <div class="transfer-head">
-          <div class="transfer-icon">⬆️</div>
+          <div class="transfer-icon">📋</div>
           <div>
-            <div class="transfer-title" id="transfer-title">Datei wird hochgeladen</div>
-            <div class="transfer-sub" id="transfer-subtitle">Vorbereitung…</div>
+            <div class="transfer-title" id="transfer-title">Kein aktiver Transfer</div>
+            <div class="transfer-sub" id="transfer-subtitle">Uploads, Downloads und Peer-Aktionen erscheinen hier</div>
           </div>
         </div>
         <div class="transfer-progress-wrap">
-          <div class="transfer-progress" aria-label="Upload Fortschritt"><div id="transfer-progress"></div></div>
+          <div class="transfer-progress" aria-label="Transfer-Fortschritt"><div id="transfer-progress"></div></div>
           <div class="transfer-row"><span id="transfer-name">—</span><strong id="transfer-percent">0%</strong></div>
-          <div class="transfer-row"><span>Ziel:</span><span id="transfer-target">—</span></div>
+          <div class="transfer-row"><span id="transfer-target-label">Ziel/Quelle:</span><span id="transfer-target">—</span></div>
           <div class="transfer-row"><span>Status:</span><span id="transfer-status">Bereit</span></div>
           <div class="transfer-row"><span>Warteschlange:</span><span id="transfer-queue">0 wartend</span></div>
-          <div class="transfer-row"><span>Browser-Transfer:</span><span id="transfer-browser">0 B / 0 B</span></div>
-          <div class="transfer-row"><span>Server-Verarbeitung:</span><span id="transfer-server">wartet…</span></div>
+          <div class="transfer-row"><span id="transfer-browser-label">Browser ↔ Server:</span><span id="transfer-browser">0 B / 0 B</span></div>
+          <div class="transfer-row"><span id="transfer-server-row-label">Server/Chunks:</span><span id="transfer-server">wartet…</span></div>
           <div class="transfer-row"><span>Chunks:</span><span id="transfer-chunks">—</span></div>
           <div class="transfer-row"><span>Komprimierung:</span><span id="transfer-compression">—</span></div>
-          <div class="transfer-row"><span>Peer-Speicher:</span><span id="transfer-peers">—</span></div>
-          <div class="transfer-row"><span>Lokale Kopien:</span><span id="transfer-local">—</span></div>
-          <div class="transfer-detail" id="transfer-detail">Nach dem Browser-Upload wird angezeigt, wie die Datei in Chunks zerlegt, komprimiert und im Peer-Netz verteilt wird.</div>
-          <div class="transfer-phase-list" aria-label="Upload-Schritte">
-            <div class="transfer-phase"><strong>Übertragen</strong><div class="transfer-mini-progress"><div id="transfer-client-progress"></div></div><span id="transfer-client-label">0%</span></div>
-            <div class="transfer-phase"><strong>Chunks</strong><div class="transfer-mini-progress"><div id="transfer-server-progress"></div></div><span id="transfer-server-label">0%</span></div>
-            <div class="transfer-phase"><strong>Peer-Netz</strong><div class="transfer-mini-progress"><div id="transfer-peer-progress"></div></div><span id="transfer-peer-label">0%</span></div>
+          <div class="transfer-row"><span id="transfer-peers-label">Peer-Netz:</span><span id="transfer-peers">—</span></div>
+          <div class="transfer-row"><span id="transfer-local-label">Lokal:</span><span id="transfer-local">—</span></div>
+          <div class="transfer-detail" id="transfer-detail">Hier wird der aktuelle Transfer angezeigt: Upload, Download, Peer-Replikation oder Auslagerung.</div>
+          <div class="transfer-phase-list" aria-label="Transfer-Schritte">
+            <div class="transfer-phase"><strong id="transfer-client-phase-title">Browser</strong><div class="transfer-mini-progress"><div id="transfer-client-progress"></div></div><span id="transfer-client-label">0%</span></div>
+            <div class="transfer-phase"><strong id="transfer-server-phase-title">Chunks</strong><div class="transfer-mini-progress"><div id="transfer-server-progress"></div></div><span id="transfer-server-label">0%</span></div>
+            <div class="transfer-phase"><strong id="transfer-peer-phase-title">Peer-Netz</strong><div class="transfer-mini-progress"><div id="transfer-peer-progress"></div></div><span id="transfer-peer-label">0%</span></div>
           </div>
           <div class="transfer-metrics" id="transfer-metrics">
             <span>Chunks: —</span>
             <span>Komprimiert: —</span>
-            <span>Peer-Schreibvorgänge: —</span>
+            <span>Peer-Aktionen: —</span>
             <span>Lokal: —</span>
           </div>
         </div>
@@ -1798,20 +1798,50 @@
           box.appendChild(span);
         });
       }
-      function resetTransferDetails(file){
+      function setTextIfPresent(id, text){
+        const element = document.getElementById(id);
+        if(element) element.textContent = text;
+      }
+      function setTransferModeLabels(mode){
+        const presets = {
+          upload: {
+            target:"Zielordner:", browser:"Browser → Server:", server:"Server/Chunks:", peers:"Peer-Speicher:", local:"Lokale Kopien:",
+            clientPhase:"Übertragen", serverPhase:"Chunking", peerPhase:"Peer-Sync"
+          },
+          download: {
+            target:"Ausgabe:", browser:"Server → Browser:", server:"Wiederherstellung:", peers:"Peer-Quellen:", local:"Lokal:",
+            clientPhase:"Browser", serverPhase:"Zusammensetzen", peerPhase:"Quellen"
+          },
+          generic: {
+            target:"Ziel/Quelle:", browser:"Browser ↔ Server:", server:"Server/Chunks:", peers:"Peer-Netz:", local:"Lokal:",
+            clientPhase:"Browser", serverPhase:"Chunks", peerPhase:"Peer-Netz"
+          }
+        };
+        const labels = presets[mode] || presets.generic;
+        setTextIfPresent("transfer-target-label", labels.target);
+        setTextIfPresent("transfer-browser-label", labels.browser);
+        setTextIfPresent("transfer-server-row-label", labels.server);
+        setTextIfPresent("transfer-peers-label", labels.peers);
+        setTextIfPresent("transfer-local-label", labels.local);
+        setTextIfPresent("transfer-client-phase-title", labels.clientPhase);
+        setTextIfPresent("transfer-server-phase-title", labels.serverPhase);
+        setTextIfPresent("transfer-peer-phase-title", labels.peerPhase);
+      }
+      function resetTransferDetails(file, mode="generic"){
         lastTransferPercent = 0;
+        setTransferModeLabels(mode);
         document.getElementById("transfer-browser").textContent = file ? `0 B / ${formatBytes(file.size)}` : "0 B / 0 B";
-        document.getElementById("transfer-server").textContent = "wartet auf Dateiübertragung…";
+        document.getElementById("transfer-server").textContent = "wartet…";
         document.getElementById("transfer-chunks").textContent = "—";
         document.getElementById("transfer-compression").textContent = "—";
         document.getElementById("transfer-peers").textContent = "—";
         const localLine = document.getElementById("transfer-local");
         if(localLine) localLine.textContent = "—";
-        document.getElementById("transfer-detail").textContent = "Nach dem Browser-Upload wird angezeigt, wie die Datei in Chunks zerlegt, komprimiert und im Peer-Netz verteilt wird.";
+        document.getElementById("transfer-detail").textContent = "Hier wird der aktuelle Transfer angezeigt: Upload, Download, Peer-Replikation oder Auslagerung.";
         setMiniProgress("client", 0);
         setMiniProgress("server", 0);
         setMiniProgress("peer", 0);
-        renderTransferMetrics(["Chunks: —", "Komprimiert: —", "Peer-Schreibvorgänge: —", "Lokal: —"]);
+        renderTransferMetrics(["Chunks: —", "Komprimiert: —", "Peer-Aktionen: —", "Lokal: —"]);
       }
       function compressionSummary(progress){
         const raw = Number(progress.rawBytesProcessed || progress.totalBytes || 0);
@@ -1830,13 +1860,13 @@
       function applyUploadProgress(progress){
         if(!progress) return;
         if(progress.known === false){
-          document.getElementById("transfer-status").textContent = "Upload läuft im Hintergrund – Status wird synchronisiert…";
+          document.getElementById("transfer-status").textContent = "Transfer läuft im Hintergrund – Status wird synchronisiert…";
           document.getElementById("transfer-subtitle").textContent = "Nach Seiten-Neuladen wird der Server-Fortschritt wieder verbunden";
           return;
         }
         const serverPercent = Math.max(0, Math.min(100, Number(progress.serverPercent || 0)));
         const shownPercent = Math.max(lastTransferPercent, Number(progress.percent || 0));
-        if(shownPercent) updateTransfer(shownPercent, progress.status || progress.message || "Server verarbeitet Upload…");
+        if(shownPercent) updateTransfer(shownPercent, progress.status || progress.message || "Server verarbeitet Datei…");
         else if(progress.status) document.getElementById("transfer-status").textContent = progress.status;
         const details = progress.details || {};
         const backgroundReplication = !!details.backgroundReplication;
@@ -1844,7 +1874,7 @@
           ? (progress.ok ? "Fertig verarbeitet" : "Verarbeitung fehlgeschlagen")
           : (backgroundReplication
             ? "Datei ist lokal verfügbar; Sicherheitskopie läuft im Hintergrund"
-            : "Server verarbeitet: Chunking, Komprimierung und P2P-Verteilung");
+            : "Server verarbeitet: Chunking, Komprimierung und Peer-Speicherung");
 
         setMiniProgress("server", backgroundReplication ? 100 : serverPercent);
         setMiniProgress("peer", backgroundReplication ? serverPercent : peerPhasePercent(progress));
@@ -1871,7 +1901,7 @@
         renderTransferMetrics([
           total ? `Chunks: ${Math.min(current, total)}/${total}` : "Chunks: —",
           progress.storedBytes ? `Komprimiert: ${formatBytes(progress.storedBytes)}` : "Komprimiert: —",
-          `Peer-Schreibvorgänge: ${Number(progress.remoteSuccesses || 0)}`,
+          `Peer-Aktionen: ${Number(progress.remoteSuccesses || 0)}`,
           `Lokal: ${Number(progress.localChunks || 0)}`,
           totalBytes ? `Gelesen: ${formatBytes(raw)} / ${formatBytes(totalBytes)}` : "Gelesen: —",
           progress.remoteFailures ? `Peer-Fehler: ${Number(progress.remoteFailures || 0)}` : `Ziele: ${Number(progress.targetCount || 0)}`
@@ -1879,7 +1909,7 @@
 
         const lines = [];
         if(progress.status) lines.push(progress.status);
-        if(progress.currentPeer) lines.push(`Aktuelles Ziel: ${progress.currentPeer}`);
+        if(progress.currentPeer) lines.push(`Aktuelles Speicherziel: ${progress.currentPeer}`);
         if(totalBytes) lines.push(`Verarbeitet: ${formatBytes(raw)} von ${formatBytes(totalBytes)}`);
         if(progress.desiredReplicas) lines.push(`Gewünschte Replikation: ${progress.desiredReplicas} Kopie(n) pro Chunk`);
         if(Array.isArray(details.peerTargets) && details.peerTargets.length) lines.push(`Speicher-Peers: ${details.peerTargets.join(", ")}`);
@@ -1896,8 +1926,8 @@
           applyUploadProgress(progress);
           if(progress.known && progress.active === false){
             if(currentUploadId === uploadId){
-              document.getElementById("transfer-title").textContent = progress.ok ? "Upload abgeschlossen" : "Upload fehlgeschlagen";
-              document.getElementById("transfer-subtitle").textContent = progress.ok ? "Datei steht im Desktop bereit" : "Der Upload wurde nicht abgeschlossen";
+              document.getElementById("transfer-title").textContent = progress.ok ? "Transfer abgeschlossen" : "Transfer fehlgeschlagen";
+              document.getElementById("transfer-subtitle").textContent = progress.ok ? "Datei steht im Desktop bereit" : "Der Transfer wurde nicht abgeschlossen";
               if(progress.message) document.getElementById("transfer-status").textContent = progress.message;
               untrackUploadId(uploadId);
               currentUploadId = null;
@@ -1918,11 +1948,11 @@
       function showTransfer(file, folder){
         showTransferPanel();
         setTransferPanelExpanded(true);
-        resetTransferDetails(file);
+        resetTransferDetails(file, "upload");
         const icon = document.querySelector(".transfer-icon");
         if(icon) icon.textContent = "⬆️";
-        document.getElementById("transfer-title").textContent = "Datei wird hochgeladen";
-        document.getElementById("transfer-subtitle").textContent = "Kopieren nach dcloud Datenspeicher";
+        document.getElementById("transfer-title").textContent = "Upload läuft";
+        document.getElementById("transfer-subtitle").textContent = "Datei wird lokal gespeichert; Peer-Sync läuft danach im Hintergrund";
         document.getElementById("transfer-name").textContent = file.name;
         document.getElementById("transfer-target").textContent = folder;
         document.getElementById("transfer-status").textContent = "Upload wird vorbereitet…";
@@ -1936,7 +1966,7 @@
         stopDownloadPolling();
         showTransferPanel();
         setTransferPanelExpanded(true);
-        resetTransferDetails(file);
+        resetTransferDetails(file, "download");
         const icon = document.querySelector(".transfer-icon");
         if(icon) icon.textContent = "⬇️";
         currentDownloadId = null;
@@ -1975,7 +2005,7 @@
         currentUploadXhr = null;
         if(backgroundActive){
           lastSuccessfulUploadAt = Date.now();
-          document.getElementById("transfer-title").textContent = "Upload gespeichert";
+          document.getElementById("transfer-title").textContent = "Datei gespeichert";
           document.getElementById("transfer-status").textContent = message || "Datei ist lokal verfügbar; Sicherheitskopie läuft im Hintergrund";
           document.getElementById("transfer-subtitle").textContent = "Du kannst weiterarbeiten; die Peer-Verteilung läuft asynchron";
           const cancel = document.getElementById("transfer-cancel");
@@ -1995,9 +2025,9 @@
           setMiniProgress("peer", 100);
           updateTransfer(100, message || "Abgeschlossen");
         }
-        document.getElementById("transfer-title").textContent = ok ? "Upload abgeschlossen" : "Upload fehlgeschlagen";
+        document.getElementById("transfer-title").textContent = ok ? "Transfer abgeschlossen" : "Transfer fehlgeschlagen";
         document.getElementById("transfer-status").textContent = message;
-        document.getElementById("transfer-subtitle").textContent = ok ? "Datei steht im Desktop bereit" : "Der Upload wurde nicht abgeschlossen";
+        document.getElementById("transfer-subtitle").textContent = ok ? "Datei steht im Desktop bereit" : "Der Transfer wurde nicht abgeschlossen";
         const cancel = document.getElementById("transfer-cancel");
         cancel.textContent = "Schließen";
         cancel.disabled = false;
@@ -2213,7 +2243,7 @@
             showTransfer({ name:fileName, size:fileSize }, folder);
             currentUploadId = uploadId;
             if(progress.active){
-              document.getElementById("transfer-status").textContent = "Laufender Upload gefunden – verbinde Fortschritt…";
+              document.getElementById("transfer-status").textContent = "Laufender Transfer gefunden – verbinde Fortschritt…";
               document.getElementById("transfer-subtitle").textContent = "Serveraufgabe wird nach dem Neuladen automatisch weiter beobachtet";
               startUploadPolling(uploadId);
             }else{
