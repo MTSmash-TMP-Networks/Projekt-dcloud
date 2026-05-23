@@ -496,17 +496,6 @@ class P2PStorageClient:
     def _post_json_to_peer(self, peer: Peer, *, path: str, payload: dict[str, Any], success_message: str, log_message: str) -> PeerTransferResult:
         data = json.dumps(payload, sort_keys=True).encode("utf-8")
         headers = {"Content-Type": "application/json", "Accept": "application/json"}
-        udp_result = self._try_udp_chunk_put(
-            peer,
-            digest=digest,
-            stored_data=stored_data,
-            original_size=original_size,
-            stored_size=stored_size,
-            index=index,
-            compression=compression,
-        )
-        if udp_result is not None and udp_result.ok:
-            return udp_result
         if peer.host != RELAY_HOST:
             url = f"{self.api_base(peer)}{path}"
             req = request.Request(url, data=data, headers=headers, method="POST")

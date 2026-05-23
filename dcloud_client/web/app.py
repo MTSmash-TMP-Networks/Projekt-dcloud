@@ -1767,7 +1767,11 @@ def create_app(
                 removed_manifest = True
 
             removed_chunks = manifest_store.delete_chunks_if_unreferenced(
-                [str(chunk["hash"]) for chunk in deletion_manifest.chunks]
+                [
+                    str(chunk.get("hash", "")).strip()
+                    for chunk in deletion_manifest.chunks
+                    if str(chunk.get("hash", "")).strip()
+                ]
             )
             _sync_peer_connector_settings()
             return jsonify({
