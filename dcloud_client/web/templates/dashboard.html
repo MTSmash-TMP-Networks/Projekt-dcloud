@@ -1203,7 +1203,9 @@
                 network.relayLastError
                   ? `Relay-Fehler: ${network.relayLastError}`
                   : relayBootstrapOnly
-                    ? `Direktverbindungen aktiv (${directCount}) · Relay nur Standby für Wiederfinden bei IP-Änderung${outgoingOnly ? " · Outgoing-Only aktiv" : ""}`
+                    ? (relayState === "verbunden"
+                        ? `Direktverbindungen aktiv (${directCount}) · Relay verbunden (Standby für Wiederfinden bei IP-Änderung)${outgoingOnly ? " · Outgoing-Only aktiv" : ""}`
+                        : `Direktverbindungen aktiv (${directCount}) · Relay im Standby für Wiederfinden bei IP-Änderung${outgoingOnly ? " · Outgoing-Only aktiv" : ""}`)
                     : `${relayNames} · direkte Peers: ${directCount} · Relay-Routen: ${relayRouteCount}${outgoingOnly ? " · Outgoing-Only aktiv" : ""}`
               )
             : "Nur LAN-Verbindungen";
