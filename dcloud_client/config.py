@@ -64,7 +64,7 @@ class NetworkConfig:
     upnp_enabled: bool = True
     nat_pmp_enabled: bool = True
     preferred_tunnel_ports: list[int] = field(default_factory=lambda: [443, 80])
-    dht_enabled: bool = False
+    dht_enabled: bool = True
     dht_k: int = 20
     outgoing_only: bool = False
     bootstrap_nodes: list[str] = field(default_factory=list)
@@ -324,7 +324,7 @@ def load_config(config_path: str | Path = "config.yml", *, create_if_missing: bo
             upnp_enabled=bool(network_raw.get("upnp_enabled", True)),
             nat_pmp_enabled=bool(network_raw.get("nat_pmp_enabled", True)),
             preferred_tunnel_ports=normalize_ports(network_raw.get("preferred_tunnel_ports"), [443, 80]),
-            dht_enabled=bool(network_raw.get("dht_enabled", False)),
+            dht_enabled=bool(network_raw.get("dht_enabled", True)),
             dht_k=max(8, int(network_raw.get("dht_k", 20))),
             outgoing_only=bool(network_raw.get("outgoing_only", False)),
             tree_parent_nodes=list(network_raw.get("tree_parent_nodes", [])),
@@ -422,7 +422,7 @@ def update_runtime_settings(
     raw["network"]["relay_url"] = DEFAULT_PUBLIC_RELAY_URL
     raw["network"]["relay_urls"] = normalized_relay_urls
     raw["network"]["relay_secret"] = normalized_relay_secret
-    raw["network"]["dht_enabled"] = bool(dht_enabled) if dht_enabled is not None else bool(getattr(config.network, "dht_enabled", False))
+    raw["network"]["dht_enabled"] = bool(dht_enabled) if dht_enabled is not None else bool(getattr(config.network, "dht_enabled", True))
     raw["network"]["dht_k"] = max(8, int(dht_k if dht_k is not None else getattr(config.network, "dht_k", 20)))
     raw["network"]["randomize_udp_port"] = bool(randomize_udp_port) if randomize_udp_port is not None else bool(getattr(config.network, "randomize_udp_port", True))
     raw["network"]["upnp_enabled"] = bool(upnp_enabled) if upnp_enabled is not None else bool(getattr(config.network, "upnp_enabled", False))
