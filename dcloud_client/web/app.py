@@ -673,6 +673,7 @@ def create_app(
                         "shared_storage_bytes": config.storage.limit_bytes,
                         "free_storage_bytes": chunk_store.stats().free_limit_bytes,
                         "accepts_peer_storage": _accepts_peer_storage(_list_active_peers()),
+                        "internal_ip": active_host,
                     },
                 )
                 relay_clients[desired_url] = relay_client
