@@ -16,6 +16,7 @@ import argparse
 import base64
 import hashlib
 import hmac
+import ipaddress
 import json
 import os
 from pathlib import Path
@@ -24,8 +25,9 @@ import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
+from urllib import error as urlerror, request as urlrequest
 
-VERSION = "py-1.0.0"
+VERSION = "py-1.1.0"
 TOKEN_ROTATION_SECONDS = 86400
 PEER_TTL_SECONDS = 45
 MESSAGE_TTL_SECONDS = 900
@@ -92,7 +94,9 @@ def normalize_action(action: str) -> str:
     aliases = {
         "ping": "health", "status": "health",
         "announce": "register", "heartbeat": "register", "register_peer": "register", "peer_register": "register",
-        "enqueue": "enqueue_request", "send_request": "enqueue_request", "proxy_request": "enqueue_request", "relay_request": "enqueue_request",
+        "enqueue": "enqueue_request", "send_request": "enqueue_request", "relay_request": "enqueue_request",
+        "proxy_request": "direct_proxy_request", "direct_proxy": "direct_proxy_request", "direct_proxy_request": "direct_proxy_request",
+        "http_forward": "direct_proxy_request", "forward_http": "direct_proxy_request", "php_forwarder": "direct_proxy_request",
         "fetch_requests": "poll_requests", "get_requests": "poll_requests", "poll": "poll_requests", "queue_poll": "poll_requests",
         "send_response": "post_response", "relay_response": "post_response", "set_response": "post_response",
         "fetch_response": "poll_response", "get_response": "poll_response", "poll_result": "poll_response",
@@ -222,6 +226,9 @@ class Handler(BaseHTTPRequestHandler):
             if action != "health" and not token_valid(str(data.get("relay_token") or data.get("secret") or "")):
                 self._json({"ok": False, "message": "Relay-Tages-Token fehlt oder ist abgelaufen", "status": 401})
                 return
+            if action == "direct_proxy_request":
+                self.handle_direct_proxy(data)
+                return
             with LOCK:
                 if action == "health":
                     self._json({"ok": True, "version": VERSION, "time": _now(), **current_token_payload()})
@@ -266,6 +273,75 @@ class Handler(BaseHTTPRequestHandler):
                 if url not in relay_urls:
                     relay_urls.append(url)
         self._json({"ok": True, "version": VERSION, "peers": active, "relay_urls": relay_urls, **current_token_payload()})
+
+    @staticmethod
+    def _allowed_forward_headers(headers: Any) -> dict[str, str]:
+        if not isinstance(headers, dict):
+            return {}
+        allowed: dict[str, str] = {}
+        for key, value in headers.items():
+            name = str(key).strip()
+            lower = name.lower()
+            if not name:
+                continue
+            if lower in {"content-type", "accept"} or lower.startswith("x-dcloud-"):
+                allowed[name] = str(value).replace("\r", " ").replace("\n", " ")
+        return allowed
+
+    def handle_direct_proxy(self, data: dict[str, Any]) -> None:
+        target_node_id = safe_id(data.get("target_node_id") or data.get("to_node_id") or data.get("peer_node_id"), "target_node_id")
+        method = str(data.get("method", "GET")).upper()
+        path = str(data.get("path") or data.get("api_path") or "")
+        if method not in {"GET", "POST"} or not path.startswith("/api/p2p/"):
+            self._json({"ok": False, "message": "Forwarder erlaubt nur GET/POST auf /api/p2p/", "status": 403})
+            return
+        peers = read_json(DATA_DIR / "peers.json", {})
+        peer = peers.get(target_node_id) if isinstance(peers, dict) else None
+        if not isinstance(peer, dict) or _now() - int(peer.get("relay_seen_at") or 0) > PEER_TTL_SECONDS:
+            self._json({"ok": False, "message": "Ziel-Peer ist nicht aktiv", "status": 404})
+            return
+        host = str(peer.get("public_ip") or "").strip()
+        port = int(peer.get("web_port") or 0)
+        try:
+            ip = ipaddress.ip_address(host)
+        except ValueError:
+            self._json({"ok": False, "message": "Ziel-Peer hat keine gueltige oeffentliche IP", "status": 404})
+            return
+        if not ip.is_global or port <= 0 or port > 65535:
+            self._json({"ok": False, "message": "Ziel-Peer ist nicht oeffentlich routbar", "status": 404})
+            return
+        url_host = f"[{host}]" if ip.version == 6 else host
+        url = f"http://{url_host}:{port}{path}"
+        try:
+            body = base64.b64decode(str(data.get("body_base64") or ""), validate=True) if data.get("body_base64") else b""
+        except Exception:
+            self._json({"ok": False, "message": "Forwarder-Nutzdaten sind ungueltig", "status": 400})
+            return
+        timeout = max(1.0, min(120.0, float(data.get("timeout_seconds") or 90)))
+        req = urlrequest.Request(url, data=body if method == "POST" else None, headers=self._allowed_forward_headers(data.get("headers")), method=method)
+        try:
+            with urlrequest.urlopen(req, timeout=timeout) as response:
+                response_body = response.read()
+                status = int(getattr(response, "status", 200))
+                response_headers = {k: v for k, v in response.headers.items() if k.lower() == "content-type" or k.lower().startswith("x-dcloud-")}
+        except urlerror.HTTPError as exc:
+            response_body = exc.read()
+            status = int(exc.code)
+            response_headers = {k: v for k, v in exc.headers.items() if k.lower() == "content-type" or k.lower().startswith("x-dcloud-")}
+        except Exception as exc:
+            self._json({"ok": False, "message": "Forwarder konnte Ziel-Peer nicht direkt erreichen: " + str(exc), "status": 502})
+            return
+        response_headers["X-DCloud-Relay-Mode"] = "direct_proxy"
+        self._json({
+            "ok": True,
+            "proxy_mode": "direct_http",
+            "target_node_id": target_node_id,
+            "response": {
+                "status_code": status,
+                "headers": response_headers,
+                "body_base64": base64.b64encode(response_body).decode("ascii"),
+            },
+        })
 
     def handle_enqueue(self, data: dict[str, Any]) -> None:
         request_id = safe_id(data.get("request_id") or data.get("relay_request_id") or data.get("id"), "request_id")

@@ -4,18 +4,21 @@ declare(strict_types=1);
 /*
  * dcloud PHP HTTP relay/proxy
  *
- * - POST + JSON: Relay API (health/register/enqueue_request/poll_requests/post_response/poll_response)
+ * - POST + JSON: Relay API (health/register/enqueue_request/poll_requests/post_response/poll_response/direct_proxy_request)
  * - GET/HEAD: Modern minimal landing page (unless ?action=health to get JSON)
  *
  * Landing page intentionally reveals only minimal information.
  */
 
-const DCLOUD_RELAY_VERSION = '1.2.9';
+const DCLOUD_RELAY_VERSION = '1.3.0';
 const DCLOUD_RELAY_TOKEN_ROTATION_SECONDS = 86400;
 const DCLOUD_PEER_TTL_SECONDS = 45;
 const DCLOUD_MESSAGE_TTL_SECONDS = 900;
 const DCLOUD_MAX_REQUESTS_PER_POLL = 64;
 const DCLOUD_MAX_ENCODED_BODY_BYTES = 268435456; // 256 MiB base64 payload
+const DCLOUD_DIRECT_PROXY_MAX_ENCODED_BODY_BYTES = 67108864; // 64 MiB base64 payload per non-persistent forward
+const DCLOUD_DIRECT_PROXY_CONNECT_TIMEOUT_SECONDS = 4;
+const DCLOUD_DIRECT_PROXY_TIMEOUT_SECONDS = 90;
 const DCLOUD_CLEANUP_INTERVAL_SECONDS = 30;
 
 $GLOBALS['DCLOUD_CURRENT_INPUT'] = [];
@@ -715,6 +718,209 @@ function dcloud_active_peers_except(string $ownNodeId): array {
     return $active;
 }
 
+
+function dcloud_find_active_peer(string $nodeId): array {
+    $path = dcloud_storage_dir() . DIRECTORY_SEPARATOR . 'peers.json';
+    $peers = dcloud_read_json_file($path, []);
+    if (!isset($peers[$nodeId]) || !is_array($peers[$nodeId])) {
+        dcloud_fail('Ziel-Peer ist nicht beim Relay registriert', 404, ['target_node_id' => $nodeId]);
+    }
+    $peer = $peers[$nodeId];
+    $age = time() - (int)($peer['relay_seen_at'] ?? 0);
+    if ($age > DCLOUD_PEER_TTL_SECONDS) {
+        dcloud_fail('Ziel-Peer ist nicht mehr aktiv', 404, ['target_node_id' => $nodeId, 'age_seconds' => $age]);
+    }
+    return $peer;
+}
+
+function dcloud_is_public_ip(string $ip): bool {
+    return filter_var($ip, FILTER_VALIDATE_IP, FILTER_FLAG_NO_PRIV_RANGE | FILTER_FLAG_NO_RES_RANGE) !== false;
+}
+
+function dcloud_forward_target_url(array $peer, string $path): string {
+    $host = trim((string)($peer['public_ip'] ?? ''));
+    $port = (int)($peer['web_port'] ?? 0);
+    if ($host === '' || $port <= 0 || $port > 65535) {
+        dcloud_fail('Ziel-Peer hat keine oeffentliche Web-Adresse registriert', 404);
+    }
+    if (!dcloud_is_public_ip($host)) {
+        dcloud_fail('Ziel-Peer-Adresse ist nicht oeffentlich routbar; PHP-Forwarder wird aus Sicherheitsgruenden nicht verwendet', 404, ['public_ip' => $host]);
+    }
+    if (filter_var($host, FILTER_VALIDATE_IP, FILTER_FLAG_IPV6)) {
+        $host = '[' . $host . ']';
+    }
+    return 'http://' . $host . ':' . $port . $path;
+}
+
+function dcloud_allowed_forward_headers(array $headers): array {
+    $allowed = [];
+    foreach ($headers as $key => $value) {
+        $name = trim((string)$key);
+        $lower = strtolower($name);
+        if ($name === '') continue;
+        if ($lower === 'content-type' || $lower === 'accept' || strncmp($lower, 'x-dcloud-', 9) === 0) {
+            $cleanValue = str_replace(["\r", "\n"], ' ', (string)$value);
+            $allowed[$name] = $cleanValue;
+        }
+    }
+    return $allowed;
+}
+
+function dcloud_headers_for_json(array $headers): array {
+    $out = [];
+    foreach ($headers as $line) {
+        if (!is_string($line) || strpos($line, ':') === false) continue;
+        [$name, $value] = explode(':', $line, 2);
+        $name = trim($name);
+        if ($name === '') continue;
+        $lower = strtolower($name);
+        if ($lower === 'content-type' || strncmp($lower, 'x-dcloud-', 9) === 0) {
+            $out[$name] = trim($value);
+        }
+    }
+    return $out;
+}
+
+
+function dcloud_status_from_header_lines(array $headers): int {
+    $status = 0;
+    foreach ($headers as $line) {
+        if (is_string($line) && preg_match('/^HTTP\/\S+\s+(\d{3})\b/', $line, $matches)) {
+            $status = (int)$matches[1];
+        }
+    }
+    return $status > 0 ? $status : 502;
+}
+
+function dcloud_perform_direct_proxy_http(string $url, string $method, array $headers, string $body, int $timeout): array {
+    $headerLines = [];
+    foreach ($headers as $key => $value) {
+        $headerLines[] = $key . ': ' . $value;
+    }
+
+    if (function_exists('curl_init')) {
+        $responseHeaders = [];
+        $ch = curl_init($url);
+        if ($ch === false) {
+            dcloud_fail('PHP-Forwarder konnte cURL nicht initialisieren', 500);
+        }
+        curl_setopt($ch, CURLOPT_CUSTOMREQUEST, $method);
+        curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+        curl_setopt($ch, CURLOPT_HEADER, false);
+        curl_setopt($ch, CURLOPT_CONNECTTIMEOUT, DCLOUD_DIRECT_PROXY_CONNECT_TIMEOUT_SECONDS);
+        curl_setopt($ch, CURLOPT_TIMEOUT, $timeout);
+        curl_setopt($ch, CURLOPT_FOLLOWLOCATION, false);
+        if (defined('CURLPROTO_HTTP')) {
+            curl_setopt($ch, CURLOPT_PROTOCOLS, CURLPROTO_HTTP);
+            curl_setopt($ch, CURLOPT_REDIR_PROTOCOLS, CURLPROTO_HTTP);
+        }
+        curl_setopt($ch, CURLOPT_HTTPHEADER, $headerLines);
+        curl_setopt($ch, CURLOPT_HEADERFUNCTION, function ($curl, string $line) use (&$responseHeaders): int {
+            $trimmed = trim($line);
+            if ($trimmed !== '') $responseHeaders[] = $trimmed;
+            return strlen($line);
+        });
+        if ($method === 'POST') {
+            curl_setopt($ch, CURLOPT_POSTFIELDS, $body);
+        }
+
+        $responseBody = curl_exec($ch);
+        $curlErrno = curl_errno($ch);
+        $curlError = curl_error($ch);
+        $statusCode = (int)curl_getinfo($ch, CURLINFO_RESPONSE_CODE);
+        curl_close($ch);
+
+        if ($responseBody === false || $curlErrno !== 0) {
+            dcloud_fail('PHP-Forwarder konnte Ziel-Peer nicht direkt erreichen', 502, [
+                'curl_errno' => $curlErrno,
+                'curl_error' => substr($curlError, 0, 160),
+            ]);
+        }
+        return [
+            'status_code' => $statusCode > 0 ? $statusCode : dcloud_status_from_header_lines($responseHeaders),
+            'headers' => $responseHeaders,
+            'body' => (string)$responseBody,
+            'engine' => 'curl',
+        ];
+    }
+
+    $contextOptions = [
+        'http' => [
+            'method' => $method,
+            'header' => implode("\r\n", $headerLines),
+            'timeout' => $timeout,
+            'ignore_errors' => true,
+            'follow_location' => 0,
+        ],
+    ];
+    if ($method === 'POST') {
+        $contextOptions['http']['content'] = $body;
+    }
+    $context = stream_context_create($contextOptions);
+    $responseBody = @file_get_contents($url, false, $context);
+    $responseHeaders = isset($http_response_header) && is_array($http_response_header) ? $http_response_header : [];
+    if ($responseBody === false) {
+        $lastError = error_get_last();
+        dcloud_fail('PHP-Forwarder konnte Ziel-Peer nicht direkt erreichen', 502, [
+            'stream_error' => substr((string)($lastError['message'] ?? 'unknown'), 0, 160),
+        ]);
+    }
+    return [
+        'status_code' => dcloud_status_from_header_lines($responseHeaders),
+        'headers' => $responseHeaders,
+        'body' => (string)$responseBody,
+        'engine' => 'stream',
+    ];
+}
+
+function dcloud_direct_proxy_request(array $input): void {
+    $targetNodeIdRaw = dcloud_first_string_value($input, ['target_node_id', 'to_node_id', 'target_node', 'peer_node_id', 'recipient_node_id']);
+    if ($targetNodeIdRaw === '') {
+        dcloud_fail('PHP-Forwarder-Anfrage ist unvollstaendig: target_node_id fehlt', 400);
+    }
+    $targetNodeId = dcloud_safe_id($targetNodeIdRaw, 'target_node_id');
+    $method = strtoupper((string)($input['method'] ?? 'GET'));
+    $path = (string)($input['path'] ?? ($input['api_path'] ?? ''));
+    if (!in_array($method, ['GET', 'POST'], true) || strncmp($path, '/api/p2p/', 9) !== 0) {
+        dcloud_fail('PHP-Forwarder erlaubt nur GET/POST auf /api/p2p/', 403, ['method' => $method, 'path' => $path]);
+    }
+
+    $bodyBase64 = (string)($input['body_base64'] ?? ($input['body'] ?? ''));
+    if (strlen($bodyBase64) > DCLOUD_DIRECT_PROXY_MAX_ENCODED_BODY_BYTES) {
+        dcloud_fail('PHP-Forwarder-Nutzdaten sind zu gross; Mailbox-Relay kann als Fallback verwendet werden', 413);
+    }
+    $body = '';
+    if ($bodyBase64 !== '') {
+        $decoded = base64_decode($bodyBase64, true);
+        if ($decoded === false) {
+            dcloud_fail('PHP-Forwarder-Nutzdaten sind ungueltig base64-kodiert', 400);
+        }
+        $body = $decoded;
+    }
+
+    $peer = dcloud_find_active_peer($targetNodeId);
+    $url = dcloud_forward_target_url($peer, $path);
+    $headers = dcloud_allowed_forward_headers(is_array($input['headers'] ?? null) ? $input['headers'] : []);
+    $timeout = max(1, min(120, (int)($input['timeout_seconds'] ?? DCLOUD_DIRECT_PROXY_TIMEOUT_SECONDS)));
+
+    $forwarded = dcloud_perform_direct_proxy_http($url, $method, $headers, $body, $timeout);
+    $statusCode = (int)($forwarded['status_code'] ?? 502);
+    $responseBody = (string)($forwarded['body'] ?? '');
+    $responseHeaders = is_array($forwarded['headers'] ?? null) ? $forwarded['headers'] : [];
+    $safeHeaders = dcloud_headers_for_json($responseHeaders);
+    $safeHeaders['X-DCloud-Relay-Mode'] = 'direct_proxy';
+    dcloud_json_response([
+        'ok' => true,
+        'proxy_mode' => 'direct_http',
+        'target_node_id' => $targetNodeId,
+        'response' => [
+            'status_code' => $statusCode,
+            'headers' => $safeHeaders,
+            'body_base64' => base64_encode((string)$responseBody),
+        ],
+    ]);
+}
+
 function dcloud_register(array $input): void {
     $nodeId = dcloud_safe_id((string)($input['node_id'] ?? ''), 'node_id');
     $peer = $input['peer'] ?? null;
@@ -925,7 +1131,12 @@ function dcloud_normalize_action(string $action): string {
         'peer_register' => 'register',
         'enqueue' => 'enqueue_request',
         'send_request' => 'enqueue_request',
-        'proxy_request' => 'enqueue_request',
+        'proxy_request' => 'direct_proxy_request',
+        'direct_proxy' => 'direct_proxy_request',
+        'direct_proxy_request' => 'direct_proxy_request',
+        'http_forward' => 'direct_proxy_request',
+        'forward_http' => 'direct_proxy_request',
+        'php_forwarder' => 'direct_proxy_request',
         'relay_request' => 'enqueue_request',
         'fetch_requests' => 'poll_requests',
         'get_requests' => 'poll_requests',
@@ -946,7 +1157,7 @@ try {
     $input = dcloud_read_input();
     $action = dcloud_normalize_action((string)($input['action'] ?? ''));
 
-    if (!in_array($action, ['poll_requests', 'poll_response'], true)) {
+    if (!in_array($action, ['poll_requests', 'poll_response', 'direct_proxy_request'], true)) {
         dcloud_cleanup_if_due();
     }
     $input['action'] = $action;
@@ -965,6 +1176,10 @@ try {
 
         case 'enqueue_request':
             dcloud_enqueue_request($input);
+            break;
+
+        case 'direct_proxy_request':
+            dcloud_direct_proxy_request($input);
             break;
 
         case 'poll_requests':

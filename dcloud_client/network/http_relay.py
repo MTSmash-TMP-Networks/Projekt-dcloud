@@ -110,6 +110,8 @@ def _decode_relay_json(raw: bytes, *, expected_action: str = "", expected_reques
             return bool(item.get("ok")) and str(item.get("request_id", "")) == expected_request_id
         if expected_action == "poll_response":
             return bool(item.get("ok")) and "ready" in item
+        if expected_action == "direct_proxy_request":
+            return bool(item.get("ok")) and isinstance(item.get("response"), dict)
         return bool(item.get("ok"))
 
     for item in objects:
@@ -334,6 +336,65 @@ class HttpRelayClient:
             timeout=max(self.timeout, min(self.request_timeout, 12.0)),
         )
 
+    def _validate_forward_target(self, peer: Peer, method: str, path: str) -> None:
+        if not peer.relay_url:
+            raise RelayError("Peer hat keine Relay-Route")
+        if peer.relay_url.rstrip("/") != self.relay_url:
+            raise RelayError("Peer nutzt einen anderen Relay-Server")
+        if not relay_id_is_valid(peer.node_id):
+            raise RelayError(f"Peer hat keine gueltige Node-ID: {str(peer.node_id or '')[:24]}")
+        if method.upper() not in {"GET", "POST"} or not path.startswith("/api/p2p/"):
+            raise RelayError("Ungueltige Relay-Anfrage")
+
+    @staticmethod
+    def _response_from_relay_payload(response: object) -> RelayHttpResponse:
+        if not isinstance(response, dict):
+            raise RelayError("Relay-Antwort ist ungültig")
+        try:
+            body_bytes = base64.b64decode(str(response.get("body_base64", "")))
+        except Exception as exc:
+            raise RelayError("Relay-Antwort enthält ungültige Nutzdaten") from exc
+        raw_headers = response.get("headers", {})
+        headers_out = {str(k): str(v) for k, v in raw_headers.items()} if isinstance(raw_headers, dict) else {}
+        return RelayHttpResponse(
+            status_code=int(response.get("status_code", 502)),
+            headers=headers_out,
+            body=body_bytes,
+        )
+
+    def direct_proxy_request(
+        self,
+        peer: Peer,
+        *,
+        method: str,
+        path: str,
+        headers: dict[str, str] | None = None,
+        body: bytes = b"",
+        timeout: float | None = None,
+    ) -> RelayHttpResponse:
+        """Forward one peer API request through the PHP relay without mailbox files.
+
+        This is an HTTP reverse-proxy style fast path. It only works when the
+        relay server can reach the peer's public IP and web port. If the peer is
+        behind CGNAT/firewall, callers should fall back to ``forward_request``.
+        """
+        self._validate_forward_target(peer, method, path)
+        wait_timeout = float(timeout if timeout is not None else self.request_timeout)
+        payload = self._post_json(
+            {
+                "action": "direct_proxy_request",
+                "target_node_id": str(peer.node_id),
+                "to_node_id": str(peer.node_id),
+                "method": method.upper(),
+                "path": path,
+                "headers": {str(key): str(value) for key, value in (headers or {}).items()},
+                "body_base64": base64.b64encode(body).decode("ascii"),
+                "timeout_seconds": max(1.0, min(wait_timeout, 120.0)),
+            },
+            timeout=max(self.timeout, min(wait_timeout + 5.0, 130.0)),
+        )
+        return self._response_from_relay_payload(payload.get("response", {}))
+
     def forward_request(
         self,
         peer: Peer,
@@ -344,14 +405,7 @@ class HttpRelayClient:
         body: bytes = b"",
         timeout: float | None = None,
     ) -> RelayHttpResponse:
-        if not peer.relay_url:
-            raise RelayError("Peer hat keine Relay-Route")
-        if peer.relay_url.rstrip("/") != self.relay_url:
-            raise RelayError("Peer nutzt einen anderen Relay-Server")
-        if not relay_id_is_valid(peer.node_id):
-            raise RelayError(f"Peer hat keine gueltige Node-ID: {str(peer.node_id or '')[:24]}")
-        if method.upper() not in {"GET", "POST"} or not path.startswith("/api/p2p/"):
-            raise RelayError("Ungueltige Relay-Anfrage")
+        self._validate_forward_target(peer, method, path)
         request_id = uuid4().hex
         if not relay_id_is_valid(request_id):
             raise RelayError("Interne Relay-request_id ist ungueltig")
@@ -383,20 +437,9 @@ class HttpRelayClient:
                     timeout=max(self.timeout, wait_seconds + 2.0),
                 )
                 if payload.get("ready"):
-                    response = payload.get("response", {})
-                    if not isinstance(response, dict):
-                        raise RelayError("Relay-Antwort ist ungültig")
-                    try:
-                        body_bytes = base64.b64decode(str(response.get("body_base64", "")))
-                    except Exception as exc:
-                        raise RelayError("Relay-Antwort enthält ungültige Nutzdaten") from exc
-                    raw_headers = response.get("headers", {})
-                    headers_out = {str(k): str(v) for k, v in raw_headers.items()} if isinstance(raw_headers, dict) else {}
-                    return RelayHttpResponse(
-                        status_code=int(response.get("status_code", 502)),
-                        headers=headers_out,
-                        body=body_bytes,
-                    )
+                    relay_response = self._response_from_relay_payload(payload.get("response", {}))
+                    relay_response.headers.setdefault("X-DCloud-Relay-Mode", "mailbox")
+                    return relay_response
             except RelayError as exc:
                 last_error = exc
             time.sleep(0.1)

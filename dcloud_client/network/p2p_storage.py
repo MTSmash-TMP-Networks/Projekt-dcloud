@@ -260,14 +260,53 @@ class P2PStorageClient:
         relay_client = self._relay_client_for(peer)
         if relay_client is None:
             raise RelayError("Relay-Client ist nicht konfiguriert")
-        return relay_client.forward_request(
-            peer,
-            method=method,
-            path=path,
-            headers=headers or {},
-            body=body,
-            timeout=relay_client.request_timeout if timeout is None else timeout,
-        )
+        request_timeout = relay_client.request_timeout if timeout is None else timeout
+
+        # Fast path: let the PHP relay act as a short-lived HTTP forwarder to
+        # the peer's public IP/web port. This avoids writing one mailbox file
+        # per chunk on the relay. If the target is not reachable from the relay
+        # server (CGNAT, firewall, no port-forward), fall back to the existing
+        # mailbox relay, where the target client polls outward.
+        direct_proxy_error: RelayError | None = None
+        try:
+            return relay_client.direct_proxy_request(
+                peer,
+                method=method,
+                path=path,
+                headers=headers or {},
+                body=body,
+                timeout=request_timeout,
+            )
+        except RelayError as exc:
+            direct_proxy_error = exc
+            LOG.debug("PHP direct proxy to peer %s unavailable; falling back to mailbox relay: %s", peer.node_id, exc)
+
+        try:
+            return relay_client.forward_request(
+                peer,
+                method=method,
+                path=path,
+                headers=headers or {},
+                body=body,
+                timeout=request_timeout,
+            )
+        except RelayError as exc:
+            if direct_proxy_error is not None:
+                raise RelayError(f"PHP-Forwarder fehlgeschlagen: {direct_proxy_error}; Mailbox-Relay fehlgeschlagen: {exc}") from exc
+            raise
+
+    @staticmethod
+    def _relay_transfer_message(response: RelayHttpResponse, fallback: str = "stored via relay") -> str:
+        mode = ""
+        for key, value in (response.headers or {}).items():
+            if key.lower() == "x-dcloud-relay-mode":
+                mode = str(value).lower()
+                break
+        if mode == "direct_proxy":
+            return "stored via php forwarder"
+        if mode == "mailbox":
+            return "stored via relay mailbox"
+        return fallback
 
     def put_chunk(
         self,
@@ -310,7 +349,7 @@ class P2PStorageClient:
                     response = self._forward_via_relay(peer, method="POST", path=path, headers=headers, body=stored_data, timeout=chunk_timeout)
                     if 200 <= response.status_code < 300:
                         suffix = "" if attempt == 0 else f" nach Retry {attempt}"
-                        return PeerTransferResult(peer.node_id, True, "stored via relay" + suffix)
+                        return PeerTransferResult(peer.node_id, True, self._relay_transfer_message(response) + suffix)
                     last_error = _relay_http_message(response)
                 except RelayError as exc:
                     last_error = str(exc)
