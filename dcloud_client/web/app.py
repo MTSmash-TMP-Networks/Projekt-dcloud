@@ -127,6 +127,9 @@ def create_app(
     external_link_lock = threading.RLock()
     external_links_path = chunk_store.tmp_dir / "external_download_links.json"
     external_download_links: dict[str, dict[str, Any]] = {}
+    disabled_peer_lock = threading.RLock()
+    disabled_peers_path = chunk_store.root / "disabled_peers.json"
+    disabled_peers: dict[str, dict[str, Any]] = {}
     chat_messages: dict[str, deque[dict[str, Any]]] = defaultdict(lambda: deque(maxlen=120))
     replication_repair_lock = threading.Lock()
     last_replication_repair_at = 0.0
@@ -142,6 +145,103 @@ def create_app(
     def _safe_upload_id(value: str | None) -> str:
         cleaned = "".join(char for char in (value or "") if char.isalnum() or char in "-_")[:80]
         return cleaned or uuid4().hex
+
+    def _safe_peer_id(value: str | None) -> str:
+        return "".join(char for char in (value or "") if char.isalnum() or char in "-_")[:128]
+
+    def _load_disabled_peers() -> None:
+        """Load user-disabled peers that discovery must not re-add to the UI."""
+        nonlocal disabled_peers
+        try:
+            with disabled_peers_path.open("r", encoding="utf-8") as handle:
+                raw = json.load(handle)
+            if not isinstance(raw, dict):
+                disabled_peers = {}
+                return
+            loaded: dict[str, dict[str, Any]] = {}
+            for node_id, item in raw.items():
+                safe_id = _safe_peer_id(str(node_id))
+                if not safe_id or safe_id == identity.node_id or not isinstance(item, dict):
+                    continue
+                loaded[safe_id] = {
+                    "node_id": safe_id,
+                    "display_name": str(item.get("display_name") or item.get("name") or safe_id[:12]),
+                    "disabled_at": float(item.get("disabled_at") or time.time()),
+                    "last_host": str(item.get("last_host") or ""),
+                    "last_relay_url": str(item.get("last_relay_url") or ""),
+                }
+            disabled_peers = loaded
+        except FileNotFoundError:
+            disabled_peers = {}
+        except Exception:
+            disabled_peers = {}
+
+    def _persist_disabled_peers() -> None:
+        disabled_peers_path.parent.mkdir(parents=True, exist_ok=True)
+        payload = json.dumps(disabled_peers, ensure_ascii=False, indent=2, sort_keys=True)
+        tmp_path = disabled_peers_path.with_suffix(".tmp")
+        tmp_path.write_text(payload, encoding="utf-8")
+        tmp_path.replace(disabled_peers_path)
+
+    def _disabled_peer_ids() -> set[str]:
+        with disabled_peer_lock:
+            return set(disabled_peers)
+
+    def _disabled_peers_payload() -> list[dict[str, Any]]:
+        now = time.time()
+        with disabled_peer_lock:
+            items = list(disabled_peers.values())
+        return sorted(
+            [
+                {
+                    "node_id": str(item.get("node_id") or ""),
+                    "display_name": str(item.get("display_name") or item.get("node_id") or "Peer"),
+                    "disabled_at": float(item.get("disabled_at") or now),
+                    "disabled_age_seconds": max(0.0, round(now - float(item.get("disabled_at") or now), 1)),
+                    "last_host": str(item.get("last_host") or ""),
+                    "last_relay_url": str(item.get("last_relay_url") or ""),
+                }
+                for item in items
+                if str(item.get("node_id") or "")
+            ],
+            key=lambda item: float(item.get("disabled_at") or 0),
+            reverse=True,
+        )
+
+    def _disable_peer(node_id: str, peer: Any | None = None) -> None:
+        safe_id = _safe_peer_id(node_id)
+        if not safe_id or safe_id == identity.node_id:
+            raise ValueError("Peer-ID ist ungültig")
+        display_name = display_name_for_peer(safe_id, getattr(peer, "name", None))
+        if peer is not None:
+            try:
+                peer_dict = peer.to_dict()
+                display_name = str(peer_dict.get("display_name") or display_name)
+            except Exception:
+                pass
+        with disabled_peer_lock:
+            disabled_peers[safe_id] = {
+                "node_id": safe_id,
+                "display_name": display_name,
+                "disabled_at": time.time(),
+                "last_host": str(getattr(peer, "host", "") or ""),
+                "last_relay_url": str(getattr(peer, "relay_url", "") or ""),
+            }
+            _persist_disabled_peers()
+        try:
+            peer_provider.remove(safe_id)
+        except Exception:
+            pass
+
+    def _enable_peer(node_id: str) -> bool:
+        safe_id = _safe_peer_id(node_id)
+        if not safe_id:
+            return False
+        with disabled_peer_lock:
+            removed = disabled_peers.pop(safe_id, None) is not None
+            if removed:
+                _persist_disabled_peers()
+        return removed
 
 
     def _load_external_download_links() -> None:
@@ -272,6 +372,9 @@ def create_app(
                 })
         return results
 
+    with disabled_peer_lock:
+        _load_disabled_peers()
+
     with external_link_lock:
         _load_external_download_links()
         _cleanup_external_download_links(persist=True)
@@ -380,10 +483,26 @@ def create_app(
     def _list_active_peers() -> list[Any]:
         if peer_connector is not None and hasattr(peer_connector, "prune_stale_peers"):
             peer_connector.prune_stale_peers()
-        # The local node must never appear as a share/storage target. If a relay or
-        # stale discovery packet reports our own node id, sending a shared manifest
-        # back to ourselves can resurrect old manifest ids and duplicate files.
-        return [peer for peer in peer_provider.list_peers() if getattr(peer, "node_id", None) != identity.node_id]
+        disabled_ids = _disabled_peer_ids()
+        peers: list[Any] = []
+        for peer in peer_provider.list_peers():
+            node_id = str(getattr(peer, "node_id", "") or "")
+            # The local node must never appear as a share/storage target. If a relay or
+            # stale discovery packet reports our own node id, sending a shared manifest
+            # back to ourselves can resurrect old manifest ids and duplicate files.
+            if node_id == identity.node_id:
+                continue
+            # User-disabled peers stay hidden even when UDP discovery, gossip or the
+            # PHP relay announces them again on the next refresh.  Remove the current
+            # runtime entry as well so transfers cannot pick it in the same cycle.
+            if node_id in disabled_ids:
+                try:
+                    peer_provider.remove(node_id)
+                except Exception:
+                    pass
+                continue
+            peers.append(peer)
+        return peers
 
     def stats_payload(stats: StorageStats) -> dict[str, int | str]:
         smb_root_path = str(app.config.get("DCLOUD_SMB_ROOT") or config.storage.path)
@@ -1172,6 +1291,7 @@ def create_app(
             "network": network_payload(),
             "networkCapacity": _network_storage_capacity(stats, peers),
             "peers": [peer.to_dict() for peer in peers],
+            "disabledPeers": _disabled_peers_payload(),
             "fileCount": len(manifests),
             "folders": folders,
             "folderTree": folder_tree_json(tree),
@@ -1192,6 +1312,7 @@ def create_app(
             stats_json=stats_payload(stats),
             peers=_list_active_peers(),
             peers_json=[peer.to_dict() for peer in _list_active_peers()],
+            disabled_peers_json=_disabled_peers_payload(),
             settings_json=settings_payload(stats),
             network_json=network_payload(),
             manifests=manifests,
@@ -1287,11 +1408,16 @@ def create_app(
     def _requested_storage_peers() -> list[Any]:
         available_peers = _eligible_storage_peers()
         requested_peer_ids = [str(peer_id).strip() for peer_id in request.form.getlist("storage_peer_node_ids") if str(peer_id).strip()]
+        explicit_selection = request.form.get("storage_peer_selection_mode") == "manual"
         if not requested_peer_ids:
-            return available_peers
+            # No IDs used to mean "default to all peers".  The dashboard now sends
+            # storage_peer_selection_mode=manual when the user intentionally turned
+            # all peer targets off, so local-only uploads are possible without the
+            # next refresh silently selecting every peer again.
+            return [] if explicit_selection else available_peers
         requested_set = set(requested_peer_ids)
         selected = [peer for peer in available_peers if peer.node_id in requested_set]
-        return selected or available_peers
+        return selected if explicit_selection else (selected or available_peers)
 
     def _local_first_upload_placement(upload_result: Any, storage_peers: list[Any]) -> dict[str, Any]:
         peer_ids = [peer.node_id for peer in storage_peers]
@@ -1912,6 +2038,37 @@ def create_app(
             return jsonify({"ok": True, "message": f"Netzwerksuche gestartet{suffix}", "state": state_payload()})
         message = "; ".join(errors) if errors else "Peer-Discovery ist nicht verfügbar"
         return jsonify({"ok": False, "message": f"Netzwerksuche fehlgeschlagen: {message}", "state": state_payload()}), 503
+
+    @app.post("/api/peers/disable")
+    def api_disable_peer() -> Response:
+        payload = request.get_json(silent=True) if request.is_json else request.form
+        peer_id = _safe_peer_id(str((payload or {}).get("peer_id") or ""))
+        if not peer_id:
+            return jsonify({"ok": False, "message": "peer_id fehlt", "state": state_payload()}), 400
+        if peer_id == identity.node_id:
+            return jsonify({"ok": False, "message": "Der eigene Knoten kann nicht deaktiviert werden", "state": state_payload()}), 400
+        peer = peer_provider.get_peer(peer_id)
+        try:
+            _disable_peer(peer_id, peer)
+        except ValueError as exc:
+            return jsonify({"ok": False, "message": str(exc), "state": state_payload()}), 400
+        label = display_name_for_peer(peer_id, getattr(peer, "name", None))
+        if peer is not None:
+            try:
+                label = str(peer.to_dict().get("display_name") or label)
+            except Exception:
+                pass
+        return jsonify({"ok": True, "message": f"Peer deaktiviert: {label}", "state": state_payload()})
+
+    @app.post("/api/peers/enable")
+    def api_enable_peer() -> Response:
+        payload = request.get_json(silent=True) if request.is_json else request.form
+        peer_id = _safe_peer_id(str((payload or {}).get("peer_id") or ""))
+        if not peer_id:
+            return jsonify({"ok": False, "message": "peer_id fehlt", "state": state_payload()}), 400
+        removed = _enable_peer(peer_id)
+        message = "Peer wird wieder zugelassen und erscheint nach dem nächsten Discovery-Signal." if removed else "Peer war nicht deaktiviert."
+        return jsonify({"ok": True, "message": message, "state": state_payload()})
 
     @app.post("/api/storage/cleanup")
     def api_storage_cleanup() -> Response:

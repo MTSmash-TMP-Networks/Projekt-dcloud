@@ -658,9 +658,12 @@
           <section class="status-card"><h3>Peer-Suche</h3><div class="status-kpi" id="network-auto-discovery">Aktiv</div><div class="status-sub" id="network-auto-discovery-sub">UDP-Discovery sucht erreichbare Peers</div></section>
         </div>
         <h3>Aktive Peer-Liste</h3>
-        <p class="settings-note">Speicherziele für neue Uploads auswählen (Standard: alle aktiven Peers).</p>
+        <p class="settings-note">Speicherziele für neue Uploads auswählen. Deaktivierte Peers bleiben ausgeblendet, bis du sie wieder zulässt.</p>
         <div class="status-list" id="network-storage-peer-selection"></div>
         <ul class="status-list" id="network-peer-list"><li>Keine aktiven Peers online.</li></ul>
+        <h3>Deaktivierte Peers</h3>
+        <p class="settings-note">Diese Knoten werden von Discovery/Relay ignoriert und nicht als Speicherziel genutzt.</p>
+        <ul class="status-list" id="network-disabled-peer-list"><li>Keine Peers deaktiviert.</li></ul>
       </div>
     </section>
 
@@ -979,6 +982,7 @@
       settings: {{ settings_json | tojson }},
       network: {{ network_json | tojson }},
       peers: {{ peers_json | tojson }},
+      disabledPeers: {{ disabled_peers_json | tojson }},
       fileCount: {{ manifests | length | tojson }},
       folders: {{ folders | tojson }},
       folderTree: {{ folder_tree_json | tojson }},
@@ -1004,6 +1008,33 @@
       let currentDownloadId = null;
       let currentDownloadStarted = false;
       let selectedStoragePeerIds = new Set();
+      let storagePeerSelectionTouched = false;
+      let storagePeerSelectionInitialized = false;
+      const storagePeerSelectionKey = `dcloud.storagePeerSelection.${appState.nodeId || "local"}`;
+      function loadStoragePeerSelection(){
+        try{
+          const raw = localStorage.getItem(storagePeerSelectionKey);
+          if(raw === null) return null;
+          const parsed = JSON.parse(raw);
+          if(!Array.isArray(parsed)) return null;
+          return new Set(parsed.map(String).filter(Boolean));
+        }catch(error){
+          return null;
+        }
+      }
+      function saveStoragePeerSelection(){
+        try{
+          localStorage.setItem(storagePeerSelectionKey, JSON.stringify(Array.from(selectedStoragePeerIds)));
+        }catch(error){
+          // localStorage can be unavailable in hardened browsers; the in-memory
+          // selection still prevents refreshes from re-checking peers.
+        }
+      }
+      const storedStoragePeerSelection = loadStoragePeerSelection();
+      if(storedStoragePeerSelection){
+        selectedStoragePeerIds = storedStoragePeerSelection;
+        storagePeerSelectionTouched = true;
+      }
       const uploadQueue = [];
       let uploadWorkerRunning = false;
       let lastTransferPercent = 0;
@@ -1305,11 +1336,12 @@
 
         const peers = appState.peers || [];
         const activeIds = new Set(peers.map(peer => String(peer.node_id || "")));
-        if(selectedStoragePeerIds.size === 0){
-          activeIds.forEach(id => selectedStoragePeerIds.add(id));
-        }else{
-          selectedStoragePeerIds.forEach(id => { if(!activeIds.has(id)) selectedStoragePeerIds.delete(id); });
-          if(selectedStoragePeerIds.size === 0) activeIds.forEach(id => selectedStoragePeerIds.add(id));
+        selectedStoragePeerIds.forEach(id => { if(!activeIds.has(id)) selectedStoragePeerIds.delete(id); });
+        if(!storagePeerSelectionInitialized){
+          if(!storagePeerSelectionTouched){
+            activeIds.forEach(id => selectedStoragePeerIds.add(id));
+          }
+          storagePeerSelectionInitialized = true;
         }
         const peerSelector = document.getElementById("network-storage-peer-selection");
         if(peerSelector){
@@ -1326,8 +1358,10 @@
               checkbox.type = "checkbox";
               checkbox.checked = selectedStoragePeerIds.has(peer.node_id);
               checkbox.addEventListener("change", () => {
+                storagePeerSelectionTouched = true;
                 if(checkbox.checked) selectedStoragePeerIds.add(peer.node_id);
                 else selectedStoragePeerIds.delete(peer.node_id);
+                saveStoragePeerSelection();
               });
               const text = document.createElement("span");
               text.textContent = `${peer.display_name || peer.name || String(peer.node_id || "Peer").slice(0, 12)}`;
@@ -1345,17 +1379,75 @@
         }else{
           peers.forEach(peer => {
             const item = document.createElement("li");
+            item.style.display = "flex";
+            item.style.alignItems = "center";
+            item.style.justifyContent = "space-between";
+            item.style.gap = ".75rem";
             const label = peer.display_name || peer.name || String(peer.node_id || "Peer").slice(0, 10);
             const type = "Server";
             const storage = peer.accepts_peer_storage ? `P2P-Speicher aktiv · frei ${formatBytes(peer.free_storage_bytes || peer.shared_storage_bytes || 0)}` : "keine P2P-Ablage";
             const route = peerRouteSummary(peer);
             const age = Number(peer.last_seen_age_seconds || 0);
             const seen = age < 2 ? "gerade aktiv" : `vor ${Math.round(age)}s gesehen`;
-            item.textContent = `${label} · ${type} · ${route} · ${storage} · ${seen}`;
+            const text = document.createElement("span");
+            text.textContent = `${label} · ${type} · ${route} · ${storage} · ${seen}`;
+            const disableBtn = document.createElement("button");
+            disableBtn.type = "button";
+            disableBtn.className = "explorer-btn";
+            disableBtn.textContent = "Deaktivieren";
+            disableBtn.addEventListener("click", async () => {
+              if(!confirm(`${label} deaktivieren?\n\nDer Peer wird aus der aktiven Liste entfernt und durch Discovery/Relay nicht automatisch wieder gesetzt.`)) return;
+              try{
+                selectedStoragePeerIds.delete(peer.node_id);
+                saveStoragePeerSelection();
+                await ajaxPost("/api/peers/disable", { peer_id: peer.node_id });
+              }catch(error){
+                showToast(error.message || "Peer konnte nicht deaktiviert werden", "error");
+              }
+            });
+            item.append(text, disableBtn);
             peerList.appendChild(item);
           });
         }
+        renderDisabledPeers();
         renderChatPeers();
+      }
+
+      function renderDisabledPeers(){
+        const list = document.getElementById("network-disabled-peer-list");
+        if(!list) return;
+        const disabledPeers = appState.disabledPeers || [];
+        list.innerHTML = "";
+        if(!disabledPeers.length){
+          const item = document.createElement("li");
+          item.textContent = "Keine Peers deaktiviert.";
+          list.appendChild(item);
+          return;
+        }
+        disabledPeers.forEach(peer => {
+          const item = document.createElement("li");
+          item.style.display = "flex";
+          item.style.alignItems = "center";
+          item.style.justifyContent = "space-between";
+          item.style.gap = ".75rem";
+          const label = peer.display_name || String(peer.node_id || "Peer").slice(0, 12);
+          const age = Math.round(Number(peer.disabled_age_seconds || 0));
+          const text = document.createElement("span");
+          text.textContent = `${label} · deaktiviert seit ${age}s`;
+          const enableBtn = document.createElement("button");
+          enableBtn.type = "button";
+          enableBtn.className = "explorer-btn";
+          enableBtn.textContent = "Wieder zulassen";
+          enableBtn.addEventListener("click", async () => {
+            try{
+              await ajaxPost("/api/peers/enable", { peer_id: peer.node_id });
+            }catch(error){
+              showToast(error.message || "Peer konnte nicht wieder zugelassen werden", "error");
+            }
+          });
+          item.append(text, enableBtn);
+          list.appendChild(item);
+        });
       }
 
       function renderChatPeers(){
@@ -2135,6 +2227,7 @@
         data.append("folder", targetFolder);
         data.append("next", "/");
         data.append("upload_id", uploadId);
+        data.append("storage_peer_selection_mode", storagePeerSelectionTouched ? "manual" : "auto");
         Array.from(selectedStoragePeerIds).forEach(peerId => data.append("storage_peer_node_ids", peerId));
         const xhr = new XMLHttpRequest();
         currentUploadXhr = xhr;
@@ -2209,6 +2302,7 @@
         data.append("smb_path", smbPath);
         data.append("smb_username", smbUsername);
         data.append("smb_password", smbPassword);
+        data.append("storage_peer_selection_mode", storagePeerSelectionTouched ? "manual" : "auto");
         Array.from(selectedStoragePeerIds).forEach(peerId => data.append("storage_peer_node_ids", peerId));
         try{
           const response = await fetch('/upload/smb', { method:'POST', headers:{ 'X-Requested-With':'XMLHttpRequest', 'Accept':'application/json' }, body:data });
