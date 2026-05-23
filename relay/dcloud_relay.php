@@ -10,7 +10,7 @@ declare(strict_types=1);
  * Landing page intentionally reveals only minimal information.
  */
 
-const DCLOUD_RELAY_VERSION = '1.4.0';
+const DCLOUD_RELAY_VERSION = '1.4.1';
 const DCLOUD_RELAY_TOKEN_ROTATION_SECONDS = 86400;
 const DCLOUD_PEER_TTL_SECONDS = 45;
 const DCLOUD_MESSAGE_TTL_SECONDS = 900;
@@ -925,6 +925,122 @@ function dcloud_direct_proxy_request(array $input): void {
     ]);
 }
 
+function dcloud_send_raw_proxy_headers_once(int $statusCode, array $responseHeaders, bool &$sent): void {
+    if ($sent) return;
+    $sent = true;
+    $safeHeaders = dcloud_headers_for_json($responseHeaders);
+    if (!headers_sent()) {
+        http_response_code($statusCode > 0 ? $statusCode : 502);
+        header('Cache-Control: no-store');
+        header('X-Accel-Buffering: no');
+        header('X-Content-Type-Options: nosniff');
+        header('X-DCloud-Relay-Mode: direct_proxy_raw');
+        $contentType = $safeHeaders['Content-Type'] ?? ($safeHeaders['content-type'] ?? 'application/octet-stream');
+        header('Content-Type: ' . str_replace(["\r", "\n"], ' ', (string)$contentType));
+        foreach ($safeHeaders as $name => $value) {
+            $lower = strtolower((string)$name);
+            if (strncmp($lower, 'x-dcloud-', 9) === 0 && $lower !== 'x-dcloud-relay-mode') {
+                header($name . ': ' . str_replace(["\r", "\n"], ' ', (string)$value));
+            }
+        }
+        header('Connection: close');
+    }
+    @flush();
+}
+
+function dcloud_stream_direct_proxy_http(string $url, string $method, array $headers, string $body, int $timeout): void {
+    if (!function_exists('curl_init')) {
+        $forwarded = dcloud_perform_direct_proxy_http($url, $method, $headers, $body, $timeout);
+        $statusCode = (int)($forwarded['status_code'] ?? 502);
+        $responseBody = (string)($forwarded['body'] ?? '');
+        $responseHeaders = is_array($forwarded['headers'] ?? null) ? $forwarded['headers'] : [];
+        dcloud_raw_proxy_response($statusCode, $responseHeaders, $responseBody);
+        return;
+    }
+
+    @set_time_limit(max(30, $timeout + 15));
+    dcloud_clear_all_output_buffers();
+
+    $headerLines = [];
+    foreach ($headers as $key => $value) {
+        $headerLines[] = $key . ': ' . $value;
+    }
+
+    $responseHeaders = [];
+    $statusCode = 502;
+    $headersSent = false;
+    $sawFinalHeaderBlock = false;
+
+    $ch = curl_init($url);
+    if ($ch === false) {
+        dcloud_fail('PHP-Forwarder konnte cURL nicht initialisieren', 500);
+    }
+    curl_setopt($ch, CURLOPT_CUSTOMREQUEST, $method);
+    curl_setopt($ch, CURLOPT_RETURNTRANSFER, false);
+    curl_setopt($ch, CURLOPT_HEADER, false);
+    curl_setopt($ch, CURLOPT_CONNECTTIMEOUT, DCLOUD_DIRECT_PROXY_CONNECT_TIMEOUT_SECONDS);
+    curl_setopt($ch, CURLOPT_TIMEOUT, $timeout);
+    curl_setopt($ch, CURLOPT_FOLLOWLOCATION, false);
+    if (defined('CURLOPT_BUFFERSIZE')) {
+        curl_setopt($ch, CURLOPT_BUFFERSIZE, 1024 * 1024);
+    }
+    if (defined('CURLPROTO_HTTP')) {
+        curl_setopt($ch, CURLOPT_PROTOCOLS, CURLPROTO_HTTP);
+        curl_setopt($ch, CURLOPT_REDIR_PROTOCOLS, CURLPROTO_HTTP);
+    }
+    curl_setopt($ch, CURLOPT_HTTPHEADER, $headerLines);
+    if ($method === 'POST') {
+        curl_setopt($ch, CURLOPT_POSTFIELDS, $body);
+    }
+    curl_setopt($ch, CURLOPT_HEADERFUNCTION, function ($curl, string $line) use (&$responseHeaders, &$statusCode, &$sawFinalHeaderBlock): int {
+        $trimmed = trim($line);
+        if ($trimmed === '') {
+            if ($statusCode >= 200) {
+                $sawFinalHeaderBlock = true;
+            }
+            return strlen($line);
+        }
+        if (preg_match('/^HTTP\/\S+\s+(\d{3})\b/', $trimmed, $matches)) {
+            $statusCode = (int)$matches[1];
+            $responseHeaders = [];
+            $sawFinalHeaderBlock = false;
+            return strlen($line);
+        }
+        if ($statusCode >= 200) {
+            $responseHeaders[] = $trimmed;
+        }
+        return strlen($line);
+    });
+    curl_setopt($ch, CURLOPT_WRITEFUNCTION, function ($curl, string $chunk) use (&$statusCode, &$responseHeaders, &$headersSent, &$sawFinalHeaderBlock): int {
+        if (!$headersSent) {
+            dcloud_send_raw_proxy_headers_once($statusCode, $responseHeaders, $headersSent);
+        }
+        echo $chunk;
+        @flush();
+        return strlen($chunk);
+    });
+
+    $ok = curl_exec($ch);
+    $curlErrno = curl_errno($ch);
+    $curlError = curl_error($ch);
+    $infoStatus = (int)curl_getinfo($ch, CURLINFO_RESPONSE_CODE);
+    curl_close($ch);
+
+    if (!$headersSent && $infoStatus > 0) {
+        $statusCode = $infoStatus;
+    }
+    if (($ok === false || $curlErrno !== 0) && !$headersSent) {
+        dcloud_fail('PHP-Forwarder konnte Ziel-Peer nicht direkt erreichen', 502, [
+            'curl_errno' => $curlErrno,
+            'curl_error' => substr($curlError, 0, 160),
+        ]);
+    }
+    if (!$headersSent) {
+        dcloud_send_raw_proxy_headers_once($statusCode, $responseHeaders, $headersSent);
+    }
+    dcloud_finalize_and_exit();
+}
+
 function dcloud_raw_proxy_response(int $statusCode, array $responseHeaders, string $responseBody): void {
     dcloud_clear_all_output_buffers();
     $safeHeaders = dcloud_headers_for_json($responseHeaders);
@@ -955,11 +1071,7 @@ function dcloud_raw_proxy_response(int $statusCode, array $responseHeaders, stri
 
 function dcloud_direct_proxy_request_raw(array $input): void {
     [$_targetNodeId, $url, $method, $_path, $headers, $body, $timeout] = dcloud_decode_direct_proxy_input($input);
-    $forwarded = dcloud_perform_direct_proxy_http($url, $method, $headers, $body, $timeout);
-    $statusCode = (int)($forwarded['status_code'] ?? 502);
-    $responseBody = (string)($forwarded['body'] ?? '');
-    $responseHeaders = is_array($forwarded['headers'] ?? null) ? $forwarded['headers'] : [];
-    dcloud_raw_proxy_response($statusCode, $responseHeaders, $responseBody);
+    dcloud_stream_direct_proxy_http($url, $method, $headers, $body, $timeout);
 }
 
 function dcloud_register(array $input): void {

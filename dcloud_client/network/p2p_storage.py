@@ -505,19 +505,36 @@ class P2PStorageClient:
 
         raise StorageError(f"Chunk-Pack konnte von Peer {peer.node_id} nicht geladen werden: {direct_error}") from direct_error
 
-    def get_chunks_batch(self, peer: Peer, *, digests: list[str], timeout: float | None = None) -> dict[str, bytes]:
+    def get_chunks_batch(
+        self,
+        peer: Peer,
+        *,
+        digests: list[str],
+        timeout: float | None = None,
+        max_chunks: int | None = None,
+        max_payload_bytes: int | None = None,
+    ) -> dict[str, bytes]:
         """Fetch multiple stored chunks from one peer with a single peer/API call.
 
         Newer peers use a binary chunk-pack endpoint first. It avoids base64, so
         one larger request is usually much faster than many small chunk requests.
         The JSON/base64 endpoint and finally the old single-chunk API remain as
         compatibility fallbacks in the caller.
+
+        The optional limits are sent to newer peers so the downloader can keep
+        PHP-forwarded requests small enough to make visible progress instead of
+        waiting on one huge buffered transfer.
         """
         unique_digests = list(dict.fromkeys(str(digest).strip() for digest in digests if str(digest).strip()))
         if not unique_digests:
             return {}
 
-        data = json.dumps({"digests": unique_digests}, separators=(",", ":"), sort_keys=True).encode("utf-8")
+        payload: dict[str, Any] = {"digests": unique_digests}
+        if max_chunks is not None:
+            payload["max_chunks"] = max(1, int(max_chunks))
+        if max_payload_bytes is not None:
+            payload["max_payload_bytes"] = max(1, int(max_payload_bytes))
+        data = json.dumps(payload, separators=(",", ":"), sort_keys=True).encode("utf-8")
         headers = {"Content-Type": "application/json", "Accept": "application/json"}
         request_timeout = timeout if timeout is not None else max(self.timeout, 90.0)
 

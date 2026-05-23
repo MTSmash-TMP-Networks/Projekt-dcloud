@@ -46,7 +46,7 @@ from ..network.p2p_storage import (
     verify_manifest_deletion,
     verify_manifest_revocation,
 )
-from ..network.peers import PeerProvider, display_name_for_peer
+from ..network.peers import Peer, PeerProvider, display_name_for_peer
 from ..storage import ChunkStore, StorageError, StorageStats
 from .upload_progress import UploadProgressTracker
 
@@ -1536,10 +1536,95 @@ def create_app(
             return True
 
         # Large files should not require one HTTP/PHP roundtrip per chunk.
-        # Keep batches big enough to move a typical 50-100 MiB file in one or
-        # two requests, while still limiting memory pressure on small hosts.
-        batch_size = 128
-        batch_byte_budget = 96 * 1024 * 1024
+        # Very large PHP-forwarded packs can still appear to hang because many
+        # hosts buffer a full upstream response before the downloader sees any
+        # bytes. Keep relay/forwarder blocks moderate and direct-LAN blocks
+        # larger. Failed blocks are retried in smaller slices before the old
+        # single-chunk fallback is used.
+        def batch_limits_for_peer(peer: Peer) -> tuple[int, int, float]:
+            if peer.host == RELAY_HOST:
+                return 32, 16 * 1024 * 1024, 60.0
+            return 96, 64 * 1024 * 1024, 90.0
+
+        def emit_batch_progress(peer_name: str, batch_len: int, *, note: str = "") -> None:
+            if progress_callback is None:
+                return
+            progress_callback(
+                {
+                    "phase": "fetch_chunk_batch",
+                    "current_chunk": len(restored_digests),
+                    "total_chunks": total_chunks,
+                    "missing_chunks": len(missing),
+                    "missing_total": missing_total,
+                    "batch_size": batch_len,
+                    "current_peer": peer_name,
+                    "status_note": note,
+                }
+            )
+
+        def fetch_and_store_batch(
+            peer: Peer,
+            peer_name: str,
+            batch: list[str],
+            *,
+            max_chunks: int,
+            max_payload_bytes: int,
+            timeout: float,
+            depth: int = 0,
+        ) -> int:
+            active_batch = [digest for digest in batch if digest in missing]
+            if not active_batch:
+                return 0
+            note = "kleinerer Block" if depth else ""
+            emit_batch_progress(peer_name, len(active_batch), note=note)
+            try:
+                received = p2p_client.get_chunks_batch(
+                    peer,
+                    digests=active_batch,
+                    timeout=timeout,
+                    max_chunks=max_chunks,
+                    max_payload_bytes=max_payload_bytes,
+                )
+            except StorageError:
+                received = {}
+            stored_count = 0
+            for received_digest, stored_data in received.items():
+                if write_restored_chunk(received_digest, stored_data):
+                    stored_count += 1
+            if stored_count:
+                emit_batch_progress(peer_name, stored_count, note="empfangen")
+                return stored_count
+
+            # Avoid leaving the UI at one big, stuck-looking block. Split a
+            # failed batch a few times; the final single-chunk fallback below
+            # remains available for very old peers.
+            if len(active_batch) > 8 and depth < 3:
+                midpoint = max(1, len(active_batch) // 2)
+                emit_batch_progress(peer_name, len(active_batch), note="wird kleiner wiederholt")
+                next_max_chunks = max(8, max_chunks // 2)
+                next_max_payload = max(4 * 1024 * 1024, max_payload_bytes // 2)
+                next_timeout = max(30.0, min(timeout, 45.0))
+                left = fetch_and_store_batch(
+                    peer,
+                    peer_name,
+                    active_batch[:midpoint],
+                    max_chunks=next_max_chunks,
+                    max_payload_bytes=next_max_payload,
+                    timeout=next_timeout,
+                    depth=depth + 1,
+                )
+                right = fetch_and_store_batch(
+                    peer,
+                    peer_name,
+                    active_batch[midpoint:],
+                    max_chunks=next_max_chunks,
+                    max_payload_bytes=next_max_payload,
+                    timeout=next_timeout,
+                    depth=depth + 1,
+                )
+                return left + right
+            return 0
+
         for node_id in peer_order:
             if not missing:
                 break
@@ -1547,6 +1632,7 @@ def create_app(
             if peer is None:
                 continue
             peer_name = peer.to_dict().get("display_name") or peer.node_id[:12]
+            batch_size, batch_byte_budget, batch_timeout = batch_limits_for_peer(peer)
             candidate_digests = [digest for digest in peer_candidates.get(node_id, []) if digest in missing]
             batch: list[str] = []
             estimated_bytes = 0
@@ -1556,71 +1642,27 @@ def create_app(
                 chunk = missing[digest]
                 estimated_size = int(chunk.get("stored_size") or chunk.get("size") or 0)
                 if batch and (len(batch) >= batch_size or estimated_bytes + estimated_size > batch_byte_budget):
-                    if progress_callback is not None:
-                        progress_callback(
-                            {
-                                "phase": "fetch_chunk_batch",
-                                "current_chunk": len(restored_digests),
-                                "total_chunks": total_chunks,
-                                "missing_chunks": len(missing),
-                                "missing_total": missing_total,
-                                "batch_size": len(batch),
-                                "current_peer": peer_name,
-                            }
-                        )
-                    try:
-                        received = p2p_client.get_chunks_batch(peer, digests=batch)
-                    except StorageError:
-                        received = {}
-                    for received_digest, stored_data in received.items():
-                        write_restored_chunk(received_digest, stored_data)
-                    if received and progress_callback is not None:
-                        progress_callback(
-                            {
-                                "phase": "fetch_chunk_batch",
-                                "current_chunk": len(restored_digests),
-                                "total_chunks": total_chunks,
-                                "missing_chunks": len(missing),
-                                "missing_total": missing_total,
-                                "batch_size": len(received),
-                                "current_peer": peer_name,
-                            }
-                        )
+                    fetch_and_store_batch(
+                        peer,
+                        peer_name,
+                        batch,
+                        max_chunks=batch_size,
+                        max_payload_bytes=batch_byte_budget,
+                        timeout=batch_timeout,
+                    )
                     batch = []
                     estimated_bytes = 0
                 batch.append(digest)
                 estimated_bytes += estimated_size
             if batch:
-                if progress_callback is not None:
-                    progress_callback(
-                        {
-                            "phase": "fetch_chunk_batch",
-                            "current_chunk": len(restored_digests),
-                            "total_chunks": total_chunks,
-                            "missing_chunks": len(missing),
-                            "missing_total": missing_total,
-                            "batch_size": len(batch),
-                            "current_peer": peer_name,
-                        }
-                    )
-                try:
-                    received = p2p_client.get_chunks_batch(peer, digests=batch)
-                except StorageError:
-                    received = {}
-                for received_digest, stored_data in received.items():
-                    write_restored_chunk(received_digest, stored_data)
-                if received and progress_callback is not None:
-                    progress_callback(
-                        {
-                            "phase": "fetch_chunk_batch",
-                            "current_chunk": len(restored_digests),
-                            "total_chunks": total_chunks,
-                            "missing_chunks": len(missing),
-                            "missing_total": missing_total,
-                            "batch_size": len(received),
-                            "current_peer": peer_name,
-                        }
-                    )
+                fetch_and_store_batch(
+                    peer,
+                    peer_name,
+                    batch,
+                    max_chunks=batch_size,
+                    max_payload_bytes=batch_byte_budget,
+                    timeout=batch_timeout,
+                )
 
         # Conservative fallback: if a peer/server is older and does not know the
         # batch endpoint yet, still try the previous single-chunk API so mixed
@@ -1692,9 +1734,12 @@ def create_app(
                 fetched = max(0, missing_total - missing_chunks)
                 batch_size = int(event.get("batch_size") or 0)
                 server_percent = 18.0 + (fetched / max(1, missing_total)) * 40.0
-                status = f"Fehlende Chunks werden in großen Blöcken geladen… {fetched}/{missing_total}"
+                status = f"Fehlende Chunks werden in Blöcken geladen… {fetched}/{missing_total}"
                 if batch_size:
                     status += f" (+{batch_size} Chunks)"
+                status_note = str(event.get("status_note") or "").strip()
+                if status_note:
+                    status += f" · {status_note}"
             elif phase == "fetch_chunk":
                 server_percent = 12.0 + ((max(0, current_chunk - 1) + 0.65) / max(1, total)) * 45.0
                 status = f"Einzel-Fallback: fehlender Chunk wird geladen… {current_chunk}/{total}"
@@ -1810,22 +1855,33 @@ def create_app(
             abort(404)
         return Response(data, mimetype="application/octet-stream")
 
-    def _chunk_batch_digests_from_request() -> list[str]:
+    def _chunk_batch_payload_from_request() -> dict[str, Any]:
         payload = request.get_json(force=True)
-        raw_digests = payload.get("digests", []) if isinstance(payload, dict) else []
+        return payload if isinstance(payload, dict) else {}
+
+    def _chunk_batch_digests_from_payload(payload: dict[str, Any]) -> list[str]:
+        raw_digests = payload.get("digests", [])
         if not isinstance(raw_digests, list) or not raw_digests:
             raise StorageError("Batch payload must include at least one digest")
         return list(dict.fromkeys(str(digest).strip() for digest in raw_digests if str(digest).strip()))
 
+    def _chunk_batch_limit(payload: dict[str, Any], key: str, default: int, minimum: int, maximum: int) -> int:
+        try:
+            value = int(payload.get(key) or default)
+        except (TypeError, ValueError):
+            value = default
+        return max(minimum, min(maximum, value))
+
     @app.post("/api/p2p/chunks/batch/pack")
     def api_p2p_get_chunks_pack() -> Response:
         try:
-            digests = _chunk_batch_digests_from_request()
+            payload = _chunk_batch_payload_from_request()
+            digests = _chunk_batch_digests_from_payload(payload)
         except (ValueError, StorageError, TypeError) as exc:
             return jsonify({"ok": False, "message": str(exc), "state": state_payload()}), 400
 
-        max_chunks = 128
-        max_payload_bytes = 96 * 1024 * 1024
+        max_chunks = _chunk_batch_limit(payload, "max_chunks", 128, 1, 128)
+        max_payload_bytes = _chunk_batch_limit(payload, "max_payload_bytes", 96 * 1024 * 1024, 1024 * 1024, 96 * 1024 * 1024)
         pack_magic = b"DCLOUD-CHUNK-PACK-1\n"
 
         def generate():
@@ -1860,9 +1916,10 @@ def create_app(
     @app.post("/api/p2p/chunks/batch/download")
     def api_p2p_get_chunks_batch() -> Response:
         try:
-            digests = _chunk_batch_digests_from_request()
-            max_chunks = 128
-            max_payload_bytes = 96 * 1024 * 1024
+            payload = _chunk_batch_payload_from_request()
+            digests = _chunk_batch_digests_from_payload(payload)
+            max_chunks = _chunk_batch_limit(payload, "max_chunks", 128, 1, 128)
+            max_payload_bytes = _chunk_batch_limit(payload, "max_payload_bytes", 96 * 1024 * 1024, 1024 * 1024, 96 * 1024 * 1024)
             chunks_payload: list[dict[str, Any]] = []
             missing: list[str] = []
             payload_bytes = 0
