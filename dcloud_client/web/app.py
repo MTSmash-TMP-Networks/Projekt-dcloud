@@ -44,6 +44,7 @@ from ..network.p2p_storage import (
     build_manifest_deletion,
     build_manifest_revocation,
     distribute_file_chunks,
+    replicate_manifest_chunks,
     verify_manifest_deletion,
     verify_manifest_revocation,
 )
@@ -122,6 +123,11 @@ def create_app(
     chat_messages: dict[str, deque[dict[str, Any]]] = defaultdict(lambda: deque(maxlen=120))
     replication_repair_lock = threading.Lock()
     last_replication_repair_at = 0.0
+    replication_queue: deque[dict[str, Any]] = deque()
+    replication_queue_lock = threading.RLock()
+    replication_queue_event = threading.Event()
+    replication_worker_started = False
+    replication_queued_manifest_ids: set[str] = set()
 
     def _is_ajax_request() -> bool:
         return request.headers.get("X-Requested-With") == "XMLHttpRequest" or request.accept_mimetypes.best == "application/json"
@@ -274,8 +280,203 @@ def create_app(
     def _eligible_storage_peer_node_ids() -> list[str]:
         return [peer.node_id for peer in _eligible_storage_peers()]
 
+    def _background_replication_progress(upload_id: str):
+        def handle(event: dict[str, Any]) -> None:
+            total_chunks = int(event.get("total_chunks") or 0)
+            current_chunk = int(event.get("current_chunk") or 0)
+            peer_percent = (current_chunk / total_chunks * 100.0) if total_chunks else 0.0
+            allowed = {
+                "phase",
+                "status",
+                "total_bytes",
+                "raw_bytes_processed",
+                "stored_bytes",
+                "current_chunk",
+                "total_chunks",
+                "compressed_chunks",
+                "local_chunks",
+                "remote_successes",
+                "remote_failures",
+                "desired_replicas",
+                "target_count",
+                "current_peer",
+            }
+            fields = {key: value for key, value in event.items() if key in allowed}
+            fields["active"] = True
+            fields["ok"] = None
+            fields["percent"] = 100.0
+            fields["server_percent"] = max(0.0, min(100.0, peer_percent))
+            fields["details"] = {"backgroundReplication": True}
+            upload_progress.update(upload_id, **fields)
+
+        return handle
+
+    def _ensure_replication_worker() -> None:
+        nonlocal replication_worker_started
+        with replication_queue_lock:
+            if replication_worker_started:
+                return
+            replication_worker_started = True
+        worker = threading.Thread(target=_replication_worker_loop, name="dcloud-background-replication", daemon=True)
+        worker.start()
+
+    def _enqueue_background_replication(
+        manifest_id: str,
+        *,
+        upload_id: str | None = None,
+        peer_node_ids: list[str] | None = None,
+        file_name: str = "",
+    ) -> bool:
+        safe_manifest_id = str(manifest_id or "").strip()
+        if not safe_manifest_id:
+            return False
+        with replication_queue_lock:
+            if safe_manifest_id in replication_queued_manifest_ids:
+                return False
+            replication_queued_manifest_ids.add(safe_manifest_id)
+            replication_queue.append({
+                "manifest_id": safe_manifest_id,
+                "upload_id": upload_id or "",
+                "peer_node_ids": list(dict.fromkeys(str(item) for item in (peer_node_ids or []) if str(item))),
+                "file_name": file_name,
+                "queued_at": time.time(),
+            })
+            replication_queue_event.set()
+        if upload_id:
+            upload_progress.update(
+                upload_id,
+                active=True,
+                ok=None,
+                phase="background_replication_queued",
+                status="Datei ist lokal gespeichert; Sicherheitskopie läuft im Hintergrund…",
+                percent=100,
+                server_percent=0,
+                details={"backgroundReplication": True, "manifestId": safe_manifest_id},
+            )
+        _ensure_replication_worker()
+        return True
+
+    def _select_replication_peers(peer_node_ids: list[str] | None = None) -> list[Any]:
+        active_peers = _eligible_storage_peers()
+        wanted = {str(item) for item in (peer_node_ids or []) if str(item)}
+        if not wanted:
+            return active_peers
+        selected = [peer for peer in active_peers if peer.node_id in wanted]
+        return selected or active_peers
+
+    def _process_background_replication_job(job: dict[str, Any]) -> None:
+        manifest_id = str(job.get("manifest_id") or "")
+        upload_id = str(job.get("upload_id") or "")
+        file_name = str(job.get("file_name") or "")
+        try:
+            manifest = manifest_store.load(manifest_id)
+            peers = _select_replication_peers(list(job.get("peer_node_ids") or []))
+            if upload_id:
+                upload_progress.update(
+                    upload_id,
+                    active=True,
+                    ok=None,
+                    phase="background_replication_start",
+                    status="Upload ist abgeschlossen; Sicherheitskopien werden im Hintergrund verteilt…",
+                    percent=100,
+                    server_percent=0,
+                    total_bytes=manifest.file_size,
+                    total_chunks=len(manifest.chunks),
+                    target_count=len(peers) + 1,
+                    details={
+                        "backgroundReplication": True,
+                        "manifestId": manifest.manifest_id,
+                        "peerTargets": [peer.to_dict().get("display_name") or peer.node_id[:12] for peer in peers],
+                    },
+                )
+            result = replicate_manifest_chunks(
+                manifest=manifest,
+                chunk_store=chunk_store,
+                local_node_id=identity.node_id,
+                peers=peers,
+                p2p_client=p2p_client,
+                progress_callback=_background_replication_progress(upload_id) if upload_id else None,
+            )
+            placement = dict(manifest.placement or {})
+            placement.update({
+                "strategy": "local_first_background_replication",
+                "target_count": len(result.targets),
+                "targets": result.targets,
+                "transfer_status": result.transfer_status,
+                "remote_successes": result.remote_successes,
+                "remote_failures": result.remote_failures,
+                "local_chunks": result.local_chunks,
+                "compressed_chunks": result.compressed_chunks,
+                "desired_replicas": result.desired_replicas,
+                "replicated_chunks": result.replicated_chunks,
+                "under_replicated_chunks": result.under_replicated_chunks,
+                "raw_bytes": result.raw_bytes,
+                "stored_bytes": result.stored_bytes,
+                "background_replication": False,
+                "background_completed_at": datetime.now(timezone.utc).isoformat(),
+            })
+            updated_manifest = manifest_store.update_placement(
+                manifest.manifest_id,
+                identity,
+                chunks=result.chunks,
+                placement=placement,
+            )
+            if upload_id:
+                if result.remote_successes:
+                    message = (
+                        f"Upload abgeschlossen: {file_name or manifest.file_name}; "
+                        f"Sicherheitskopie im Hintergrund erstellt "
+                        f"({result.replicated_chunks}/{len(result.chunks)} Chunks redundant)."
+                    )
+                elif peers:
+                    message = (
+                        f"Upload abgeschlossen: {file_name or manifest.file_name}; "
+                        "Sicherheitskopie konnte noch nicht erstellt werden."
+                    )
+                else:
+                    message = f"Upload abgeschlossen: {file_name or manifest.file_name}; keine Speicher-Peers aktiv."
+                upload_progress.finish(
+                    upload_id,
+                    ok=True,
+                    message=message,
+                    details={
+                        "backgroundReplication": True,
+                        "manifestId": updated_manifest.manifest_id,
+                        "transferStatus": result.transfer_status,
+                        "replicatedChunks": result.replicated_chunks,
+                        "underReplicatedChunks": result.under_replicated_chunks,
+                    },
+                )
+        except Exception as exc:
+            if upload_id:
+                upload_progress.finish(
+                    upload_id,
+                    ok=True,
+                    message=(
+                        f"Upload abgeschlossen: {file_name or manifest_id}; "
+                        f"Hintergrund-Replikation wird später erneut versucht ({exc})."
+                    ),
+                    details={"backgroundReplication": True, "replicationError": str(exc)},
+                )
+
+    def _replication_worker_loop() -> None:
+        while True:
+            replication_queue_event.wait()
+            while True:
+                with replication_queue_lock:
+                    if not replication_queue:
+                        replication_queue_event.clear()
+                        break
+                    job = replication_queue.popleft()
+                manifest_id = str(job.get("manifest_id") or "")
+                try:
+                    _process_background_replication_job(job)
+                finally:
+                    with replication_queue_lock:
+                        replication_queued_manifest_ids.discard(manifest_id)
+
     def _repair_under_replicated_manifests(peers: list[Any] | None = None, *, min_interval_seconds: float = 20.0) -> None:
-        """Best-effort healing for chunks that temporarily lost remote replicas."""
+        """Queue best-effort healing without doing network writes in a web request."""
         nonlocal last_replication_repair_at
         now = time.monotonic()
         if now - last_replication_repair_at < max(1.0, float(min_interval_seconds)):
@@ -285,45 +486,24 @@ def create_app(
         try:
             last_replication_repair_at = now
             active_peers = _eligible_storage_peers(peers)
-            peers_by_id = {peer.node_id: peer for peer in active_peers}
-            if not peers_by_id:
+            if not active_peers:
                 return
+            peer_ids = [peer.node_id for peer in active_peers]
             for manifest in manifest_store.list_manifests():
                 if manifest.owner_node_id != identity.node_id:
                     continue
-                manifest_changed = False
+                needs_replication = False
                 for chunk in manifest.chunks:
                     existing_locations = [str(node_id) for node_id in chunk.get("locations", []) if str(node_id)]
                     remote_locations = [node_id for node_id in existing_locations if node_id != identity.node_id]
-                    if remote_locations:
-                        continue
-                    digest = str(chunk.get("hash", ""))
-                    if not digest:
-                        continue
-                    try:
-                        stored_data = chunk_store.read_stored_chunk(digest)
-                    except StorageError:
-                        continue
-                    for peer_id, peer in peers_by_id.items():
-                        transfer = p2p_client.put_chunk(
-                            peer,
-                            digest=digest,
-                            stored_data=stored_data,
-                            original_size=int(chunk.get("size", len(stored_data))),
-                            stored_size=int(chunk.get("stored_size", len(stored_data))),
-                            index=int(chunk.get("index", 0)),
-                            compression=str(chunk.get("compression")) if chunk.get("compression") else None,
-                        )
-                        if transfer.ok:
-                            chunk["locations"] = list(dict.fromkeys([*existing_locations, peer_id]))
-                            manifest_changed = True
-                            break
-                if manifest_changed:
-                    manifest_store.update_placement(
+                    if not remote_locations and identity.node_id in existing_locations:
+                        needs_replication = True
+                        break
+                if needs_replication:
+                    _enqueue_background_replication(
                         manifest.manifest_id,
-                        identity,
-                        chunks=manifest.chunks,
-                        placement=dict(manifest.placement or {}),
+                        peer_node_ids=peer_ids,
+                        file_name=manifest.file_name,
                     )
         finally:
             replication_repair_lock.release()
@@ -864,10 +1044,37 @@ def create_app(
         selected = [peer for peer in available_peers if peer.node_id in requested_set]
         return selected or available_peers
 
-    def _store_uploaded_temp_file(temp_path: Path, safe_name: str, folder_path: str, upload_id: str, storage_peers: list[Any] | None = None) -> tuple[bool, dict[str, Any], int]:
+    def _local_first_upload_placement(upload_result: Any, storage_peers: list[Any]) -> dict[str, Any]:
+        peer_ids = [peer.node_id for peer in storage_peers]
+        targets = list(dict.fromkeys([identity.node_id, *peer_ids]))
+        background_enabled = bool(storage_peers)
+        return {
+            "strategy": "local_first_background_replication",
+            "target_count": len(targets),
+            "targets": targets,
+            "transfer_status": "background_replication_queued" if background_enabled else upload_result.transfer_status,
+            "remote_successes": 0,
+            "remote_failures": 0,
+            "local_chunks": upload_result.local_chunks,
+            "compressed_chunks": upload_result.compressed_chunks,
+            "desired_replicas": 2 if background_enabled else 1,
+            "replicated_chunks": 0,
+            "under_replicated_chunks": len(upload_result.chunks) if background_enabled else 0,
+            "raw_bytes": upload_result.raw_bytes,
+            "stored_bytes": upload_result.stored_bytes,
+            "background_replication": background_enabled,
+            "background_queued_at": datetime.now(timezone.utc).isoformat() if background_enabled else None,
+        }
+
+    def _run_local_first_upload(
+        *,
+        temp_path: Path,
+        safe_name: str,
+        folder_path: str,
+        upload_id: str,
+        storage_peers: list[Any],
+    ) -> tuple[FileManifest, Any, str]:
         file_size = temp_path.stat().st_size
-        _sync_peer_connector_settings()
-        storage_peers = storage_peers if storage_peers is not None else _requested_storage_peers()
         upload_progress.update(
             upload_id,
             phase="select_targets",
@@ -878,20 +1085,89 @@ def create_app(
             target_count=len(storage_peers) + 1,
             details={"peerTargets": [peer.to_dict().get("display_name") or peer.node_id[:12] for peer in storage_peers]},
         )
-        uses_relay_storage = any(getattr(peer, "host", "") == RELAY_HOST for peer in storage_peers)
-        relay_safe_chunk_size = int(getattr(config.network, "relay_chunk_size_bytes", 512 * 1024))
-        effective_chunk_size = min(chunk_store.chunk_size, relay_safe_chunk_size) if uses_relay_storage else chunk_store.chunk_size
-        upload_result = distribute_file_chunks(source_path=temp_path, chunk_store=chunk_store, local_node_id=identity.node_id, peers=storage_peers, p2p_client=p2p_client, progress_callback=_upload_server_progress(upload_id), chunk_size_bytes=effective_chunk_size)
-        placement = {"strategy": "distributed_round_robin_chunks", "target_count": len(upload_result.targets), "targets": upload_result.targets, "transfer_status": upload_result.transfer_status, "remote_successes": upload_result.remote_successes, "remote_failures": upload_result.remote_failures, "local_chunks": upload_result.local_chunks, "compressed_chunks": upload_result.compressed_chunks, "desired_replicas": upload_result.desired_replicas, "replicated_chunks": upload_result.replicated_chunks, "under_replicated_chunks": upload_result.under_replicated_chunks, "raw_bytes": upload_result.raw_bytes, "stored_bytes": upload_result.stored_bytes}
-        manifest = manifest_store.create_from_chunk_entries(file_name=safe_name, file_size=file_size, chunk_entries=upload_result.chunks, identity=identity, folder_path=folder_path, placement=placement)
-        return True, {"manifest": manifest, "upload_result": upload_result}, file_size
+        upload_progress.update(
+            upload_id,
+            phase="local_chunking",
+            status="Datei wird lokal gespeichert; Peer-Verteilung startet danach im Hintergrund…",
+            percent=45,
+            server_percent=8,
+            details={"backgroundReplication": bool(storage_peers)},
+        )
+        upload_result = distribute_file_chunks(
+            source_path=temp_path,
+            chunk_store=chunk_store,
+            local_node_id=identity.node_id,
+            peers=[],
+            p2p_client=p2p_client,
+            progress_callback=_upload_server_progress(upload_id),
+            chunk_size_bytes=chunk_store.chunk_size,
+        )
+        placement = _local_first_upload_placement(upload_result, storage_peers)
+        upload_progress.update(
+            upload_id,
+            phase="manifest",
+            status="Lokales Manifest wird geschrieben; Datei ist danach sofort verfügbar…",
+            percent=98,
+            server_percent=95,
+            raw_bytes_processed=upload_result.raw_bytes,
+            stored_bytes=upload_result.stored_bytes,
+            compressed_chunks=upload_result.compressed_chunks,
+            local_chunks=upload_result.local_chunks,
+            remote_successes=0,
+            remote_failures=0,
+            desired_replicas=placement["desired_replicas"],
+            target_count=len(placement["targets"]),
+            details={"backgroundReplication": bool(storage_peers)},
+        )
+        manifest = manifest_store.create_from_chunk_entries(
+            file_name=safe_name,
+            file_size=file_size,
+            chunk_entries=upload_result.chunks,
+            identity=identity,
+            folder_path=folder_path,
+            placement=placement,
+        )
+        if storage_peers:
+            _enqueue_background_replication(
+                manifest.manifest_id,
+                upload_id=upload_id,
+                peer_node_ids=[peer.node_id for peer in storage_peers],
+                file_name=safe_name,
+            )
+            message = f"Datei lokal gespeichert: {safe_name}; Sicherheitskopie läuft im Hintergrund."
+        else:
+            message = f"Datei lokal gespeichert: {safe_name} in {folder_path} ({manifest.manifest_id[:12]})"
+            upload_progress.finish(
+                upload_id,
+                ok=True,
+                message=message,
+                details={
+                    "manifestId": manifest.manifest_id,
+                    "transferStatus": upload_result.transfer_status,
+                    "backgroundReplication": False,
+                },
+            )
+        return manifest, upload_result, message
+
+    def _store_uploaded_temp_file(temp_path: Path, safe_name: str, folder_path: str, upload_id: str, storage_peers: list[Any] | None = None) -> tuple[bool, dict[str, Any], int]:
+        file_size = temp_path.stat().st_size
+        _sync_peer_connector_settings()
+        storage_peers = storage_peers if storage_peers is not None else _requested_storage_peers()
+        manifest, upload_result, message = _run_local_first_upload(
+            temp_path=temp_path,
+            safe_name=safe_name,
+            folder_path=folder_path,
+            upload_id=upload_id,
+            storage_peers=storage_peers,
+        )
+        return True, {"manifest": manifest, "upload_result": upload_result, "message": message}, file_size
 
     @app.post("/upload/smb")
     def upload_from_smb() -> Response:
         upload_id = _safe_upload_id(request.form.get("upload_id"))
         if SMBConnection is None:
             message = "SMB-Unterstuetzung ist nicht installiert (Python-Modul 'smb' fehlt)."
-            upload_progress.fail(upload_id, message)
+            upload_progress.finish(upload_id, ok=False, message=message)
             return jsonify({"ok": False, "message": message, "uploadId": upload_id, "uploadProgress": upload_progress.get(upload_id)}), 503
         folder_path = sanitize_folder_path(request.form.get("folder", DEFAULT_FOLDER))
         host = (request.form.get("smb_host") or "").strip()
@@ -964,106 +1240,12 @@ def create_app(
             file_size = temp_path.stat().st_size
             _sync_peer_connector_settings()
             storage_peers = _requested_storage_peers()
-            upload_progress.update(
-                upload_id,
-                phase="select_targets",
-                status="Speicherziele werden ausgewählt…",
-                percent=40,
-                server_percent=4,
-                total_bytes=file_size,
-                target_count=len(storage_peers) + 1,
-                details={
-                    "peerTargets": [peer.to_dict().get("display_name") or peer.node_id[:12] for peer in storage_peers],
-                },
-            )
-            uses_relay_storage = any(getattr(peer, "host", "") == RELAY_HOST for peer in storage_peers)
-            relay_safe_chunk_size = int(getattr(config.network, "relay_chunk_size_bytes", 512 * 1024))
-            effective_chunk_size = min(chunk_store.chunk_size, relay_safe_chunk_size) if uses_relay_storage else chunk_store.chunk_size
-            if uses_relay_storage and effective_chunk_size < chunk_store.chunk_size:
-                upload_progress.update(
-                    upload_id,
-                    phase="relay_chunk_size",
-                    status=(
-                        "PHP-Relay erkannt; Chunks werden kleiner geschnitten, "
-                        "damit Webserver-POST-Limits nicht greifen…"
-                    ),
-                    percent=42,
-                    server_percent=6,
-                    details={
-                        "relayChunkSize": effective_chunk_size,
-                        "configuredChunkSize": chunk_store.chunk_size,
-                    },
-                )
-            upload_result = distribute_file_chunks(
-                source_path=temp_path,
-                chunk_store=chunk_store,
-                local_node_id=identity.node_id,
-                peers=storage_peers,
-                p2p_client=p2p_client,
-                progress_callback=_upload_server_progress(upload_id),
-                chunk_size_bytes=effective_chunk_size,
-            )
-            placement = {
-                "strategy": "distributed_round_robin_chunks",
-                "target_count": len(upload_result.targets),
-                "targets": upload_result.targets,
-                "transfer_status": upload_result.transfer_status,
-                "remote_successes": upload_result.remote_successes,
-                "remote_failures": upload_result.remote_failures,
-                "local_chunks": upload_result.local_chunks,
-                "compressed_chunks": upload_result.compressed_chunks,
-                "desired_replicas": upload_result.desired_replicas,
-                "replicated_chunks": upload_result.replicated_chunks,
-                "under_replicated_chunks": upload_result.under_replicated_chunks,
-                "raw_bytes": upload_result.raw_bytes,
-                "stored_bytes": upload_result.stored_bytes,
-            }
-            upload_progress.update(
-                upload_id,
-                phase="manifest",
-                status="Manifest wird geschrieben und Dateiliste aktualisiert…",
-                percent=99,
-                server_percent=98,
-                raw_bytes_processed=upload_result.raw_bytes,
-                stored_bytes=upload_result.stored_bytes,
-                compressed_chunks=upload_result.compressed_chunks,
-                local_chunks=upload_result.local_chunks,
-                remote_successes=upload_result.remote_successes,
-                remote_failures=upload_result.remote_failures,
-                desired_replicas=upload_result.desired_replicas,
-                target_count=len(upload_result.targets),
-            )
-            manifest = manifest_store.create_from_chunk_entries(
-                file_name=safe_name,
-                file_size=file_size,
-                chunk_entries=upload_result.chunks,
-                identity=identity,
+            manifest, upload_result, message = _run_local_first_upload(
+                temp_path=temp_path,
+                safe_name=safe_name,
                 folder_path=folder_path,
-                placement=placement,
-            )
-            if upload_result.remote_successes:
-                replica_note = f", {upload_result.replicated_chunks} redundant" if upload_result.replicated_chunks else ""
-                message = (
-                    f"Datei verteilt gespeichert: {safe_name} in {folder_path} "
-                    f"({upload_result.remote_successes} Peer-Schreibvorgang/-vorgänge, "
-                    f"{upload_result.local_chunks} lokal{replica_note})"
-                )
-            elif upload_result.remote_failures:
-                message = f"Datei lokal gespeichert: {safe_name}; Peer-Ablage war nicht erreichbar"
-            else:
-                message = f"Datei lokal gespeichert: {safe_name} in {folder_path} ({manifest.manifest_id[:12]})"
-            upload_progress.finish(
-                upload_id,
-                ok=True,
-                message=message,
-                details={
-                    "manifestId": manifest.manifest_id,
-                    "transferStatus": upload_result.transfer_status,
-                    "rawBytes": upload_result.raw_bytes,
-                    "storedBytes": upload_result.stored_bytes,
-                    "replicatedChunks": upload_result.replicated_chunks,
-                    "underReplicatedChunks": upload_result.under_replicated_chunks,
-                },
+                upload_id=upload_id,
+                storage_peers=storage_peers,
             )
             if _is_ajax_request():
                 return jsonify({

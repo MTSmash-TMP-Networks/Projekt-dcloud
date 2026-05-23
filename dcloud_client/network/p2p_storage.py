@@ -1114,3 +1114,254 @@ def distribute_file_chunks(
         remote_failures=result.remote_failures,
     )
     return result
+
+
+def replicate_manifest_chunks(
+    *,
+    manifest: FileManifest,
+    chunk_store: ChunkStore,
+    local_node_id: str,
+    peers: list[Peer],
+    p2p_client: P2PStorageClient,
+    min_replicas_with_peers: int = DEFAULT_MIN_REPLICAS_WITH_PEERS,
+    progress_callback: Callable[[dict[str, Any]], None] | None = None,
+) -> DistributedUploadResult:
+    """Replicate already-local manifest chunks to peers in the background.
+
+    Uploads should finish as soon as the local chunks and manifest are durable.
+    This helper is the asynchronous safety-copy path: it reads the stored local
+    chunks, pushes them to reachable peers in binary batches and returns updated
+    chunk-location metadata that the caller can re-sign into the manifest.
+    """
+    ranked_peers = _rank_peers_by_speed(peers, p2p_client) if peers else []
+    target_ids = [*[peer.node_id for peer in ranked_peers], local_node_id] if ranked_peers else [local_node_id]
+    desired_replicas = min(max(1, int(min_replicas_with_peers)), 2, len(target_ids))
+
+    result = DistributedUploadResult(
+        chunks=[dict(chunk, locations=list(dict.fromkeys(str(node_id) for node_id in chunk.get("locations", []) if str(node_id)))) for chunk in manifest.chunks],
+        targets=list(dict.fromkeys(target_ids)),
+        desired_replicas=desired_replicas,
+    )
+    total_chunks = len(result.chunks)
+    for entry in result.chunks:
+        result.raw_bytes += int(entry.get("size", 0) or 0)
+        result.stored_bytes += int(entry.get("stored_size", entry.get("size", 0)) or 0)
+        if entry.get("compression"):
+            result.compressed_chunks += 1
+        if local_node_id in [str(node_id) for node_id in entry.get("locations", [])]:
+            result.local_chunks += 1
+
+    def notify(**payload: Any) -> None:
+        if progress_callback is not None:
+            progress_callback(payload)
+
+    def peer_label(peer: Peer) -> str:
+        return str(peer.to_dict().get("display_name") or peer.name or peer.node_id[:12])
+
+    pending_by_peer: dict[str, dict[str, Any]] = {}
+
+    def queue_remote_chunk(peer: Peer, item: dict[str, Any]) -> None:
+        bucket = pending_by_peer.setdefault(peer.node_id, {"peer": peer, "chunks": [], "bytes": 0})
+        bucket["chunks"].append(item)
+        bucket["bytes"] += int(item.get("stored_size", len(bytes(item["stored_data"]))))
+
+    def flush_peer_bucket(node_id: str, *, reason: str = "batch") -> None:
+        bucket = pending_by_peer.get(node_id)
+        if not bucket or not bucket.get("chunks"):
+            return
+        peer: Peer = bucket["peer"]
+        chunks: list[dict[str, Any]] = list(bucket["chunks"])
+        pending_by_peer[node_id] = {"peer": peer, "chunks": [], "bytes": 0}
+        name = peer_label(peer)
+        first_index = min(int(item["entry_index"]) for item in chunks) if chunks else 0
+        notify(
+            phase="background_replication_batch",
+            status=f"Sicherheitskopie wird im Hintergrund an {name} übertragen… +{len(chunks)} Chunks",
+            current_chunk=min(first_index + len(chunks), max(total_chunks, 1)),
+            total_chunks=total_chunks,
+            current_peer=name,
+            remote_successes=result.remote_successes,
+            remote_failures=result.remote_failures,
+            local_chunks=result.local_chunks,
+            compressed_chunks=result.compressed_chunks,
+            raw_bytes_processed=result.raw_bytes,
+            stored_bytes=result.stored_bytes,
+        )
+
+        remaining = list(chunks)
+        results = p2p_client.put_chunks_pack(peer, chunks=remaining)
+        if len(results) != len(remaining) or any(not transfer.ok for transfer in results):
+            json_results = p2p_client.put_chunks_batch(peer, chunks=remaining)
+            if len(json_results) == len(remaining):
+                results = [json_results[i] if not results or i >= len(results) or not results[i].ok else results[i] for i in range(len(remaining))]
+
+        for item, transfer in zip(remaining, results):
+            entry = result.chunks[int(item["entry_index"])]
+            locations = [str(node_id) for node_id in entry.get("locations", []) if str(node_id)]
+            if transfer.ok:
+                if peer.node_id not in locations:
+                    locations.append(peer.node_id)
+                    entry["locations"] = list(dict.fromkeys(locations))
+                result.remote_successes += 1
+                continue
+
+            result.remote_failures += 1
+            stored = False
+            alternate_peers = [
+                candidate
+                for candidate, _target_id in _rotated_targets(
+                    ranked_peers,
+                    [candidate.node_id for candidate in ranked_peers],
+                    int(item["index"]) + 1,
+                )
+                if candidate is not None
+            ]
+            fallback_candidates: list[Peer] = []
+            seen_fallbacks: set[str] = set()
+            for candidate in [*alternate_peers, peer]:
+                if candidate.node_id in seen_fallbacks or candidate.node_id in locations:
+                    continue
+                seen_fallbacks.add(candidate.node_id)
+                fallback_candidates.append(candidate)
+            for fallback_peer in fallback_candidates:
+                fallback_name = peer_label(fallback_peer)
+                notify(
+                    phase="background_replication_retry",
+                    status=f"Ein Chunk der Sicherheitskopie wird kleiner an {fallback_name} wiederholt…",
+                    current_chunk=int(item["index"]) + 1,
+                    total_chunks=total_chunks,
+                    current_peer=fallback_name,
+                )
+                retry = p2p_client.put_chunk(
+                    fallback_peer,
+                    digest=str(item["digest"]),
+                    stored_data=bytes(item["stored_data"]),
+                    original_size=int(item["original_size"]),
+                    stored_size=int(item["stored_size"]),
+                    index=int(item["index"]),
+                    compression=str(item["compression"]) if item.get("compression") else None,
+                )
+                if retry.ok:
+                    retry_locations = [str(node_id) for node_id in entry.get("locations", []) if str(node_id)]
+                    if fallback_peer.node_id not in retry_locations:
+                        retry_locations.append(fallback_peer.node_id)
+                        entry["locations"] = list(dict.fromkeys(retry_locations))
+                    result.remote_successes += 1
+                    stored = True
+                    break
+                result.remote_failures += 1
+            if not stored:
+                LOG.debug("Chunk %s could not be background-replicated: %s", str(item.get("digest", ""))[:12], transfer.message)
+
+        notify(
+            phase="background_replication_batch_done",
+            status=f"Sicherheitskopie-Paket an {name} abgeschlossen ({reason})",
+            current_chunk=min(first_index + len(chunks), max(total_chunks, 1)),
+            total_chunks=total_chunks,
+            current_peer=name,
+            remote_successes=result.remote_successes,
+            remote_failures=result.remote_failures,
+            local_chunks=result.local_chunks,
+            compressed_chunks=result.compressed_chunks,
+            raw_bytes_processed=result.raw_bytes,
+            stored_bytes=result.stored_bytes,
+        )
+
+    def flush_bucket_if_needed(peer: Peer) -> None:
+        bucket = pending_by_peer.get(peer.node_id)
+        if not bucket:
+            return
+        max_chunks, max_bytes = _upload_batch_limits(peer)
+        if len(bucket["chunks"]) >= max_chunks or int(bucket["bytes"]) >= max_bytes:
+            flush_peer_bucket(peer.node_id, reason="Limit erreicht")
+
+    notify(
+        phase="background_replication_start",
+        status="Datei ist lokal gespeichert; Sicherheitskopien werden im Hintergrund verteilt…",
+        current_chunk=0,
+        total_chunks=total_chunks,
+        target_count=len(result.targets),
+        desired_replicas=desired_replicas,
+        raw_bytes_processed=result.raw_bytes,
+        stored_bytes=result.stored_bytes,
+        local_chunks=result.local_chunks,
+        compressed_chunks=result.compressed_chunks,
+        remote_successes=0,
+        remote_failures=0,
+    )
+
+    if not ranked_peers:
+        for entry in result.chunks:
+            if len([node_id for node_id in entry.get("locations", []) if node_id]) < desired_replicas:
+                result.under_replicated_chunks += 1
+        notify(
+            phase="background_replication_skipped",
+            status="Keine aktiven Speicher-Peers verfügbar; Datei bleibt lokal gespeichert.",
+            current_chunk=total_chunks,
+            total_chunks=total_chunks,
+            remote_successes=0,
+            remote_failures=0,
+        )
+        return result
+
+    for entry_index, entry in enumerate(result.chunks):
+        locations = [str(node_id) for node_id in entry.get("locations", []) if str(node_id)]
+        if len(locations) >= desired_replicas:
+            continue
+        digest = str(entry.get("hash", ""))
+        if not digest:
+            continue
+        try:
+            stored_data = chunk_store.read_stored_chunk(digest)
+        except StorageError as exc:
+            result.remote_failures += 1
+            LOG.debug("Local chunk %s missing for background replication: %s", digest[:12], exc)
+            continue
+        candidates = [
+            candidate
+            for candidate, _target_id in _rotated_targets(ranked_peers, [peer.node_id for peer in ranked_peers], int(entry.get("index", entry_index)))
+            if candidate is not None and candidate.node_id not in locations
+        ]
+        if not candidates:
+            continue
+        peer = candidates[0]
+        queue_remote_chunk(
+            peer,
+            {
+                "entry_index": entry_index,
+                "digest": digest,
+                "stored_data": stored_data,
+                "original_size": int(entry.get("size", len(stored_data))),
+                "stored_size": int(entry.get("stored_size", len(stored_data))),
+                "index": int(entry.get("index", entry_index)),
+                "compression": entry.get("compression"),
+            },
+        )
+        flush_bucket_if_needed(peer)
+
+    for node_id in list(pending_by_peer):
+        flush_peer_bucket(node_id, reason="Hintergrundlauf abgeschlossen")
+
+    result.replicated_chunks = 0
+    result.under_replicated_chunks = 0
+    for entry in result.chunks:
+        locations = [str(node_id) for node_id in entry.get("locations", []) if str(node_id)]
+        entry["locations"] = list(dict.fromkeys(locations)) or [local_node_id]
+        if len(entry["locations"]) > 1:
+            result.replicated_chunks += 1
+        if len(entry["locations"]) < desired_replicas:
+            result.under_replicated_chunks += 1
+
+    notify(
+        phase="background_replication_done",
+        status="Hintergrund-Replikation abgeschlossen; Manifest wird aktualisiert…",
+        current_chunk=total_chunks,
+        total_chunks=total_chunks,
+        raw_bytes_processed=result.raw_bytes,
+        stored_bytes=result.stored_bytes,
+        compressed_chunks=result.compressed_chunks,
+        local_chunks=result.local_chunks,
+        remote_successes=result.remote_successes,
+        remote_failures=result.remote_failures,
+    )
+    return result

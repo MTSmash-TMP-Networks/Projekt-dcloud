@@ -1796,12 +1796,16 @@
         const shownPercent = Math.max(lastTransferPercent, Number(progress.percent || 0));
         if(shownPercent) updateTransfer(shownPercent, progress.status || progress.message || "Server verarbeitet Upload…");
         else if(progress.status) document.getElementById("transfer-status").textContent = progress.status;
+        const details = progress.details || {};
+        const backgroundReplication = !!details.backgroundReplication;
         document.getElementById("transfer-subtitle").textContent = progress.active === false
           ? (progress.ok ? "Fertig verarbeitet" : "Verarbeitung fehlgeschlagen")
-          : "Server verarbeitet: Chunking, Komprimierung und P2P-Verteilung";
+          : (backgroundReplication
+            ? "Datei ist lokal verfügbar; Sicherheitskopie läuft im Hintergrund"
+            : "Server verarbeitet: Chunking, Komprimierung und P2P-Verteilung");
 
-        setMiniProgress("server", serverPercent);
-        setMiniProgress("peer", peerPhasePercent(progress));
+        setMiniProgress("server", backgroundReplication ? 100 : serverPercent);
+        setMiniProgress("peer", backgroundReplication ? serverPercent : peerPhasePercent(progress));
 
         const current = Number(progress.currentChunk || 0);
         const total = Number(progress.totalChunks || 0);
@@ -1816,7 +1820,7 @@
         if(Number(progress.localChunks || 0)) peerParts.push(`${Number(progress.localChunks || 0)} lokal`);
         if(Number(progress.remoteFailures || 0)) peerParts.push(`${Number(progress.remoteFailures || 0)} Fehler`);
         if(Number(progress.desiredReplicas || 0) > 1) peerParts.push(`${Number(progress.desiredReplicas)} Kopien/Ziel`);
-        document.getElementById("transfer-peers").textContent = peerParts.length ? peerParts.join(" · ") : "noch keine Verteilung";
+        document.getElementById("transfer-peers").textContent = peerParts.length ? peerParts.join(" · ") : (backgroundReplication ? "läuft im Hintergrund" : "noch keine Verteilung");
         const localLine = document.getElementById("transfer-local");
         if(localLine) localLine.textContent = `${Number(progress.localChunks || 0)} Kopie(n)`;
 
@@ -1836,7 +1840,6 @@
         if(progress.currentPeer) lines.push(`Aktuelles Ziel: ${progress.currentPeer}`);
         if(totalBytes) lines.push(`Verarbeitet: ${formatBytes(raw)} von ${formatBytes(totalBytes)}`);
         if(progress.desiredReplicas) lines.push(`Gewünschte Replikation: ${progress.desiredReplicas} Kopie(n) pro Chunk`);
-        const details = progress.details || {};
         if(Array.isArray(details.peerTargets) && details.peerTargets.length) lines.push(`Speicher-Peers: ${details.peerTargets.join(", ")}`);
         if(details.transferStatus) lines.push(`Abschlussstatus: ${details.transferStatus}`);
         if(progress.message) lines.push(progress.message);
@@ -1849,7 +1852,18 @@
           if(!response.ok) return;
           const progress = await response.json();
           applyUploadProgress(progress);
-          if(progress.known && progress.active === false) stopUploadPolling();
+          if(progress.known && progress.active === false){
+            if(currentUploadId === uploadId){
+              document.getElementById("transfer-title").textContent = progress.ok ? "Upload abgeschlossen" : "Upload fehlgeschlagen";
+              document.getElementById("transfer-subtitle").textContent = progress.ok ? "Datei steht im Desktop bereit" : "Der Upload wurde nicht abgeschlossen";
+              if(progress.message) document.getElementById("transfer-status").textContent = progress.message;
+              untrackUploadId(uploadId);
+              currentUploadId = null;
+              updateQueueDisplay();
+              refreshState().catch(() => {});
+            }
+            stopUploadPolling();
+          }
         }catch(error){
           // Polling ist nur Zusatzinformation. Der eigentliche Upload-XHR entscheidet über Erfolg/Fehler.
         }
@@ -1914,9 +1928,21 @@
       }
       function finishTransfer(message, ok=true, progress=null){
         const finishedUploadId = currentUploadId;
+        const backgroundActive = !!(ok && progress && progress.active !== false && progress.details && progress.details.backgroundReplication);
         if(progress) applyUploadProgress(progress);
-        stopUploadPolling();
         currentUploadXhr = null;
+        if(backgroundActive){
+          lastSuccessfulUploadAt = Date.now();
+          document.getElementById("transfer-title").textContent = "Upload gespeichert";
+          document.getElementById("transfer-status").textContent = message || "Datei ist lokal verfügbar; Sicherheitskopie läuft im Hintergrund";
+          document.getElementById("transfer-subtitle").textContent = "Du kannst weiterarbeiten; die Peer-Verteilung läuft asynchron";
+          const cancel = document.getElementById("transfer-cancel");
+          cancel.textContent = "Schließen";
+          cancel.disabled = false;
+          refreshState().catch(() => {});
+          return;
+        }
+        stopUploadPolling();
         currentUploadId = null;
         untrackUploadId(finishedUploadId);
         updateQueueDisplay();
