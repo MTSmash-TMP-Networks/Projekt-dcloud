@@ -415,7 +415,22 @@
     .chat-peer-name{ display:block; font-weight:700; }
     .chat-peer-preview{ display:block; font-size:.78rem; color:#667899; margin-top:2px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
     .badge-dot{ position:absolute; min-width:20px; height:20px; right:8px; top:8px; padding:0 5px; border-radius:999px; background:#e81123; color:#fff; font-size:.72rem; font-weight:800; display:inline-flex; align-items:center; justify-content:center; box-shadow:0 0 0 3px rgba(255,255,255,.88); }
+    .badge-dot[hidden]{ display:none !important; }
     .app-icon .badge-dot{ right:10px; top:8px; }
+    .chat-pending-attachment{ display:flex; align-items:center; gap:8px; max-width:210px; padding:6px 8px; border:1px solid rgba(91,144,231,.30); border-radius:14px; background:rgba(232,242,255,.82); color:#173053; font-size:.78rem; box-shadow:0 8px 18px rgba(17,54,104,.08); }
+    .chat-pending-attachment[hidden]{ display:none !important; }
+    .chat-pending-attachment span:nth-child(2){ overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+    .chat-pending-attachment button{ border:0; background:rgba(255,255,255,.75); border-radius:10px; cursor:pointer; padding:2px 6px; color:#24456f; }
+    .chat-file-dialog{ width:min(760px, calc(100vw - 34px)); }
+    .chat-file-picker-toolbar{ display:flex; gap:10px; align-items:center; margin-bottom:12px; }
+    .chat-file-search{ flex:1; border:1px solid rgba(112,142,190,.42); border-radius:14px; padding:.68rem .82rem; background:rgba(255,255,255,.92); color:#173053; }
+    .chat-file-picker-grid{ display:grid; grid-template-columns:repeat(auto-fill, minmax(210px, 1fr)); gap:10px; max-height:360px; overflow:auto; padding:2px 2px 10px; }
+    .chat-file-choice{ border:1px solid rgba(112,142,190,.28); border-radius:18px; background:linear-gradient(145deg, rgba(255,255,255,.92), rgba(232,242,255,.74)); padding:12px; cursor:pointer; text-align:left; color:#173053; box-shadow:0 12px 26px rgba(17,54,104,.10); transition:transform .12s ease, box-shadow .12s ease, border-color .12s ease; }
+    .chat-file-choice:hover, .chat-file-choice:focus-visible{ transform:translateY(-2px); border-color:rgba(37,99,235,.42); box-shadow:0 18px 34px rgba(17,54,104,.16); outline:none; }
+    .chat-file-choice .file-icon{ font-size:1.75rem; display:block; margin-bottom:7px; }
+    .chat-file-choice strong{ display:block; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-size:.95rem; }
+    .chat-file-choice small{ display:block; color:#65728a; margin-top:4px; line-height:1.35; }
+    .chat-file-empty{ padding:20px; border:1px dashed rgba(112,142,190,.42); border-radius:18px; text-align:center; color:#65728a; background:rgba(255,255,255,.54); }
 
     .transfer-panel{
       position:absolute;
@@ -763,6 +778,7 @@
               <button class="chat-tool-btn" id="chat-image-btn" type="button" title="Bild senden">🖼️</button>
               <button class="chat-tool-btn" id="chat-file-btn" type="button" title="dcloud-Datei teilen">📎</button>
               <input type="file" id="chat-image-input" accept="image/*" hidden />
+              <div class="chat-pending-attachment" id="chat-pending-attachment" hidden><span id="chat-pending-icon">📎</span><span id="chat-pending-label">Anhang</span><button type="button" id="chat-pending-clear" title="Anhang entfernen">×</button></div>
               <input class="chat-input" id="chat-input" placeholder="Nachricht eingeben…" autocomplete="off" />
               <button class="explorer-btn" type="submit">Senden</button>
             </form>
@@ -893,6 +909,22 @@
       </form>
     </div>
 
+    <div class="dialog-backdrop" id="chatFileDialog" hidden>
+      <section class="folder-dialog chat-file-dialog" role="dialog" aria-modal="true" aria-labelledby="chatFileDialogTitle">
+        <header id="chatFileDialogTitle">dcloud-Datei im Chat teilen</header>
+        <main>
+          <p class="settings-note">Wähle eine Datei grafisch aus. Sie wird beim Senden automatisch für den aktuellen Chat-Peer freigegeben.</p>
+          <div class="chat-file-picker-toolbar">
+            <input class="chat-file-search" id="chatFileSearch" placeholder="Datei suchen…" autocomplete="off">
+          </div>
+          <div class="chat-file-picker-grid" id="chatFilePickerGrid"></div>
+          <div class="dialog-actions">
+            <button type="button" class="explorer-btn" id="chatFileDialogCancel">Abbrechen</button>
+          </div>
+        </main>
+      </section>
+    </div>
+
     <input type="file" id="desktop-upload-input" multiple hidden>
 
     <nav class="taskbar" aria-label="Taskleiste" id="taskbar">
@@ -986,6 +1018,9 @@
       const movePeerDialog = document.getElementById("movePeerDialog");
       const movePeerSelect = document.getElementById("movePeerSelect");
       const movePeerFileLabel = document.getElementById("movePeerFileLabel");
+      const chatFileDialog = document.getElementById("chatFileDialog");
+      const chatFileSearch = document.getElementById("chatFileSearch");
+      const chatFilePickerGrid = document.getElementById("chatFilePickerGrid");
       const transferPanel = document.getElementById("transfer-panel");
       const transferBody = document.getElementById("transfer-body");
       const transferToggle = document.getElementById("transfer-toggle");
@@ -1115,9 +1150,27 @@
       function flattenVisibleFiles(){
         const files = [];
         (appState.folderTree || []).forEach(folder => {
-          (folder.files || []).forEach(file => files.push(file));
+          (folder.files || []).forEach(file => files.push({
+            id: file.manifest_id,
+            name: file.file_name || "Datei",
+            size: Number(file.file_size || 0),
+            folder: normalizeFolderPath(file.folder_path || folder.name || DEFAULT_FOLDER),
+            owner: file.owner_node_id === appState.nodeId,
+            downloadUrl: file.download_url || `/download/${file.manifest_id}`
+          }));
         });
-        return files;
+        return files.sort((a,b)=>a.name.localeCompare(b.name));
+      }
+      function chatFileIcon(file){
+        const name = String(file?.name || "").toLowerCase();
+        if(/\.(png|jpe?g|gif|webp|bmp|svg)$/.test(name)) return "🖼️";
+        if(/\.(mp4|mkv|mov|avi|webm)$/.test(name)) return "🎬";
+        if(/\.(mp3|wav|ogg|flac|m4a)$/.test(name)) return "🎵";
+        if(/\.(zip|rar|7z|tar|gz)$/.test(name)) return "🗜️";
+        if(/\.(pdf)$/.test(name)) return "📕";
+        if(/\.(docx?|odt|rtf|txt|md)$/.test(name)) return "📄";
+        if(/\.(xlsx?|ods|csv)$/.test(name)) return "📊";
+        return "📎";
       }
       function chatPreview(msg){
         if(!msg) return "Noch keine Nachrichten";
@@ -1129,7 +1182,12 @@
         const badge = document.getElementById("chat-app-badge");
         if(!badge) return;
         const count = Number(total || 0);
-        badge.hidden = count <= 0;
+        if(count <= 0){
+          badge.hidden = true;
+          badge.textContent = "";
+          return;
+        }
+        badge.hidden = false;
         badge.textContent = count > 99 ? "99+" : String(count);
       }
       async function refreshChatSummary(){
@@ -2749,6 +2807,70 @@ ${file.name}`)) return;
         }
       }
       document.getElementById("settings-cleanup").onclick = () => triggerStorageCleanup();
+      function updatePendingChatAttachmentPreview(){
+        const wrap = document.getElementById("chat-pending-attachment");
+        const icon = document.getElementById("chat-pending-icon");
+        const label = document.getElementById("chat-pending-label");
+        if(!wrap || !icon || !label) return;
+        if(!pendingChatAttachment){
+          wrap.hidden = true;
+          icon.textContent = "📎";
+          label.textContent = "Anhang";
+          return;
+        }
+        wrap.hidden = false;
+        icon.textContent = pendingChatAttachment.kind === "image" ? "🖼️" : chatFileIcon({ name: pendingChatAttachment.file_name || pendingChatAttachment.name || "" });
+        label.textContent = pendingChatAttachment.kind === "image" ? (pendingChatAttachment.name || "Bild") : (pendingChatAttachment.file_name || "dcloud-Datei");
+      }
+      function closeChatFileDialog(){
+        if(chatFileDialog) chatFileDialog.hidden = true;
+      }
+      function renderChatFilePicker(){
+        if(!chatFilePickerGrid) return;
+        const query = String(chatFileSearch?.value || "").trim().toLowerCase();
+        const files = flattenVisibleFiles().filter(file => {
+          if(!query) return true;
+          return `${file.name} ${file.folder}`.toLowerCase().includes(query);
+        });
+        chatFilePickerGrid.innerHTML = "";
+        if(!files.length){
+          const empty = document.createElement("div");
+          empty.className = "chat-file-empty";
+          empty.textContent = query ? "Keine passende Datei gefunden." : "Keine dcloud-Dateien zum Teilen vorhanden.";
+          chatFilePickerGrid.appendChild(empty);
+          return;
+        }
+        files.forEach(file => {
+          const btn = document.createElement("button");
+          btn.type = "button";
+          btn.className = "chat-file-choice";
+          const icon = document.createElement("span");
+          icon.className = "file-icon";
+          icon.textContent = chatFileIcon(file);
+          const name = document.createElement("strong");
+          name.textContent = file.name;
+          const meta = document.createElement("small");
+          meta.textContent = `${formatBytes(file.size)} · ${displayPath(file.folder)}`;
+          btn.append(icon, name, meta);
+          btn.addEventListener("click", () => {
+            pendingChatAttachment = { kind:"file", manifest_id:file.id, file_name:file.name, file_size:file.size };
+            const input = document.getElementById("chat-input");
+            if(input && !input.value.trim()) input.value = `Datei geteilt: ${file.name}`;
+            updatePendingChatAttachmentPreview();
+            closeChatFileDialog();
+            showToast("Datei ist ausgewählt. Mit Senden im Chat teilen.", "success");
+          });
+          chatFilePickerGrid.appendChild(btn);
+        });
+      }
+      function openChatFileDialog(){
+        if(!activeChatPeerId){ showToast("Bitte zuerst einen Chat-Peer auswählen", "warning"); return; }
+        if(!flattenVisibleFiles().length){ showToast("Keine dcloud-Dateien zum Teilen vorhanden", "warning"); return; }
+        if(chatFileSearch) chatFileSearch.value = "";
+        renderChatFilePicker();
+        if(chatFileDialog) chatFileDialog.hidden = false;
+        setTimeout(() => chatFileSearch?.focus(), 40);
+      }
       document.getElementById("chat-form").addEventListener("submit", async event => {
         event.preventDefault();
         const input = document.getElementById("chat-input");
@@ -2766,6 +2888,7 @@ ${file.name}`)) return;
         }
         input.value = "";
         pendingChatAttachment = null;
+        updatePendingChatAttachmentPreview();
         await loadChatMessages();
       });
       const emojiPicker = document.getElementById("chat-emoji-picker");
@@ -2793,22 +2916,21 @@ ${file.name}`)) return;
           pendingChatAttachment = { kind:"image", name:file.name, mime:file.type || "image/png", data_url:String(reader.result || "") };
           const input = document.getElementById("chat-input");
           if(!input.value.trim()) input.value = "Bild";
+          updatePendingChatAttachmentPreview();
           showToast("Bild ist angehängt. Mit Senden verschicken.", "success");
         };
         reader.readAsDataURL(file);
         event.target.value = "";
       });
-      document.getElementById("chat-file-btn").addEventListener("click", () => {
-        const files = flattenVisibleFiles();
-        if(!files.length){ showToast("Keine dcloud-Dateien zum Teilen vorhanden", "warning"); return; }
-        const preview = files.slice(0, 20).map((file, index) => `${index + 1}: ${file.file_name} (${formatBytes(file.file_size)})`).join("\n");
-        const choice = window.prompt(`Welche dcloud-Datei teilen?\n${preview}\n\nNummer eingeben:`);
-        const index = Number(choice) - 1;
-        if(!Number.isInteger(index) || !files[index]) return;
-        pendingChatAttachment = { kind:"file", manifest_id:files[index].manifest_id };
-        const input = document.getElementById("chat-input");
-        if(!input.value.trim()) input.value = `Datei geteilt: ${files[index].file_name}`;
-        showToast("Datei wird beim Senden für den Peer freigegeben.", "success");
+      document.getElementById("chat-file-btn").addEventListener("click", openChatFileDialog);
+      document.getElementById("chatFileDialogCancel")?.addEventListener("click", closeChatFileDialog);
+      chatFileDialog?.addEventListener("click", event => {
+        if(event.target === chatFileDialog) closeChatFileDialog();
+      });
+      chatFileSearch?.addEventListener("input", renderChatFilePicker);
+      document.getElementById("chat-pending-clear")?.addEventListener("click", () => {
+        pendingChatAttachment = null;
+        updatePendingChatAttachmentPreview();
       });
       const settingsForm = document.getElementById("settings-form");
       const relayEnabledInput = document.getElementById("settings-relay-enabled");
@@ -2932,6 +3054,7 @@ ${file.name}`)) return;
       window.addEventListener("keydown", event => {
         if(event.key === "Escape"){
           if(!folderDialog.hidden) closeFolderDialog();
+          if(chatFileDialog && !chatFileDialog.hidden) closeChatFileDialog();
           closeCtx();
         }
         if(event.key === "F5") return;
