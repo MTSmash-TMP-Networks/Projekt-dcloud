@@ -1,0 +1,19 @@
+services:
+  dcloud:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: dcloud:local
+    container_name: dcloud
+    restart: unless-stopped
+    ports:
+      - "${DCLOUD_DASHBOARD_PORT:-8787}:8787/tcp"
+      - "${DCLOUD_DISCOVERY_UDP_PORT:-6881}:6881/udp"
+    environment:
+      DCLOUD_CONFIG: /data/config.yml
+      DCLOUD_NODE_NAME: "${DCLOUD_NODE_NAME:-dcloud-windows-docker}"
+      DCLOUD_WEB_PORT: "8787"
+      DCLOUD_UDP_PORT: "6881"
+      DCLOUD_STORAGE_LIMIT_GB: "${DCLOUD_STORAGE_LIMIT_GB:-50}"
+    volumes:
+      - ./docker-data:/data

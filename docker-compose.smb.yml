@@ -1,0 +1,7 @@
+services:
+  dcloud:
+    ports:
+      - "${DCLOUD_SMB_PORT:-445}:445/tcp"
+    environment:
+      DCLOUD_SMB_ENABLED: "true"
+      DCLOUD_SMB_PORT: "445"

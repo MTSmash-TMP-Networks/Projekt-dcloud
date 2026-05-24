@@ -21,8 +21,9 @@ dcloud ist ein Python-basierter Storage-Client mit Web-Dashboard im Desktop-Stil
 - Reverse-Mailbox-Download über Relay, wenn der Node von außen nicht direkt erreichbar ist
 - Peer-Chat mit ungelesen-Badge, Emojis, Bildversand und Datei-Teilen
 - Optionaler eingebetteter SMB-Server
-- OpenWrt-, Linux-, macOS- und Windows-Installationspfade
+- OpenWrt-, Linux-, macOS-, Windows- und Windows-Docker-Installationspfade
 - Auto-Update-Skripte für systemd, launchd und OpenWrt-Cron
+- Docker-Compose-Variante für Windows mit PowerShell-Helfer
 
 ## Architektur
 
@@ -204,6 +205,7 @@ Windows PowerShell:
 
 - Python 3.11 oder neuer empfohlen
 - Git
+- optional für Windows: Docker Desktop
 - ausgehende HTTP/HTTPS-Verbindung für Relays und Updates
 - genügend Speicherplatz im gewählten `storage.path`
 
@@ -493,6 +495,132 @@ cd C:\dcloud
 .\.venv\Scripts\python -m dcloud_client.main --config config.yml
 ```
 
+
+## Windows-Installation mit Docker Desktop
+
+Für Windows ist Docker die empfohlene Variante, wenn die native Python-/Scheduled-Task-Installation Probleme macht. dcloud läuft dann in einem Linux-Container; Konfiguration, Identität, Chunks und Manifeste bleiben dauerhaft im lokalen Ordner `docker-data/` erhalten.
+
+### Voraussetzungen
+
+1. Docker Desktop für Windows installieren.
+2. Docker Desktop starten und warten, bis die Engine bereit ist.
+3. Projektordner öffnen, zum Beispiel in PowerShell.
+
+### Schnellstart
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\install_dcloud_docker_windows.ps1
+```
+
+Danach öffnen:
+
+```text
+http://127.0.0.1:8787
+```
+
+Das Skript erzeugt automatisch:
+
+```text
+docker/.env.windows
+docker-data/
+```
+
+`docker-data/` enthält die persistente dcloud-Konfiguration und den Speicher. Diesen Ordner nicht löschen, wenn Node-ID, Dateien und Manifeste erhalten bleiben sollen.
+
+### Start mit eigenen Parametern
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\install_dcloud_docker_windows.ps1 `
+  -NodeName "Mein Windows dcloud" `
+  -DashboardPort 8787 `
+  -DiscoveryUdpPort 6881 `
+  -StorageLimitGiB 200
+```
+
+### Container verwalten
+
+Status anzeigen:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\install_dcloud_docker_windows.ps1 -Status
+```
+
+Logs anzeigen:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\install_dcloud_docker_windows.ps1 -Logs
+```
+
+Neustarten:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\install_dcloud_docker_windows.ps1 -Restart
+```
+
+Stoppen:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\install_dcloud_docker_windows.ps1 -Stop
+```
+
+Container entfernen, Daten aber behalten:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\install_dcloud_docker_windows.ps1 -Clean
+```
+
+### Docker Compose direkt verwenden
+
+Alternativ ohne PowerShell-Helfer:
+
+```powershell
+docker compose --env-file .\docker\.env.windows -f docker-compose.windows.yml up -d --build
+```
+
+Logs:
+
+```powershell
+docker compose --env-file .\docker\.env.windows -f docker-compose.windows.yml logs -f --tail 200
+```
+
+Stoppen:
+
+```powershell
+docker compose --env-file .\docker\.env.windows -f docker-compose.windows.yml down
+```
+
+### SMB mit Docker auf Windows
+
+SMB ist in der Docker-Variante standardmäßig deaktiviert. Grund: Windows verwendet Port `445` oft selbst für die Windows-Dateifreigabe. Wenn der Container ebenfalls Port `445` binden soll, kann der Start fehlschlagen.
+
+Aktivieren lässt es sich trotzdem mit:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\install_dcloud_docker_windows.ps1 -EnableSmb
+```
+
+Wenn der Container danach nicht startet, ohne SMB starten:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\install_dcloud_docker_windows.ps1 -Stop
+powershell -ExecutionPolicy Bypass -File .\scripts\install_dcloud_docker_windows.ps1
+```
+
+Für Windows ist meist besser: Dashboard und normale Downloads nutzen oder SMB nativ außerhalb von Docker betreiben.
+
+### Wichtige Docker-Hinweise
+
+- Web/API-Port im Container ist intern immer `8787`; der Host-Port wird über `-DashboardPort` gemappt.
+- UDP-Discovery wird als UDP-Port `6881` gemappt. Docker Desktop kann Broadcast im LAN je nach Netzwerkmodus einschränken. PHP-Relay/Bootstrap funktioniert trotzdem.
+- Externe temporäre Links funktionieren über das Relay weiterhin, solange der Container ausgehend HTTP/HTTPS erreicht.
+- Bei Updates einfach erneut starten:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\install_dcloud_docker_windows.ps1
+```
+
+Dabei wird das Image neu gebaut und der vorhandene `docker-data/`-Ordner weiterverwendet.
+
 ## PHP-Relay installieren
 
 Das PHP-Relay besteht aus einer Datei:
@@ -779,6 +907,11 @@ Die Codebasis ist modular aufgebaut, damit spätere Transport-, Index- und Versc
 | `relay/dcloud_relay_server.py` | Python-Relay-Alternative für Server/VPS |
 | `scripts/install_dcloud_service.sh` | Linux/OpenWrt/Windows-Bootstrap |
 | `scripts/install_dcloud_service_mac.sh` | macOS-launchd-Installer |
+| `scripts/install_dcloud_docker_windows.ps1` | Windows-Docker-Installer/Starter |
+| `scripts/docker-entrypoint.sh` | Docker-Entrypoint für persistente Config unter `/data` |
+| `Dockerfile` | Docker-Image für dcloud |
+| `docker-compose.windows.yml` | Docker-Compose für Windows ohne SMB |
+| `docker-compose.smb.yml` | Optionales SMB-Compose-Overlay |
 
 ## Lizenz
 
