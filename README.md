@@ -2,11 +2,12 @@
 
 dcloud ist ein Python-basierter Storage-Client mit Web-Dashboard im Desktop-Stil. Jeder Knoten kann Dateien lokal speichern, automatisch im LAN oder über PHP-Relays andere Peers finden und Dateien zur Ausfallsicherheit auf aktive Peers replizieren. Das Dashboard enthält Datei-Explorer, Transfer-Center, Peer-Netzwerk, Chat, SMB-Freigabe, Audit-Logs, Einstellungen und temporäre externe Download-Links.
 
-> Aktueller Status: Das Projekt ist ein funktionsfähiger MVP/Prototyp. Die Web-UI ist standardmäßig im LAN erreichbar und besitzt noch keine vollständige Benutzer-/Rechteverwaltung. Für produktive Nutzung sollten Firewall, VPN, Reverse Proxy oder ein separates internes Netz verwendet werden.
+> Aktueller Status: Das Projekt ist ein funktionsfähiger MVP/Prototyp. Die Web-UI besitzt jetzt eine lokale Benutzerverwaltung mit Login, Admin-Rollen und erster Setup-Seite. Für produktive Nutzung bleiben Firewall, VPN, Reverse Proxy oder ein separates internes Netz sinnvoll, weil Peer-/Relay-Endpunkte weiterhin erreichbar sein müssen.
 
 ## Kurzüberblick
 
 - Web-Dashboard im Win11-Desktop-Stil unter `http://127.0.0.1:8787`
+- Lokale Benutzerverwaltung mit Ersteinrichtung, Login, Admin-/Benutzer-Rollen und Passwort-Hashing
 - Datei-Upload mit lokaler Sofort-Speicherung
 - Hintergrund-Replikation auf Peers für Ausfallsicherheit
 - „Auf Peers auslagern“, um lokale Chunks nach erfolgreicher Peer-Kopie zu entfernen
@@ -64,10 +65,39 @@ Das Dashboard ist als Desktop-Oberfläche aufgebaut. Wichtige Bereiche sind übe
 - **Transfer-Center** – Hintergrundstatus für Upload, Download, Replikation und Auslagerung
 - **Netzwerk** – aktive Peers, deaktivierte Peers, Relay-Status, Peer-Suche und manuelles Hinzufügen
 - **Peer-Chat** – Nachrichten, Emojis, Bilder und Datei-Karten
+- **Benutzer** – lokale Benutzer anlegen, deaktivieren, löschen, Rollen ändern und Passwörter zurücksetzen
 - **SMB** – SMB-Status und SMB-Einstellungen
 - **System** – Speicher, Node-Status, Version, Hintergrundjobs
 - **Audit-Logs** – Logausgabe getrennt vom Systemstatus
 - **Einstellungen** – Storage, Komprimierung, Relay, SMB, Netzwerk
+
+
+### Login und Benutzerverwaltung
+
+Beim ersten Start ohne vorhandene Benutzerdatei leitet dcloud automatisch auf `/setup` um. Dort wird der erste Administrator erstellt. Danach sind Dashboard, Dateiaktionen, Einstellungen, Chat-UI, Logs und lokale Verwaltungs-APIs loginpflichtig.
+
+Gespeichert wird lokal unter:
+
+```text
+storage/users.json
+```
+
+Die Passwörter werden nicht im Klartext gespeichert, sondern als Werkzeug/Flask-kompatible Passwort-Hashes. Administratoren können im Dashboard über das Icon **Benutzer**:
+
+- neue Benutzer erstellen
+- Rollen zwischen `admin` und `user` wechseln
+- Benutzer aktivieren/deaktivieren
+- Passwörter zurücksetzen
+- Benutzer löschen
+
+Schutzgrenzen:
+
+- Die Web-UI und lokale Verwaltungsaktionen sind durch Login geschützt.
+- `/external/<token>` bleibt öffentlich, weil diese Links absichtlich extern teilbar sind und zeitlich ablaufen.
+- `/healthz` bleibt offen für Statuschecks.
+- `/api/p2p/...` bleibt offen für Peers/Relay-Transporte; diese Endpunkte dürfen nicht an eine Browser-Session gebunden werden, sonst würden Peer-Replikation, Chat und externe Relay-Streams nicht funktionieren.
+
+Wenn das Admin-Passwort verloren geht, kann bei gestopptem Dienst die Datei `storage/users.json` gesichert und entfernt werden. Beim nächsten Start erscheint wieder die Ersteinrichtung.
 
 ### Datei-Upload
 
@@ -244,6 +274,8 @@ Dashboard öffnen:
 ```text
 http://127.0.0.1:8787
 ```
+
+Beim ersten Öffnen erscheint automatisch die Ersteinrichtung für den ersten Admin-Benutzer.
 
 ### Windows PowerShell
 
@@ -517,6 +549,8 @@ Danach öffnen:
 ```text
 http://127.0.0.1:8787
 ```
+
+Beim ersten Öffnen erscheint automatisch die Ersteinrichtung für den ersten Admin-Benutzer.
 
 Das Skript erzeugt automatisch:
 
@@ -865,10 +899,10 @@ netstat -ano | findstr "8787 6881 445"
 
 ## Sicherheitshinweise
 
-- Die Web-UI hat noch keine vollständige Benutzer-Authentifizierung.
-- `web.host: 0.0.0.0` macht die UI und Peer-API im LAN erreichbar.
-- Stelle die Web-UI nicht ungeschützt ins Internet.
-- Nutze Firewall, VPN oder Reverse Proxy mit Authentifizierung.
+- Dashboard und lokale Verwaltungsaktionen sind loginpflichtig.
+- `web.host: 0.0.0.0` macht Dashboard und Peer-API im LAN erreichbar.
+- Stelle den Dienst trotzdem nicht ungeschützt ins Internet, weil P2P-/Relay-Endpunkte weiterhin erreichbar sein müssen.
+- Nutze Firewall, VPN oder Reverse Proxy, wenn du dcloud außerhalb deines LANs bereitstellst.
 - Private Node-Keys niemals teilen.
 - Relay-URLs sollten nach Möglichkeit HTTPS verwenden.
 - Temporäre externe Links sind tokenbasiert, aber jeder mit Link kann bis zum Ablauf herunterladen.
@@ -880,7 +914,7 @@ Bewusst noch nicht vollständig enthalten:
 - kein vollständiges DHT
 - kein Erasure Coding
 - keine echte Ende-zu-Ende-Dateiverschlüsselung
-- keine vollständige Benutzer-/Rechteverwaltung für die Web-UI
+- Benutzerverwaltung ist lokal vorhanden; noch keine mandantenfähigen Datei-Rechte pro Benutzer
 - kein WebRTC/QUIC-Hole-Punching
 - kein permanenter Reverse-Tunnel für externe Links
 
@@ -901,8 +935,11 @@ Die Codebasis ist modular aufgebaut, damit spätere Transport-, Index- und Versc
 | `dcloud_client/network/p2p_storage.py` | Peer-Transfers, Batch-/Pack-Upload und Download |
 | `dcloud_client/network/smb_server.py` | optionaler eingebetteter SMB-Server |
 | `dcloud_client/network/peers.py` | Peer-Liste, Deduplizierung, Deaktivierung |
-| `dcloud_client/web/app.py` | Flask-Routen für Dashboard, Dateien, Chat, P2P-API |
+| `dcloud_client/web/app.py` | Flask-Routen für Dashboard, Dateien, Chat, Benutzerverwaltung, P2P-API |
+| `dcloud_client/web/auth.py` | Lokale Benutzerverwaltung mit Passwort-Hashing und JSON-Store |
 | `dcloud_client/web/templates/dashboard.html` | Desktop-Dashboard, JavaScript und UI |
+| `dcloud_client/web/templates/login.html` | Login-Seite für das Dashboard |
+| `dcloud_client/web/templates/setup.html` | Ersteinrichtung für den ersten Admin-Benutzer |
 | `relay/dcloud_relay.php` | PHP-Relay für Shared Hosting/Webserver |
 | `relay/dcloud_relay_server.py` | Python-Relay-Alternative für Server/VPS |
 | `scripts/install_dcloud_service.sh` | Linux/OpenWrt/Windows-Bootstrap |

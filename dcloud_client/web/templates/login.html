@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="de">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>dcloud Login</title>
+  <style>
+    :root{ color-scheme:light; --accent:#0866e8; --accent2:#19c7ff; --danger:#c91c2e; --text:#142033; --muted:#607089; }
+    *{ box-sizing:border-box; }
+    html, body{ min-height:100%; }
+    body{
+      margin:0; font-family:"Segoe UI Variable","Segoe UI",system-ui,sans-serif; color:var(--text);
+      background:
+        radial-gradient(circle at 16% 12%, rgba(119,190,255,.86) 0, rgba(38,122,224,.62) 26%, transparent 46%),
+        radial-gradient(circle at 82% 18%, rgba(184,133,255,.72) 0, rgba(102,65,210,.36) 28%, transparent 50%),
+        linear-gradient(135deg,#061934 0%,#0d2d61 48%,#07111f 100%);
+      display:grid; place-items:center; padding:24px;
+    }
+    .card{ width:min(440px,100%); border:1px solid rgba(255,255,255,.56); border-radius:28px; background:rgba(248,251,255,.86); box-shadow:0 30px 90px rgba(0,13,45,.48); backdrop-filter:blur(28px) saturate(1.35); overflow:hidden; }
+    header{ padding:28px 28px 18px; color:#fff; background:linear-gradient(135deg,rgba(13,98,216,.96),rgba(86,126,255,.9),rgba(22,212,255,.72)); }
+    header h1{ margin:0; font-size:1.7rem; letter-spacing:-.03em; }
+    header p{ margin:.45rem 0 0; color:rgba(255,255,255,.88); }
+    main{ padding:26px 28px 28px; }
+    label{ display:block; margin:.7rem 0 .35rem; font-weight:700; color:#213959; }
+    input{ width:100%; padding:.78rem .9rem; border:1px solid rgba(112,142,190,.46); border-radius:15px; background:#fff; color:var(--text); outline:none; }
+    input:focus{ box-shadow:0 0 0 3px rgba(25,199,255,.32); border-color:rgba(8,102,232,.72); }
+    button{ width:100%; margin-top:1rem; padding:.82rem 1rem; border:0; border-radius:16px; color:#fff; font-weight:800; background:linear-gradient(135deg,var(--accent),#4f7dff 58%,var(--accent2)); box-shadow:0 14px 28px rgba(8,102,232,.24); cursor:pointer; }
+    .flash{ margin:0 0 12px; padding:.75rem .85rem; border-radius:14px; background:#fff1f1; color:var(--danger); border:1px solid rgba(201,28,46,.22); }
+    .note{ color:var(--muted); font-size:.92rem; line-height:1.45; margin:.9rem 0 0; }
+  </style>
+</head>
+<body>
+  <section class="card" aria-label="dcloud Anmeldung">
+    <header>
+      <h1>🔐 dcloud Login</h1>
+      <p>{{ node_name }} · geschütztes Control Dashboard</p>
+    </header>
+    <main>
+      {% with messages = get_flashed_messages(with_categories=true) %}
+        {% for category, message in messages %}<div class="flash">{{ message }}</div>{% endfor %}
+      {% endwith %}
+      <form method="post" action="/login">
+        <input type="hidden" name="next" value="{{ next_url }}">
+        <label for="username">Benutzername</label>
+        <input id="username" name="username" autocomplete="username" required autofocus>
+        <label for="password">Passwort</label>
+        <input id="password" name="password" type="password" autocomplete="current-password" required>
+        <button type="submit">Anmelden</button>
+      </form>
+      <p class="note">Peer-, Relay- und externe Download-Endpunkte bleiben technisch erreichbar; das Dashboard und lokale Verwaltungsaktionen sind geschützt.</p>
+    </main>
+  </section>
+</body>
+</html>

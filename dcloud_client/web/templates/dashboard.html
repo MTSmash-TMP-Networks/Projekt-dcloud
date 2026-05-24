@@ -190,6 +190,7 @@
     #win-logs{ left:340px; top:146px; width:min(820px, calc(100vw - 380px)); height:min(580px, calc(100vh - 138px)); }
     #win-settings{ left:360px; top:120px; width:780px; height:680px; }
     #win-chat{ left:420px; top:90px; width:690px; height:540px; }
+    #win-users{ left:455px; top:124px; width:720px; height:570px; }
     @keyframes pop{ from{ opacity:.2; transform:translateY(8px) scale(.982); } to{ opacity:1; transform:none; } }
 
     .titlebar{
@@ -386,6 +387,15 @@
     .radio-card strong{ display:block; color:#173053; }
     .radio-card span{ display:block; margin-top:.2rem; color:var(--muted); font-size:.87rem; line-height:1.35; }
     .settings-note{ margin:.48rem 0 0; color:var(--muted); font-size:.9rem; line-height:1.42; }
+    .user-admin-bar{ display:flex; align-items:center; justify-content:space-between; gap:12px; flex-wrap:wrap; margin:0 0 1rem; padding:1rem; border:1px solid rgba(136,166,212,.28); border-radius:18px; background:linear-gradient(180deg, rgba(255,255,255,.92), rgba(246,250,255,.74)); box-shadow:0 10px 28px rgba(17,54,104,.08); }
+    .user-admin-bar strong{ display:block; color:#173053; font-size:1.02rem; }
+    .user-grid{ display:grid; gap:.75rem; }
+    .user-card{ display:grid; grid-template-columns:minmax(0,1fr) auto; gap:10px; align-items:center; padding:.95rem; border:1px solid rgba(136,166,212,.28); border-radius:18px; background:rgba(255,255,255,.82); box-shadow:0 8px 22px rgba(17,54,104,.07); }
+    .user-card h3{ margin:0; color:#173053; font-size:1rem; }
+    .user-meta{ color:var(--muted); font-size:.88rem; margin-top:.25rem; }
+    .user-actions{ display:flex; gap:.45rem; flex-wrap:wrap; justify-content:flex-end; }
+    .pill{ display:inline-flex; align-items:center; gap:5px; padding:.2rem .55rem; border-radius:999px; background:rgba(8,102,232,.1); color:#174b9b; font-size:.78rem; font-weight:800; }
+    .pill.danger{ background:rgba(201,28,46,.1); color:#a51223; }
     .settings-inline{ display:flex; align-items:center; gap:.65rem; flex-wrap:wrap; }
     .settings-inline input[type="number"]{ max-width:150px; }
 
@@ -535,6 +545,9 @@
       </button>
       <button class="desk-item app-icon" data-app="settings" type="button">
         <span class="glyph">⚙️</span><span class="label">Einstellungen</span>
+      </button>
+      <button class="desk-item app-icon" data-app="users" type="button" id="users-app-icon">
+        <span class="glyph">👥</span><span class="label">Benutzer</span>
       </button>
       <button class="desk-item app-icon" data-app="chat" type="button">
         <span class="glyph">💬</span><span class="label">Peer-Chat</span><span class="badge-dot" id="chat-app-badge" hidden>1</span>
@@ -927,10 +940,49 @@
 
     <input type="file" id="desktop-upload-input" multiple hidden>
 
+    <section class="window" id="win-users" hidden>
+      <div class="titlebar" data-app="users">
+        <span class="title"><span>👥</span><span>Benutzerverwaltung</span></span>
+        <div class="window-controls">
+          <button type="button" data-action="min" aria-label="Minimieren">–</button>
+          <button type="button" data-action="max" aria-label="Maximieren">□</button>
+          <button type="button" data-action="close" aria-label="Schließen">×</button>
+        </div>
+      </div>
+      <div class="window-content dummy-app">
+        <h2>Benutzerverwaltung</h2>
+        <p>Lokale Benutzer für dieses dcloud Dashboard. Peer-, Relay- und externe Token-Endpunkte bleiben unabhängig davon erreichbar.</p>
+        <div class="user-admin-bar">
+          <div>
+            <strong id="users-current-label">Angemeldet</strong>
+            <div class="user-meta">Admin-Benutzer können weitere Benutzer anlegen, deaktivieren und Passwörter zurücksetzen.</div>
+          </div>
+          <button type="button" class="explorer-btn" id="users-logout-btn">Abmelden</button>
+        </div>
+        <section class="settings-panel" id="users-create-panel">
+          <h3>Neuen Benutzer anlegen</h3>
+          <form id="users-create-form" class="settings-form">
+            <label for="users-new-name">Benutzername</label>
+            <input id="users-new-name" name="username" type="text" placeholder="z. B. marek" autocomplete="off" required>
+            <label for="users-new-password">Passwort</label>
+            <input id="users-new-password" name="password" type="password" minlength="8" autocomplete="new-password" required>
+            <label for="users-new-role">Rolle</label>
+            <select id="users-new-role" name="role">
+              <option value="user">Benutzer</option>
+              <option value="admin">Administrator</option>
+            </select>
+            <button type="submit" class="explorer-btn">Benutzer erstellen</button>
+          </form>
+        </section>
+        <h3>Benutzer</h3>
+        <div class="user-grid" id="users-list"><div class="empty">Benutzer werden geladen…</div></div>
+      </div>
+    </section>
+
     <nav class="taskbar" aria-label="Taskleiste" id="taskbar">
       <button class="start" id="startBtn" type="button">Start</button>
       <span id="taskbar-apps"></span>
-      <span class="tray"><span id="tray-files">0 Datei(en)</span><span id="tray-peer-name">Peer: -</span><span>dcloud Desktop</span></span>
+      <span class="tray"><span id="tray-files">0 Datei(en)</span><span id="tray-peer-name">Peer: -</span><span id="tray-user">Benutzer: -</span><button type="button" class="task-btn" id="tray-logout" title="Abmelden">⏻</button></span>
     </nav>
   </div>
 
@@ -945,7 +997,8 @@
       fileCount: {{ manifests | length | tojson }},
       folders: {{ folders | tojson }},
       folderTree: {{ folder_tree_json | tojson }},
-      gitRevision: {{ git_revision | tojson }}
+      gitRevision: {{ git_revision | tojson }},
+      auth: {{ auth | tojson }}
     };
     const DEFAULT_FOLDER = {{ default_folder | tojson }};
 
@@ -1005,6 +1058,8 @@
       const desktopArea = document.getElementById("desktopArea");
       const taskbarApps = document.getElementById("taskbar-apps");
       const trayPeerName = document.getElementById("tray-peer-name");
+      const trayUser = document.getElementById("tray-user");
+      const usersAppIcon = document.getElementById("users-app-icon");
       const uploadInput = document.getElementById("desktop-upload-input");
       const ctx = document.getElementById("ctxMenu");
       const folderDialog = document.getElementById("folderDialog");
@@ -1040,6 +1095,7 @@
         status: document.getElementById("win-status"),
         logs: document.getElementById("win-logs"),
         settings: document.getElementById("win-settings"),
+        users: document.getElementById("win-users"),
         chat: document.getElementById("win-chat")
       };
       const appLabels = {
@@ -1048,6 +1104,7 @@
         status:"🖥️ System",
         logs:"📜 Audit-Logs",
         settings:"⚙️ Einstellungen",
+        users:"👥 Benutzer",
         chat:"💬 Peer-Chat"
       };
       let activeChatPeerId = "";
@@ -1130,6 +1187,9 @@
         return paths;
       }
 
+      function escapeHtml(value){
+        return String(value ?? "").replace(/[&<>"']/g, char => ({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;"}[char] || char));
+      }
       function formatBytes(value){
         const units = ["B","KiB","MiB","GiB","TiB"];
         let amount = Number(value || 0);
@@ -1299,6 +1359,11 @@
               : `Port ${smbPort} · Benutzer ${settings.smbUsername || "Gast"} · Pfad: ${settings.smbRootPath || "-"}`)
           : `Server deaktiviert · Port ${smbPort}`;
         document.getElementById("tray-files").textContent = `${appState.fileCount || 0} Datei(en)`;
+        const auth = appState.auth || {};
+        const currentUser = auth.currentUser || {};
+        if(trayUser) trayUser.textContent = `Benutzer: ${currentUser.username || "-"}`;
+        if(usersAppIcon) usersAppIcon.hidden = !auth.isAdmin;
+        if(!auth.isAdmin && windows.users && !windows.users.hidden){ windows.users.hidden = true; updateTaskbar(); }
         const policy = document.getElementById("settings-current-policy");
         if(policy) policy.textContent = settings.storagePolicy || "";
         const settingsAuto = document.getElementById("settings-auto-discovery");
@@ -1463,6 +1528,91 @@
           item.append(text, enableBtn);
           list.appendChild(item);
         });
+      }
+
+      async function loadUsers(){
+        if(!(appState.auth || {}).isAdmin) return;
+        try{
+          const response = await fetch("/api/users", { cache:"no-store", headers:{ "Accept":"application/json" } });
+          const payload = await response.json();
+          if(!response.ok || !payload.ok) throw new Error(payload.message || "Benutzer konnten nicht geladen werden");
+          renderUsers(payload.users || []);
+        }catch(error){
+          const list = document.getElementById("users-list");
+          if(list) list.innerHTML = `<div class="empty">${escapeHtml(error.message || "Benutzer konnten nicht geladen werden")}</div>`;
+        }
+      }
+
+      function renderUsers(users){
+        const list = document.getElementById("users-list");
+        if(!list) return;
+        const auth = appState.auth || {};
+        const current = auth.currentUser || {};
+        const currentLabel = document.getElementById("users-current-label");
+        if(currentLabel) currentLabel.textContent = `Angemeldet als ${current.username || "-"} (${current.role === "admin" ? "Administrator" : "Benutzer"})`;
+        list.innerHTML = "";
+        if(!users.length){
+          list.innerHTML = '<div class="empty">Noch keine Benutzer vorhanden.</div>';
+          return;
+        }
+        users.forEach(user => {
+          const card = document.createElement("article");
+          card.className = "user-card";
+          const info = document.createElement("div");
+          const title = document.createElement("h3");
+          title.textContent = user.username || "Benutzer";
+          const meta = document.createElement("div");
+          meta.className = "user-meta";
+          const lastLogin = user.last_login_at ? new Date(user.last_login_at).toLocaleString() : "noch nie";
+          meta.innerHTML = `<span class="pill${user.enabled ? "" : " danger"}">${user.enabled ? "Aktiv" : "Deaktiviert"}</span> <span class="pill">${user.role === "admin" ? "Admin" : "Benutzer"}</span> · letzter Login: ${escapeHtml(lastLogin)}`;
+          info.append(title, meta);
+          const actions = document.createElement("div");
+          actions.className = "user-actions";
+          const resetBtn = document.createElement("button");
+          resetBtn.type = "button"; resetBtn.className = "explorer-btn"; resetBtn.textContent = "Passwort";
+          resetBtn.onclick = async () => {
+            const password = prompt(`Neues Passwort für ${user.username} (mind. 8 Zeichen):`);
+            if(!password) return;
+            await updateUser(user.username, { password });
+          };
+          const roleBtn = document.createElement("button");
+          roleBtn.type = "button"; roleBtn.className = "explorer-btn"; roleBtn.textContent = user.role === "admin" ? "Zu Benutzer" : "Zu Admin";
+          roleBtn.onclick = () => updateUser(user.username, { role: user.role === "admin" ? "user" : "admin" });
+          const enableBtn = document.createElement("button");
+          enableBtn.type = "button"; enableBtn.className = "explorer-btn"; enableBtn.textContent = user.enabled ? "Deaktivieren" : "Aktivieren";
+          enableBtn.onclick = () => updateUser(user.username, { enabled: !user.enabled });
+          const deleteBtn = document.createElement("button");
+          deleteBtn.type = "button"; deleteBtn.className = "explorer-btn danger"; deleteBtn.textContent = "Löschen";
+          deleteBtn.onclick = async () => {
+            if(!confirm(`${user.username} wirklich löschen?`)) return;
+            try{
+              const response = await fetch(`/api/users/${encodeURIComponent(user.username)}`, { method:"DELETE", headers:{ "Accept":"application/json", "X-Requested-With":"XMLHttpRequest" } });
+              const payload = await response.json();
+              if(!response.ok || !payload.ok) throw new Error(payload.message || "Benutzer konnte nicht gelöscht werden");
+              renderUsers(payload.users || []);
+              showToast(payload.message || "Benutzer gelöscht", "success");
+            }catch(error){ showToast(error.message, "error"); }
+          };
+          actions.append(resetBtn, roleBtn, enableBtn, deleteBtn);
+          card.append(info, actions);
+          list.appendChild(card);
+        });
+      }
+
+      async function updateUser(username, changes){
+        try{
+          const response = await fetch(`/api/users/${encodeURIComponent(username)}`, {
+            method:"POST",
+            headers:{ "Content-Type":"application/json", "Accept":"application/json", "X-Requested-With":"XMLHttpRequest" },
+            body:JSON.stringify(changes)
+          });
+          const payload = await response.json();
+          if(!response.ok || !payload.ok) throw new Error(payload.message || "Benutzer konnte nicht aktualisiert werden");
+          renderUsers(payload.users || []);
+          showToast(payload.message || "Benutzer aktualisiert", "success");
+        }catch(error){
+          showToast(error.message, "error");
+        }
       }
 
       function renderChatPeers(){
@@ -1709,6 +1859,7 @@
         if(!openOrder.includes(app)) openOrder.push(app);
         if(app === "explorer") renderExplorer();
         if(app === "logs") refreshLogs().catch(() => {});
+        if(app === "users") loadUsers().catch(() => {});
         if(app === "chat"){ renderChatPeers(); loadChatMessages().catch(() => {}); }
         updateTaskbar();
       }
@@ -2932,6 +3083,36 @@ ${file.name}`)) return;
         pendingChatAttachment = null;
         updatePendingChatAttachmentPreview();
       });
+      async function logoutDashboard(){
+        try{
+          await fetch("/logout", { method:"POST", headers:{ "X-Requested-With":"XMLHttpRequest", "Accept":"application/json" } });
+        }finally{
+          window.location.href = "/login";
+        }
+      }
+      document.getElementById("users-logout-btn")?.addEventListener("click", logoutDashboard);
+      document.getElementById("tray-logout")?.addEventListener("click", logoutDashboard);
+
+      const usersCreateForm = document.getElementById("users-create-form");
+      if(usersCreateForm){
+        usersCreateForm.addEventListener("submit", async event => {
+          event.preventDefault();
+          const data = Object.fromEntries(new FormData(usersCreateForm).entries());
+          try{
+            const response = await fetch("/api/users", {
+              method:"POST",
+              headers:{ "Content-Type":"application/json", "Accept":"application/json", "X-Requested-With":"XMLHttpRequest" },
+              body:JSON.stringify(data)
+            });
+            const payload = await response.json();
+            if(!response.ok || !payload.ok) throw new Error(payload.message || "Benutzer konnte nicht erstellt werden");
+            usersCreateForm.reset();
+            renderUsers(payload.users || []);
+            showToast(payload.message || "Benutzer erstellt", "success");
+          }catch(error){ showToast(error.message, "error"); }
+        });
+      }
+
       const settingsForm = document.getElementById("settings-form");
       const relayEnabledInput = document.getElementById("settings-relay-enabled");
       const relayUrlsInput = document.getElementById("settings-relay-urls");

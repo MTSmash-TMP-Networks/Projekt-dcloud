@@ -19,7 +19,7 @@ import time
 import subprocess
 import re
 
-from flask import Flask, Response, abort, flash, jsonify, redirect, render_template, request, send_file, url_for
+from flask import Flask, Response, abort, flash, jsonify, redirect, render_template, request, send_file, session, url_for
 from werkzeug.utils import secure_filename
 try:
     from smb.SMBConnection import SMBConnection
@@ -55,6 +55,7 @@ from ..network.p2p_storage import (
 from ..network.peers import Peer, PeerProvider, display_name_for_peer
 from ..storage import ChunkStore, StorageError, StorageStats
 from .upload_progress import UploadProgressTracker
+from .auth import UserStore
 
 
 class PeerConnector(Protocol):
@@ -139,6 +140,7 @@ def create_app(
     replication_queue_event = threading.Event()
     replication_worker_started = False
     replication_queued_manifest_ids: set[str] = set()
+    user_store = UserStore(chunk_store.root / "users.json")
 
     def _is_ajax_request() -> bool:
         return request.headers.get("X-Requested-With") == "XMLHttpRequest" or request.accept_mimetypes.best == "application/json"
@@ -480,6 +482,79 @@ def create_app(
     def _safe_next(value: str | None, fallback: str) -> str:
         allowed = {url_for("dashboard"), url_for("files")}
         return value if value in allowed else fallback
+
+    def _current_user() -> dict[str, Any] | None:
+        username = str(session.get("dcloud_username") or "")
+        if not username:
+            return None
+        user = user_store.get(username)
+        if user is None or not user.enabled:
+            session.clear()
+            return None
+        return user.to_public_dict()
+
+    def _current_username() -> str:
+        user = _current_user()
+        return str(user.get("username") or "") if user else ""
+
+    def _current_user_is_admin() -> bool:
+        user = _current_user()
+        return bool(user and user.get("role") == "admin")
+
+    def _auth_payload() -> dict[str, Any]:
+        user = _current_user()
+        return {
+            "setupRequired": not user_store.has_users(),
+            "authenticated": bool(user),
+            "currentUser": user,
+            "isAdmin": bool(user and user.get("role") == "admin"),
+        }
+
+    def _wants_json_response() -> bool:
+        return request.path.startswith("/api/") or _is_ajax_request()
+
+    def _auth_error(message: str = "Bitte zuerst anmelden", status: int = 401) -> Response:
+        if _wants_json_response():
+            return jsonify({"ok": False, "message": message}), status
+        return redirect(url_for("login", next=request.path))
+
+    def _require_admin() -> Response | None:
+        if not _current_user_is_admin():
+            return _auth_error("Nur Administratoren dürfen diese Aktion ausführen", 403)
+        return None
+
+    def _is_public_or_peer_path(path: str) -> bool:
+        if request.method == "OPTIONS":
+            return True
+        if path in {"/login", "/setup", "/logout", "/healthz", "/favicon.ico"}:
+            return True
+        if path.startswith("/static/"):
+            return True
+        if path.startswith("/external/"):
+            return True
+        # Peer/relay endpoints must stay reachable without dashboard login.
+        if path.startswith("/api/p2p/"):
+            return True
+        return False
+
+    @app.before_request
+    def _dashboard_auth_guard() -> Response | None:
+        path = request.path or "/"
+        if _is_public_or_peer_path(path):
+            if path == "/setup" and user_store.has_users():
+                return redirect(url_for("dashboard"))
+            return None
+        if not user_store.has_users():
+            if _wants_json_response():
+                return jsonify({"ok": False, "message": "Ersteinrichtung erforderlich", "setupRequired": True}), 401
+            return redirect(url_for("setup"))
+        if _current_user() is None:
+            return _auth_error()
+        return None
+
+    @app.context_processor
+    def _inject_auth_context() -> dict[str, Any]:
+        return {"auth": _auth_payload()}
 
     def _list_active_peers() -> list[Any]:
         if peer_connector is not None and hasattr(peer_connector, "prune_stale_peers"):
@@ -1297,7 +1372,127 @@ def create_app(
             "folders": folders,
             "folderTree": folder_tree_json(tree),
             "gitRevision": current_git_revision(),
+            "auth": _auth_payload(),
         }
+
+    @app.route("/setup", methods=["GET", "POST"])
+    def setup() -> Response | str:
+        if user_store.has_users():
+            return redirect(url_for("dashboard"))
+        if request.method == "POST":
+            username = request.form.get("username", "admin")
+            password = request.form.get("password", "")
+            password_repeat = request.form.get("password_repeat", "")
+            try:
+                if password != password_repeat:
+                    raise ValueError("Passwörter stimmen nicht überein")
+                user = user_store.create_user(username, password, role="admin", enabled=True)
+                session.clear()
+                session["dcloud_username"] = user.username
+                session["dcloud_role"] = user.role
+                session.permanent = True
+                flash("Admin-Benutzer erstellt. Willkommen im dcloud Dashboard.", "success")
+                return redirect(url_for("dashboard"))
+            except ValueError as exc:
+                flash(str(exc), "error")
+        return render_template("setup.html", node_name=config.node.name)
+
+    @app.route("/login", methods=["GET", "POST"])
+    def login() -> Response | str:
+        if not user_store.has_users():
+            return redirect(url_for("setup"))
+        next_url = _safe_next(request.values.get("next"), url_for("dashboard"))
+        if request.method == "POST":
+            username = request.form.get("username", "")
+            password = request.form.get("password", "")
+            user = user_store.verify(username, password)
+            if user is None:
+                message = "Benutzername oder Passwort ist falsch"
+                if _is_ajax_request():
+                    return jsonify({"ok": False, "message": message}), 401
+                flash(message, "error")
+            else:
+                session.clear()
+                session["dcloud_username"] = user.username
+                session["dcloud_role"] = user.role
+                session.permanent = True
+                if _is_ajax_request():
+                    return jsonify({"ok": True, "message": "Angemeldet", "next": next_url, "auth": _auth_payload()})
+                return redirect(next_url)
+        return render_template("login.html", node_name=config.node.name, next_url=next_url)
+
+    @app.post("/logout")
+    def logout() -> Response:
+        session.clear()
+        if _is_ajax_request():
+            return jsonify({"ok": True, "message": "Abgemeldet"})
+        return redirect(url_for("login"))
+
+    @app.get("/api/users")
+    def api_users() -> Response:
+        admin_error = _require_admin()
+        if admin_error is not None:
+            return admin_error
+        return jsonify({"ok": True, "users": user_store.list_users(), "currentUser": _current_user()})
+
+    @app.post("/api/users")
+    def api_users_create() -> Response:
+        admin_error = _require_admin()
+        if admin_error is not None:
+            return admin_error
+        data = request.get_json(silent=True) or request.form
+        try:
+            user = user_store.create_user(
+                str(data.get("username") or ""),
+                str(data.get("password") or ""),
+                role=str(data.get("role") or "user"),
+                enabled=bool(data.get("enabled", True)),
+            )
+            return jsonify({"ok": True, "message": f"Benutzer erstellt: {user.username}", "user": user.to_public_dict(), "users": user_store.list_users()})
+        except ValueError as exc:
+            return jsonify({"ok": False, "message": str(exc), "users": user_store.list_users()}), 400
+
+    @app.post("/api/users/<username>")
+    def api_users_update(username: str) -> Response:
+        admin_error = _require_admin()
+        if admin_error is not None:
+            return admin_error
+        data = request.get_json(silent=True) or request.form
+        current = _current_username()
+        try:
+            role = data.get("role") if "role" in data else None
+            enabled = data.get("enabled") if "enabled" in data else None
+            if isinstance(enabled, str):
+                enabled = enabled.lower() in {"1", "true", "yes", "on", "aktiv"}
+            password = str(data.get("password") or "") if "password" in data else None
+            if username == current and enabled is False:
+                raise ValueError("Du kannst deinen eigenen Benutzer nicht deaktivieren")
+            if username == current and role is not None and str(role).lower() != "admin" and user_store.count_admins(exclude_username=username) <= 0:
+                raise ValueError("Der letzte aktive Administrator darf nicht herabgestuft werden")
+            existing = user_store.get(username)
+            if existing and existing.role == "admin" and enabled is False and user_store.count_admins(exclude_username=username) <= 0:
+                raise ValueError("Der letzte aktive Administrator darf nicht deaktiviert werden")
+            user = user_store.update_user(username, role=role, enabled=enabled, password=password or None)
+            return jsonify({"ok": True, "message": f"Benutzer aktualisiert: {user.username}", "user": user.to_public_dict(), "users": user_store.list_users()})
+        except ValueError as exc:
+            return jsonify({"ok": False, "message": str(exc), "users": user_store.list_users()}), 400
+
+    @app.delete("/api/users/<username>")
+    def api_users_delete(username: str) -> Response:
+        admin_error = _require_admin()
+        if admin_error is not None:
+            return admin_error
+        current = _current_username()
+        try:
+            if username == current:
+                raise ValueError("Du kannst deinen eigenen Benutzer nicht löschen")
+            existing = user_store.get(username)
+            if existing and existing.role == "admin" and user_store.count_admins(exclude_username=username) <= 0:
+                raise ValueError("Der letzte aktive Administrator darf nicht gelöscht werden")
+            user_store.delete_user(username)
+            return jsonify({"ok": True, "message": f"Benutzer gelöscht: {username}", "users": user_store.list_users()})
+        except ValueError as exc:
+            return jsonify({"ok": False, "message": str(exc), "users": user_store.list_users()}), 400
 
     @app.get("/")
     def dashboard() -> str:
@@ -1322,6 +1517,7 @@ def create_app(
             folders=folders,
             default_folder=DEFAULT_FOLDER,
             git_revision=current_git_revision(),
+            current_user=_current_user(),
         )
 
     @app.get("/files")
