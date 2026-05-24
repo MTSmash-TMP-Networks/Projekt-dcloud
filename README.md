@@ -1,238 +1,122 @@
-# dcloud Client MVP – dezentraler Datenspeicher
+# dcloud – dezentraler Desktop-Speicher mit Peer-Replikation
 
-Dieses Repository enthält eine erste Python-MVP-Codebasis für einen später dezentralen Storage-Client. Der Client läuft lokal, erzeugt beim ersten Start eine eigene Node-Identität, stellt konfigurierbaren Speicher bereit, komprimiert Uploads, zerlegt sie in content-addressed Chunks und erzeugt signierte Manifeste. In den Einstellungen kann der Knoten als **Server** markiert werden und der freigegebene Speicher wird mit mindestens 5 GB begrenzt. Eine zentrale API ist **nicht** fest verdrahtet: Jeder Client lauscht selbst als kleiner UDP-Discovery-Server und sucht im LAN automatisch nach sichtbaren dcloud-Clients auf UDP-Port **6881**. Zusätzlich ist ein öffentliches PHP-HTTP-Relay fest hinterlegt, damit Peers außerhalb des gleichen Heimnetzwerks kommunizieren können. Der Client versucht dabei zuerst direkte Peer-Verbindungen, danach einen kurzlebigen PHP-HTTP-Forwarder ohne Chunk-Ablage und erst zuletzt die Webserver-Mailbox als Fallback; weitere selbst gehostete Relays können in den Einstellungen ergänzt werden und werden per Discovery/Gossip im Netzwerk verteilt.
+dcloud ist ein Python-basierter Storage-Client mit Web-Dashboard im Desktop-Stil. Jeder Knoten kann Dateien lokal speichern, automatisch im LAN oder über PHP-Relays andere Peers finden und Dateien zur Ausfallsicherheit auf aktive Peers replizieren. Das Dashboard enthält Datei-Explorer, Transfer-Center, Peer-Netzwerk, Chat, SMB-Freigabe, Audit-Logs, Einstellungen und temporäre externe Download-Links.
 
-## Architekturübersicht
+> Aktueller Status: Das Projekt ist ein funktionsfähiger MVP/Prototyp. Die Web-UI ist standardmäßig im LAN erreichbar und besitzt noch keine vollständige Benutzer-/Rechteverwaltung. Für produktive Nutzung sollten Firewall, VPN, Reverse Proxy oder ein separates internes Netz verwendet werden.
 
-```text
-Lokale/LAN Web UI + Peer-API (Flask, 0.0.0.0:8787)
-        │
-        ├── ManifestStore ── signierte Datei-Manifeste
-        │        │
-        │        └── ChunkStore ── content-addressed storage unter storage/chunks/
-        │
-        ├── IdentityManager ── Ed25519-Schlüssel, Node-ID = SHA-256(Public Key)
-        │
-        └── PeerProvider / Transport
-                 └── UdpDiscoveryTransport für Discovery, Peer-Gossip und Control-Nachrichten
-```
+## Kurzüberblick
 
-Der MVP speichert Uploads jetzt zuerst lokal und macht sie sofort sichtbar. Die Ausfallsicherheits-Kopie auf aktiven Speicher-Peers läuft anschließend als Hintergrund-Replikation weiter, damit große Dateien den Browser-Upload nicht mehr blockieren. Jeder Chunk wird lokal zlib-komprimiert und content-adressiert gespeichert; der Hintergrund-Worker schreibt fehlende Sicherheitskopien danach gebündelt an Peers und aktualisiert das Manifest, sobald die Redundanz hergestellt wurde. Dadurch wächst der nutzbare Verbundspeicher mit jedem aktiven Peer, der Speicher freigibt, ohne dass der Upload auf langsame Internet-/Relay-Routen warten muss. UDP-Discovery akzeptiert nur Pakete mit dem konfigurierten `protocol_magic`. Jeder Client ist gleichzeitig Discovery-Client und Discovery-Server: Beim Start sendet der Client sofort Discovery-Hellos an die konfigurierten Auto-Discovery-Ziele, standardmäßig per LAN-Broadcast auf Port **6881**. Sobald ein automatisch gefundener, Bootstrap- oder manuell eingetragener Peer antwortet, tauschen beide ihre Peer-Listen aus und geben neue Peers weiter, damit alle Knoten ohne zentralen Server voneinander erfahren. Die aktive Peer-Liste enthält nur Knoten, die innerhalb des konfigurierten Timeouts direkt geantwortet haben; gossippte Einträge werden erst nach eigener Antwort aktiv und Offline-Peers verschwinden automatisch. Hinter einem NAT kann eine Baumstruktur betrieben werden: Nur ein Node im lokalen Netzwerk benötigt eine Portfreigabe und setzt `relay_children: true`; die übrigen lokalen Nodes tragen ihn als `tree_parent_nodes` ein und werden über diesen Parent für Discovery-/Control-Nachrichten erreichbar.
+- Web-Dashboard im Win11-Desktop-Stil unter `http://127.0.0.1:8787`
+- Datei-Upload mit lokaler Sofort-Speicherung
+- Hintergrund-Replikation auf Peers für Ausfallsicherheit
+- „Auf Peers auslagern“, um lokale Chunks nach erfolgreicher Peer-Kopie zu entfernen
+- P2P-Downloads mit Chunk-Wiederherstellung aus lokalen und entfernten Quellen
+- Große Batch-/Pack-Transfers statt einzelner Chunk-Anfragen
+- Adaptive Komprimierung mit `zlib`, optional `zstd`, Mindest-Ersparnis und Skip-Regeln für bereits komprimierte Dateien
+- Automatische LAN-Discovery per UDP auf Port `6881`
+- Peer-Gossip, Bootstrap-Peers und deaktivierbare Peers
+- PHP-Relay-Unterstützung mit Standard- und Backup-Relay
+- PHP-Forwarder für direkte Peer-API-Aufrufe, Mailbox-Fallback für NAT-Fälle
+- Temporäre externe Download-Links mit maximal 60 Minuten Laufzeit
+- Reverse-Mailbox-Download über Relay, wenn der Node von außen nicht direkt erreichbar ist
+- Peer-Chat mit ungelesen-Badge, Emojis, Bildversand und Datei-Teilen
+- Optionaler eingebetteter SMB-Server
+- OpenWrt-, Linux-, macOS- und Windows-Installationspfade
+- Auto-Update-Skripte für systemd, launchd und OpenWrt-Cron
 
-## Modulbeschreibung
-
-| Modul | Aufgabe |
-| --- | --- |
-| `dcloud_client/main.py` | CLI-Einstieg, Logging, Konfiguration, Initialisierung von Identity, Storage, Manifesten, Peers, UDP-Discovery und Web-UI. |
-| `dcloud_client/config.py` | Lädt `config.yml`, erstellt sie bei Bedarf aus `data/default_config.yml`, normalisiert Pfade, validiert Kernwerte und speichert Desktop-Einstellungen wie Client-Typ und freigegebenen Speicher. |
-| `dcloud_client/identity.py` | Erstellt/lädt lokale Ed25519-Private-Keys, leitet Public Key und Node-ID ab. |
-| `dcloud_client/crypto.py` | SHA-256, Ed25519-Signaturen, Base64-Helfer und Signaturprüfung. |
-| `dcloud_client/storage.py` | Content-addressed chunk storage, zlib-Kompression pro Chunk, atomare Writes über `tmp`, Speicherlimit- und Mindestfreispeicherprüfung. |
-| `dcloud_client/manifests.py` | Manifest-Erzeugung, kanonische Signaturdaten, Round-Robin-Peer-Platzierung, Speicherung, Prüfung, Löschung und Wiederherstellung aus Chunks. |
-| `dcloud_client/network/peers.py` | `PeerProvider`-, `IndexProvider`-Interfaces und thread-sichere In-Memory-Peer-Liste mit Deduplizierung und Offline-Timeout. |
-| `dcloud_client/network/transport.py` | Transport-Protokollinterface für spätere UDP/QUIC/libp2p/WebRTC-Backends. |
-| `dcloud_client/network/udp_discovery.py` | UDP-Discovery mit automatischer LAN-Suche auf Port 6881, Bootstrap-Hello, manuell startbarem Peer-Einstieg, aktivem Peer-Listen-Gossip, Offline-Bereinigung, NAT-Tree-Relay und Magic-Header-Filter. |
-| `dcloud_client/network/http_relay.py` | Optionaler HTTP/PHP-Relay-Transport für entfernte Peers hinter NAT: Registrierung, Peer-Discovery, direkter PHP-HTTP-Forwarder und Mailbox-Fallback für die bestehende P2P-API. |
-| `dcloud_client/network/smb_server.py` | Optionaler eingebetteter SMB-Server für direkten Dateizugriff auf den lokalen `storage/`-Pfad. |
-| `dcloud_client/network/p2p_storage.py` | HTTP-basierter Peer-Transfer für komprimierte Chunks, Manifest-Freigaben, signierte Freigabe-Revocations und signierte Datei-Löschungen inklusive Chunk-Bereinigung. Discovery bleibt UDP; Daten laufen direkt über die Flask Peer-API oder optional über das PHP-Relay. |
-| `relay/dcloud_relay.php` | Einzelne PHP-Datei für einen Webserver, der entfernten Peers als HTTP-Forwarder und Mailbox-Fallback dient. |
-| `relay/dcloud_relay_server.py` | Optionale Python-Relay-Alternative fuer VPS/Plesk-Python-Apps; schneller und stabiler als PHP bei vielen Chunk-Transfers. |
-| `dcloud_client/web/app.py` | Flask-App mit Dashboard, Upload, Download und Healthcheck. |
-| `dcloud_client/web/templates/` | HTML-Templates für Dashboard und Dateiliste. |
-
-## Plattformen
-
-- Python 3.11+
-- Primär Linux und Windows
-- Perspektivisch OpenWrt: Die Runtime hält Abhängigkeiten klein (`Flask`, `PyYAML`, `cryptography`). Für sehr kleine Router kann später eine abgespeckte HTTP-UI oder ein reines CLI-Profil ergänzt werden.
-
-## Installation und Start
-
-```bash
-python3.11 -m venv .venv
-source .venv/bin/activate  # Windows: .venv\Scripts\activate
-pip install -r requirements.txt
-python -m dcloud_client.main --config config.yml
-```
-
-Der Modulstart sollte normalerweise aus dem Repository-Root erfolgen. Falls du bereits in `dcloud_client/` gewechselt bist, funktionieren zusätzlich beide Varianten:
-
-```bash
-python -m dcloud_client.main --config ../config.yml
-python main.py --config ../config.yml
-```
-
-Beim ersten Start wird `config.yml` erzeugt, falls sie noch nicht existiert. Danach ist die lokale Weboberfläche standardmäßig hier erreichbar. Der Client sucht sofort im LAN nach anderen dcloud-Clients auf UDP-Port **6881**. Im Dashboard kann zusätzlich ein Peer als `host:port` eingetragen werden; der Austausch startet sofort und weitere bekannte Peers werden automatisch verteilt. Für Nodes hinter NAT kann derselbe Eintrag als NAT-Parent markiert werden:
+## Architektur
 
 ```text
-http://127.0.0.1:8787
+Browser / Dashboard
+        │
+        ▼
+Flask Web-UI + Peer-API (:8787)
+        │
+        ├── ManifestStore
+        │     └── signierte Datei-Manifeste mit Chunk-Locations
+        │
+        ├── ChunkStore
+        │     └── content-addressed Chunks unter storage/chunks/
+        │
+        ├── Background Replication Worker
+        │     └── repliziert fehlende Sicherheitskopien asynchron
+        │
+        ├── UDP Discovery (:6881)
+        │     └── LAN-Suche, Bootstrap, Gossip, NAT-Parent-Routing
+        │
+        ├── HTTP/PHP Relay
+        │     └── Peer-Discovery, Forwarder, Mailbox, externe Relay-Streams
+        │
+        └── Optional SMB
+              └── SMB-Zugriff auf den lokalen Speicherpfad
 ```
 
-> Sicherheit: Standard ist jetzt `0.0.0.0`, damit die Peer-API im LAN erreichbar ist. Nutze Firewall-Regeln oder setze `web.host: 127.0.0.1`, wenn dieser Knoten keine Chunks von anderen Peers annehmen soll.
+Die Dateiübertragung nutzt nach Möglichkeit direkte Peer-Verbindungen. Wenn das nicht klappt, wird ein PHP-Forwarder versucht. Als letzte Stufe dient die Relay-Mailbox, bei der der nicht direkt erreichbare Peer aktiv beim Relay nach Aufgaben fragt und Antworten zurückschiebt.
 
-## Beispiel-`config.yml`
+## Hauptfunktionen im Dashboard
 
-```yaml
-node:
-  name: dcloud-node
-  identity_path: ./storage/identity
-  client_type: server
-storage:
-  path: ./storage
-  limit_bytes: 53687091200 # freigegebener Speicher, Minimum 5 GiB
-  min_free_bytes: 1073741824
-  chunk_size_bytes: 4194304
-  compression:
-    mode: auto # auto, fast, balanced, max, off
-    algorithm: zlib # zstd optional, wenn alle Peers das Paket zstandard haben
-    level: 1
-    min_savings_percent: 3.0
-    min_savings_bytes: 65536
-    skip_incompressible: true
-web:
-  host: 0.0.0.0 # Peer-API im LAN erreichbar; lokal weiter über 127.0.0.1 nutzbar
-  port: 8787
-network:
-  udp_host: 0.0.0.0
-  udp_port: 6881
-  udp_port_range:
-    start: 6881
-    end: 6891
-  bootstrap_nodes:
-    - 192.0.2.10:6881 # optionaler Einstiegspunkt, kein zentraler Server
-  tree_parent_nodes:
-    - 192.0.2.20:6881 # optional: LAN-Parent mit Portfreigabe für NAT-Baum
-  relay_children: false # true auf dem Parent-Node mit Portfreigabe
-  discovery_interval_seconds: 10
-  auto_discovery_enabled: true
-  auto_discovery_ports:
-    - 6881 # Standard-Port für sichtbare dcloud-Clients
-  auto_discovery_hosts:
-    - 255.255.255.255 # LAN-Broadcast; optional weitere Broadcast-Ziele ergänzen
-  startup_discovery_seconds: 12
-  startup_discovery_interval_seconds: 2
-  peer_timeout_seconds: 35 # Offline-Peers nach ca. 3 verpassten Discovery-Runden entfernen
-  peer_cleanup_interval_seconds: 5
-  relay_url: "https://support.tmp-networks.de/dcstorage/dcloud_relay.php" # primäres öffentliches Standard-Relay
-  relay_urls:
-    - "https://support.tmp-networks.de/dcstorage/dcloud_relay.php" # primäres Standard-Relay
-    - "http://dcloud.byethost12.com/dcloud_relay.php" # festes Backup-Relay
-  relay_secret: "" # deprecated: Tages-Token werden automatisch vom PHP-Relay erzeugt
-  relay_poll_interval_seconds: 1
-  relay_request_timeout_seconds: 180
-security:
-  protocol_magic: DCLOUD1
-```
+### Desktop und Fenster
 
+Das Dashboard ist als Desktop-Oberfläche aufgebaut. Wichtige Bereiche sind über Icons erreichbar:
 
+- **Dateien** – Explorer für Upload, Download, Ordner, Löschen, Verschieben, Freigaben, Auslagern und externe Links
+- **Transfer-Center** – Hintergrundstatus für Upload, Download, Replikation und Auslagerung
+- **Netzwerk** – aktive Peers, deaktivierte Peers, Relay-Status, Peer-Suche und manuelles Hinzufügen
+- **Peer-Chat** – Nachrichten, Emojis, Bilder und Datei-Karten
+- **SMB** – SMB-Status und SMB-Einstellungen
+- **System** – Speicher, Node-Status, Version, Hintergrundjobs
+- **Audit-Logs** – Logausgabe getrennt vom Systemstatus
+- **Einstellungen** – Storage, Komprimierung, Relay, SMB, Netzwerk
 
-## Automatische LAN-Discovery
+### Datei-Upload
 
-Standardmäßig sucht jeder Client ohne manuelle Konfiguration nach anderen dcloud-Clients im lokalen Netzwerk:
+Beim Upload wird die Datei zuerst lokal gespeichert und sofort im Dashboard sichtbar. Die Replikation auf Peers läuft danach im Hintergrund. Dadurch blockieren große Dateien nicht mehr den Browser-Upload.
 
-- Der Client lauscht auf dem konfigurierten UDP-Port, bevorzugt **6881**. Wenn der Port lokal belegt ist, wird ein Port aus `udp_port_range` gewählt.
-- Beim Start werden für `startup_discovery_seconds` schnelle Discovery-Hellos gesendet, standardmäßig alle 2 Sekunden.
-- Danach läuft die Suche regelmäßig über `discovery_interval_seconds`.
-- Gefundene Peers antworten mit `hello_ack`; anschließend tauschen die Knoten ihre Peer-Listen aus und verbinden das Netz per Gossip weiter.
-- Gossippte Peers sind zunächst nur Kandidaten. Sie erscheinen erst in der Online-Liste, wenn sie selbst direkt antworten.
-- Offline-Peers werden nach `peer_timeout_seconds` automatisch entfernt; gleiche Host/Port-Endpunkte werden dedupliziert, damit die Liste nicht vollläuft.
-- Der Button **„Netzwerksuche aktualisieren“** in den Einstellungen löst jetzt einen echten sofortigen Discovery-Lauf aus und aktualisiert nicht nur die Anzeige.
+Ablauf:
 
-Für normale LANs reicht der Broadcast `255.255.255.255`. Falls ein Netzwerk gerichtete Broadcast-Adressen benötigt, können weitere Ziele unter `network.auto_discovery_hosts` ergänzt werden. Die Firewall muss eingehende/ausgehende UDP-Pakete auf Port 6881 erlauben.
+1. Browser sendet Datei an den lokalen dcloud-Node.
+2. dcloud zerlegt die Datei in Chunks.
+3. Chunks werden adaptiv komprimiert und content-addressed gespeichert.
+4. Manifest wird lokal geschrieben und signiert.
+5. Datei erscheint sofort im Dashboard.
+6. Hintergrund-Worker repliziert Chunks auf aktive Peers.
+7. Das Manifest wird mit erfolgreichen Peer-Locations aktualisiert.
 
-## PHP-Relay / Proxy für Peers außerhalb des LANs
+### Download und Wiederherstellung
 
-Für Peers in unterschiedlichen Heimnetzwerken wird ein PHP-Webserver als Vermittlungs- und Relay-Pfad genutzt. Das ist kein echter UDP-TURN-Server wie bei WebRTC. Ab Relay-Version **1.3.0** gibt es zwei Pfade: Zuerst versucht der Client einen direkten PHP-HTTP-Forwarder, bei dem der Webserver die P2P-API-Anfrage unmittelbar an die beim Relay registrierte öffentliche Peer-IP und den Web-Port weiterleitet. Dabei werden keine einzelnen Chunk-Dateien auf dem Relay abgelegt. Wenn der Ziel-Peer aus Sicht des Webservers nicht erreichbar ist, etwa wegen CGNAT, Firewall oder fehlender Portfreigabe, fällt der Client automatisch auf die bisherige HTTP-Mailbox zurück: Jeder Client holt dann eingehende P2P-API-Anfragen aus seiner Queue und schreibt Antworten zurück. Dadurch bleiben Manifest-Freigaben, Revocations, Datei-Löschungen und Chunk-Transfers auch ohne direkt erreichbaren eingehenden Port möglich.
+Downloads prüfen zuerst, ob alle benötigten Chunks lokal vorhanden sind. Fehlende Chunks werden von Peers geladen. Dabei werden große Pack-/Batch-Requests verwendet, damit nicht jeder Chunk einzeln angefragt wird. Falls ein großer Block über Relay nicht funktioniert, wird der Block automatisch kleiner wiederholt.
 
-Das öffentliche Standard-Relay `https://support.tmp-networks.de/dcstorage/dcloud_relay.php` und das Backup-Relay `http://dcloud.byethost12.com/dcloud_relay.php` sind fest im Client aktiv, solange PHP-Vermittlung nicht bewusst deaktiviert wurde. In den Einstellungen können zusätzliche Relay-URLs eingetragen werden. Diese zusätzlichen Relays werden in `network.relay_urls` gespeichert, bei der nächsten Discovery an andere Peers verteilt und von diesen automatisch ebenfalls genutzt. Dadurch bleibt das Netzwerk erreichbar, selbst wenn einzelne Relay-Server später ausfallen oder einzelne Nutzer eigene Relays hosten.
+### Auf Peers auslagern
 
-Einrichtung für ein eigenes Zusatz-Relay:
+Mit „Auf Peers auslagern“ kann eine Datei nach erfolgreicher Peer-Replikation lokal entlastet werden. Lokale Chunk-Dateien werden nur gelöscht, wenn kein aktives Manifest sie lokal noch benötigt. Deduplizierte Chunks bleiben geschützt.
 
-1. Datei `relay/dcloud_relay.php` auf einen PHP-fähigen Webspace hochladen, zum Beispiel nach `https://deine-domain.de/dcloud_relay.php`.
-2. In dcloud unter **Einstellungen → PHP-Relay / Proxy für Internet-Peers** die URL bei **Weitere Relay-URLs hinzufügen** eintragen.
-3. **Netzwerksuche aktualisieren** anklicken oder kurz warten, bis das Relay-Polling die entfernten Peers einsammelt und neue Relay-URLs weitergibt.
+### Peer-Chat
 
-Das Relay-Passwort muss nicht mehr manuell gepflegt werden. Die PHP-Datei erzeugt beim ersten Start lokal einen zufälligen Seed, leitet daraus täglich einen neuen Relay-Zugriffsschlüssel ab und gibt den aktuellen Tages-Schlüssel über die `health`-Aktion an Clients aus. Clients erneuern ihn automatisch, geben den Tokenstatus in Relay-Metadaten mit und akzeptieren dadurch die tägliche Rotation ohne Nutzereingriff.
+Der Chat ist peerbasiert:
 
-Ab Relay-Version **1.3.0** enthält `dcloud_relay.php` zusätzlich den `direct_proxy_request`-Modus. Dieser Modus funktioniert ähnlich wie ein kleiner HTTP-Forwarder: Er erlaubt ausschließlich `GET`/`POST` auf `/api/p2p/...`, leitet nur ausgewählte Header weiter und verbindet nur zu öffentlich routbaren Peer-IPs, damit der Webserver nicht als offener Proxy oder SSRF-Werkzeug missbraucht wird. Ältere Relay-Härtungen bleiben enthalten: leere Bodies, ungültiges JSON und fehlerhafte `register`-Requests mit fehlenden `peer`-Metadaten liefern saubere JSON-Fehlermeldungen, Long-Polling bleibt aktiv und Speicher-Metadaten werden nicht durch minimale Heartbeats überschrieben.
+- rote Badge nur bei ungelesenen Nachrichten größer `0`
+- ungelesene Nachrichten werden beim Öffnen des Chats als gelesen markiert
+- Emoji-Auswahl im Eingabebereich
+- Bildversand mit Vorschau in der Chat-Bubble
+- Datei-Teilen über grafische Dateiauswahl statt ID-Eingabe
+- geteilte Dateien werden als Datei-Karte mit Download-Aktion angezeigt
 
-Wichtig für große Dateien: Auch der PHP-Forwarder arbeitet über HTTP/JSON/Base64 vom Client zum Relay und vom Relay zum Ziel-Peer, speichert die Chunk-Nutzdaten aber nicht mehr als einzelne Mailbox-Dateien. Peer-Replikation läuft nach dem lokalen Upload im Hintergrund und nutzt gebündelte binäre Upload-Packs über `/api/p2p/chunks/batch/pack/upload`, statt den Upload-Request mit jedem Remote-Chunk zu blockieren. Bei sehr restriktiven Webspaces müssen trotzdem `post_max_size`, `memory_limit`, PHP-cURL oder aktivierte HTTP-Stream-Wrapper und Request-Timeouts ausreichend groß sein. Der Relay-Worker registriert sich nicht mehr bei jedem Poll-Zyklus neu, sondern hält per Long-Polling die Mailbox warm. Der empfangende Client verarbeitet Mailbox-Relay-Requests parallel in kleinen Worker-Threads. Wenn ein Webspace beim Zurückschreiben einer Antwort hängt, blockiert das nicht mehr die komplette Mailbox und der lokale Upload bleibt nicht mitten in der Datei stehen. Für das LAN bleibt der direkte HTTP-Transfer schneller; die Reihenfolge ist: direkter Peer-HTTP-Transfer → PHP-Forwarder ohne Chunk-Ablage → Mailbox-Relay als NAT-Fallback. Beim Wiederherstellen einer geteilten Datei lädt der Empfänger fehlende Chunks zusätzlich gebündelt über `/api/p2p/chunks/batch/download`, statt für jeden Chunk einen eigenen HTTP-/PHP-Forwarder-Request auszulösen; der alte Einzelabruf bleibt nur als Kompatibilitäts-Fallback für ältere Peers aktiv.
+### Temporäre externe Download-Links
 
-### Optionale Python-Relay-Alternative
+Per Rechtsklick auf eine eigene Datei kann ein externer Link erstellt werden. Die Gültigkeit ist serverseitig auf maximal **60 Minuten** begrenzt.
 
-Wenn dein Webserver Python als dauerhafte App oder kleinen Hintergrundprozess ausführen kann, ist `relay/dcloud_relay_server.py` oft besser als PHP. Die Python-Variante verwendet das gleiche JSON-Protokoll und das gleiche automatische Tages-Token-System, arbeitet aber mit einem `ThreadingHTTPServer` und blockiert bei vielen gleichzeitigen Chunk-Requests deutlich weniger.
+Es gibt zwei Link-Arten:
 
-Beispiel lokal/VPS:
+1. **Direkt-Link**: `/external/<token>` auf dem dcloud-Node. Funktioniert nur, wenn der Node von außen erreichbar ist.
+2. **Relay-Link**: `dcloud_relay.php?action=external_download&token=...`. Das Relay nimmt den Browser-Download an und fordert den Node über die Mailbox auf, den Stream aktiv zum Relay zu senden.
 
-```bash
-cd relay
-python3 dcloud_relay_server.py --host 0.0.0.0 --port 8788
-```
+Der Relay-Link speichert nicht dauerhaft die Datei auf dem Relay. Er puffert nur kurzlebige Stream-Pakete für den laufenden Download. Für sehr große öffentliche Downloads sind Portfreigabe, VPN, Reverse Proxy oder später ein echter Reverse-Tunnel effizienter.
 
-Danach kannst du per nginx/Apache/Plesk eine HTTPS-URL auf diesen Port weiterleiten und diese URL in den dcloud-Einstellungen als weiteres Relay eintragen. Die festen PHP-Relays bleiben weiterhin aktiv; die Python-Relay-URL wird wie alle Zusatz-Relays im Netzwerk verteilt.
+### SMB
 
+Der optionale SMB-Server kann im Dashboard aktiviert werden. Beim Aktivieren, Deaktivieren oder Ändern von Port/Benutzer/Passwort wird der SMB-Dienst innerhalb des laufenden dcloud-Prozesses neu gestartet. Auf Ports unter `1024`, insbesondere `445`, sind unter Linux/macOS meist Root-Rechte nötig. Auf Systemen mit bereits laufendem Samba/Windows-Dateifreigabe kann der Port belegt sein.
 
-
-## Optional integrierter SMB-Server
-
-Der Client kann optional einen eigenen SMB-Server starten, damit der lokale Speicherpfad zusätzlich als Netzlaufwerk erreichbar ist (z. B. `\\<node-ip>\DCLOUD`).
-
-```yaml
-smb:
-  enabled: true
-  host: 0.0.0.0
-  port: 445
-  share_name: DCLOUD
-  username: ""
-  password: ""
-```
-
-Hinweis: Für den SMB-Server wird `impacket` benötigt (ist in `requirements.txt` enthalten). Auf Linux ist Port 445 ggf. nur mit erhöhten Rechten bindbar.
-
-## Client-Typ und Speicherfreigabe
-
-Im Einstellungsfenster kann jeder Knoten als **Server** betrieben werden:
-
-- **Server:** Der Knoten wird als dauerhaftes Speicherziel für das Peer-to-Peer-Netz angekündigt. Andere Peers dürfen diesen Client für P2P-Ablage einplanen.
-
-Der freigegebene Speicher wird in GB konfiguriert und kann über die UI nicht unter **5 GB** gesetzt werden. Die Einstellung wird in `config.yml` gespeichert und zur Laufzeit direkt auf das aktive Speicherlimit angewendet.
-
-## P2P-Freigaben
-
-Über Rechtsklick auf eine Datei kann eine Freigabe gezielt für einen Peer oder für alle aktiven Peers erstellt werden. Die UI zeigt dafür nicht nur IP-Adressen, sondern automatisch generierte Anzeigenamen wie „Blauer Falke 1A2B“, falls ein Knoten keinen eigenen Namen konfiguriert hat. Beim Freigeben wird das signierte Manifest direkt an den ausgewählten Peer übertragen. Wird die Freigabe deaktiviert, erzeugt der Besitzer eine signierte Revocation für das alte geteilte Manifest; aktive Ziel-Peers entfernen es sofort aus ihrer sichtbaren Dateiliste, offline gewesene Ziel-Peers werden beim nächsten Erreichen erneut bereinigt. Die Chunks selbst bleiben bei einer reinen Freigabe-Deaktivierung verteilt auf den im Manifest genannten Speicher-Knoten; der empfangende Peer lädt fehlende Chunks beim Download von diesen Knoten nach. Löscht der Besitzer die Datei vollständig, erzeugt er zusätzlich eine signierte Datei-Löschung. Aktive Speicher-/Freigabe-Peers entfernen dann sowohl sichtbare Manifeste als auch unreferenzierte Chunk-Kopien. Ist ein Peer offline, bleibt die Löschung als Tombstone vorgemerkt und wird beim nächsten Wiederauftauchen zugestellt; alte Manifeste derselben Datei werden danach nicht mehr importiert.
-
-## NAT-Baum / Parent-Node im lokalen Netzwerk
-
-Wenn mehrere Nodes hinter demselben NAT laufen, muss nicht jeder Node eine eigene Portfreigabe bekommen:
-
-1. Ein Node im lokalen Netzwerk bekommt die Portfreigabe und setzt `network.relay_children: true`.
-2. Die anderen lokalen Nodes tragen diesen Node als `network.tree_parent_nodes` ein oder markieren ihn im Dashboard als „NAT-Parent“.
-3. Der Parent nimmt diese Children in seine Peer-Liste auf und veröffentlicht sie im Gossip mit `route_via_node_id`.
-4. Andere Peers senden Discovery-/Control-Nachrichten an diese Children über den Parent; der Parent leitet sie an die lokale Adresse des Child weiter.
-
-Damit entsteht eine Baumstruktur ohne zentralen Server: Außen sichtbare Nodes können lokale Unterbäume repräsentieren, während die einzelnen Child-Nodes nur ausgehende UDP-Pakete zum Parent benötigen.
-
-## Upload-/Download-Ablauf im MVP
-
-1. Benutzer öffnet `http://127.0.0.1:8787`.
-2. Benutzer wählt eine Datei im Desktop-Explorer aus.
-3. Der Client speichert die Datei temporär unter `storage/tmp/`.
-4. `ChunkStore` liest die Datei in Blöcken der konfigurierten `chunk_size_bytes`; wenn die aktiven Speicherziele nur per PHP-Relay/Forwarder erreichbar sind, wird automatisch die kleinere `network.relay_chunk_size_bytes` verwendet.
-5. Jeder Chunk wird adaptiv komprimiert: `auto` überspringt bereits komprimierte Dateitypen und high-entropy Stichproben, nutzt standardmäßig kompatibles `zlib`; `zstd` kann optional aktiviert werden, wenn alle Speicher-Peers das Python-Paket `zstandard` haben. Komprimierte Bytes werden nur übernommen, wenn mindestens die konfigurierte Mindest-Ersparnis erreicht wird. Danach wird SHA-256 über die tatsächlich gespeicherten Bytes berechnet.
-6. Der Upload-Plan rotiert die Chunks über den lokalen Knoten und alle aktiven Speicher-Peers. Sobald mindestens ein Speicher-Peer vorhanden ist, wird jeder Chunk nach Möglichkeit mit zwei Speicherorten im Manifest abgelegt. Remote-Ziele erhalten den komprimierten Chunk über `/api/p2p/chunks/<hash>`.
-7. Kann ein Remote-Peer den Chunk nicht annehmen, wird der nächste Zielknoten versucht. Falls die gewünschte Redundanz nicht erreicht wird, wird lokal eine Sicherheitskopie gespeichert und im Manifest als Fallback markiert.
-8. `ManifestStore` erstellt ein signiertes Manifest mit Datei-Metadaten, Chunk-Liste, konkreten Chunk-Locations, Placement-Status und Access-Liste.
-9. Beim Download prüft der Client das Manifest, lädt fehlende Chunks von den im Manifest genannten aktiven Peers nach und stellt die Datei unter `storage/downloads/` wieder her.
-10. Beim Löschen einer eigenen Datei sendet der Besitzer eine signierte Delete-Nachricht an alle Peers, die laut Manifest Chunks oder Freigaben halten könnten. Diese Peers löschen das Manifest und alle nicht mehr referenzierten Chunks. Offline-Peers werden später nachsynchronisiert.
-
-Die Upload-UI zeigt dabei zwei Ebenen: zuerst den Browser-Transfer zur lokalen Web-App und anschließend die lokale Serververarbeitung. Sobald das lokale Manifest geschrieben ist, ist der Upload für den Nutzer abgeschlossen; der gleiche Statusdialog zeigt danach weiter die asynchrone Hintergrund-Replikation an, ohne den Upload-Request oder das Dashboard zu blockieren.
-
-
-### Komprimierung
-
-Die Einstellung `storage.compression` steuert neue Uploads. Alte Manifest-Chunks bleiben kompatibel: `zlib` und unkomprimierte Chunks werden weiterhin gelesen, `zstd`-Chunks benötigen das optionale Python-Paket `zstandard`. Empfohlen ist `mode: auto` und `algorithm: zlib`; dadurch werden ZIP/MP4/JPG/PDF/ähnliche Dateien nicht unnötig komprimiert, während Text-, Log- und Office-artige Daten weiterhin Speicher sparen. `zstd` ist schneller/besser, sollte aber erst aktiviert werden, wenn alle Speicher-Peers das optionale Paket installiert haben. Auf OpenWrt bleibt das Paket `zstandard` optional, damit das Autoupdate nicht an nativen Builds scheitert.
-
-## Storage-Layout
+## Speicher- und Datenmodell
 
 ```text
 storage/
@@ -241,81 +125,194 @@ storage/
 │       └── abcdef....chunk
 ├── manifests/
 │   └── <manifest_id>.json
-├── tmp/
 ├── downloads/
-└── identity/
-    └── node_ed25519.key
+├── tmp/
+├── identity/
+│   └── node_ed25519.key
+├── disabled_peers.json
+└── external_links.json
 ```
 
-## Sicherheitsdesign im MVP
-
-- Private Keys bleiben ausschließlich lokal.
+- Chunks werden über SHA-256 der gespeicherten Bytes adressiert.
+- Manifeste sind Ed25519-signiert.
 - Node-ID ist `SHA-256(public_key_bytes)`.
-- Manifest-Signaturen nutzen Ed25519.
-- Chunks werden über SHA-256 adressiert und beim Lesen geprüft.
-- UDP-Discovery ignoriert Pakete ohne korrektes `protocol_magic` und verteilt nur Discovery-Metadaten wie Node-ID, Name, UDP-Port, Web-API-Port, Speicherfreigabe und bekannte Peers.
-- Die Web-/Peer-API bindet standardmäßig an `0.0.0.0`, damit LAN-Peers Chunks übertragen können; Firewall-Regeln bleiben für Produktivbetrieb wichtig.
-- Das PHP-Relay speichert nur kurzlebige Peer-Metadaten, Request-Mailboxen, Antworten und einen lokalen Seed für automatisch rotierende Tages-Token. HTTPS bleibt für öffentliche Deployments wichtig.
-- Manifeststruktur enthält bereits ein `encryption`-Feld für spätere clientseitige Verschlüsselung.
+- Private Keys bleiben lokal unter `storage/identity/`.
+- Alte `zlib`- und unkomprimierte Chunks bleiben lesbar.
+- `zstd`-Chunks benötigen auf lesenden Peers das optionale Python-Paket `zstandard`.
 
-## Spätere Erweiterungen
+## Netzwerk und Ports
 
-### P2P-Replikation weiter ausbauen
+| Zweck | Standard | Protokoll | Hinweis |
+| --- | ---: | --- | --- |
+| Dashboard und Peer-API | `8787` | TCP/HTTP | Standardhost `0.0.0.0`, lokal über `127.0.0.1` erreichbar |
+| LAN-Discovery | `6881` | UDP | nutzt bei belegtem Port Range `6881-6891` |
+| SMB | `445` | TCP | optional, benötigt oft Root/Admin-Rechte |
+| PHP-Relay | extern | HTTP/HTTPS | `dcloud_relay.php` auf Webspace oder Server |
 
-- Auf dem bestehenden Peer-Gossip aufbauen und `IndexProvider.announce_manifest()` sowie `find_chunk()` mit einem DHT- oder Multi-Node-Index implementieren.
-- Den aktuell festen Mindest-Replikationsfaktor später konfigurierbar machen oder durch Erasure-Coding pro Manifest ergänzen.
-- Background-Jobs für Chunk-Repair, Rebalancing und Garbage Collection ergänzen.
-- Peer-Scores für Verfügbarkeit, Latenz, Storage-Beiträge und Fehlverhalten einführen.
+Für LAN-Betrieb müssen TCP `8787` und UDP `6881-6891` im lokalen Netz erlaubt sein. Für reine Relay-Nutzung reicht ausgehender HTTP/HTTPS-Zugriff vom dcloud-Node zum Relay.
 
-### Relay-Nodes und NAT-Traversal
+## Standard-Relays
 
-- Relay als optionalen Peer-Typ modellieren, nicht als zentrale Wahrheit.
-- UDP hole punching und STUN-artige Adressbeobachtung ergänzen.
-- Für nicht direkt erreichbare Nodes Relay-Reservations mit Ablaufzeit nutzen.
+Die Konfiguration enthält standardmäßig:
 
-### QUIC, libp2p oder WebRTC
+```yaml
+relay_urls:
+  - "https://support.tmp-networks.de/dcstorage/dcloud_relay.php"
+  - "http://dcloud.byethost12.com/dcloud_relay.php"
+```
 
-- Neue Klassen gegen das `Transport`-Protocol implementieren.
-- Chunk-Transfer von Discovery entkoppelt halten: UDP bleibt Control Plane, QUIC/HTTP/WebRTC wird Data Plane.
-- Nachrichten später mit Node-Key signieren und Nonces gegen Replay-Angriffe verwenden.
+Wenn PHP-Vermittlung bewusst deaktiviert werden soll, muss `relay_urls: []` gesetzt werden. Bestehende Installationen mit alter Konfiguration bekommen das Backup-Relay automatisch ergänzt, solange die Relay-Funktion nicht ausdrücklich deaktiviert wurde.
 
-### Dezentrale Indexierung
+## Komprimierung
 
-- `IndexProvider` austauschbar halten:
-  - `LocalIndexProvider` für Offline-/Einzelknotenbetrieb.
-  - `BootstrapIndexProvider` als temporärer Tracker.
-  - `DHTIndexProvider` für vollständig dezentrale Suche.
-  - `MultiNodeIndexProvider` für redundante, signierte Announcements.
-- Announcements als signierte Records mit TTL speichern.
-- Manifest-IDs und Chunk-Hashes als Content Keys verwenden.
+Neue Uploads nutzen `storage.compression`:
 
-### Clientseitige Verschlüsselung
+```yaml
+storage:
+  compression:
+    mode: auto              # auto, fast, balanced, max, off
+    algorithm: zlib         # auto, zlib, zstd, none
+    level: 1
+    min_savings_percent: 3.0
+    min_savings_bytes: 65536
+    skip_incompressible: true
+```
 
-- Datei vor dem Chunking verschlüsseln, damit Chunks nie Klartext verlassen.
-- Pro Datei Data Encryption Key erzeugen.
-- Schlüssel nur lokal oder für berechtigte Empfänger asymmetrisch verpackt speichern.
-- Manifest `encryption` um Algorithmus, Nonce/IV, Key-Wrapping-Metadaten und Policy erweitern.
+Empfehlung:
 
-## Entwicklungsstatus
+- `mode: auto`
+- `algorithm: zlib` für maximale Kompatibilität
+- optional `algorithm: zstd`, wenn alle Peers `zstandard` installiert haben
+- `skip_incompressible: true` für bessere Performance bei ZIP, JPG, PNG, MP4, PDF, 7z, RAR usw.
 
-Bewusst nicht enthalten:
-
-- kein vollständiges DHT
-- kein Blockchain-/Token-System
-- noch kein DHT/Repair/Rebalancing für langfristige Replikation
-- keine NAT-Traversal-Implementierung
-- keine öffentliche Authentifizierung für die Web-UI
-
-Der MVP ist als saubere, modulare Grundlage gedacht, damit zentrale Komponenten später entfernt und durch dezentrale Provider ersetzt werden können.
-
-## Service-Installer per `curl` (Linux/OpenWrt/Windows-Bootstrap)
-
-Es gibt ein Install-Script unter `scripts/install_dcloud_service.sh`, das den Client als Service einrichtet und dabei Rolle (Server), freigegebenen Speicher und SMB-Konfiguration setzt.
-
-Beispiel:
+Optionales zstd installieren:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/MTSmash-TMP-Networks/Projekt-dcloud/main/scripts/install_dcloud_service.sh | sh -s -- \
+. .venv/bin/activate
+pip install zstandard
+```
+
+Windows PowerShell:
+
+```powershell
+.\.venv\Scripts\python -m pip install zstandard
+```
+
+## Voraussetzungen
+
+### Allgemein
+
+- Python 3.11 oder neuer empfohlen
+- Git
+- ausgehende HTTP/HTTPS-Verbindung für Relays und Updates
+- genügend Speicherplatz im gewählten `storage.path`
+
+### Python-Pakete
+
+Pflichtpakete aus `requirements.txt`:
+
+- `Flask`
+- `PyYAML`
+- `cryptography`
+- `pysmb`
+- `impacket`
+
+Optional:
+
+- `zstandard` für zstd-Komprimierung
+
+## Manuelle Installation
+
+Diese Variante funktioniert auf Linux, macOS und Windows, wenn Python und Git vorhanden sind.
+
+### Linux/macOS
+
+```bash
+git clone https://github.com/MTSmash-TMP-Networks/Projekt-dcloud.git dcloud
+cd dcloud
+python3 -m venv .venv
+. .venv/bin/activate
+pip install --upgrade pip
+pip install -r requirements.txt
+python -m dcloud_client.main --config config.yml
+```
+
+Dashboard öffnen:
+
+```text
+http://127.0.0.1:8787
+```
+
+### Windows PowerShell
+
+```powershell
+git clone https://github.com/MTSmash-TMP-Networks/Projekt-dcloud.git dcloud
+cd dcloud
+py -3 -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install --upgrade pip
+python -m pip install -r requirements.txt
+python -m dcloud_client.main --config config.yml
+```
+
+Falls PowerShell das Aktivieren blockiert:
+
+```powershell
+Set-ExecutionPolicy -Scope CurrentUser RemoteSigned
+```
+
+Alternativ ohne Aktivieren:
+
+```powershell
+.\.venv\Scripts\python -m dcloud_client.main --config config.yml
+```
+
+## Installation per `.sh`-Skript
+
+Das Hauptskript ist:
+
+```text
+scripts/install_dcloud_service.sh
+```
+
+Es unterstützt:
+
+- `--target linux` für systemd
+- `--target openwrt` für OpenWrt `/etc/init.d` + Cron-Autoupdate
+- `--target windows` für ein PowerShell-Bootstrap-Skript mit geplanter Aufgabe
+- `--target auto` zur automatischen Erkennung
+
+Optionen:
+
+```text
+--role server              aktuell nur server
+--storage-gb N             freigegebener Speicher in GB, Minimum 5
+--enable-smb               SMB in config.yml aktivieren
+--disable-smb              SMB deaktivieren
+--smb-user USER            SMB-Benutzername
+--smb-pass PASS            SMB-Passwort
+--install-dir PATH         Installationsverzeichnis
+--service-name NAME        Service-/Task-/Init-Name
+--target auto|linux|openwrt|windows
+```
+
+### Linux mit systemd
+
+Als Root oder per `sudo` ausführen:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/MTSmash-TMP-Networks/Projekt-dcloud/main/scripts/install_dcloud_service.sh | sudo sh -s -- \
+  --target linux \
+  --role server \
+  --storage-gb 200 \
+  --install-dir /opt/dcloud \
+  --service-name dcloud
+```
+
+Mit SMB:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/MTSmash-TMP-Networks/Projekt-dcloud/main/scripts/install_dcloud_service.sh | sudo sh -s -- \
   --target linux \
   --role server \
   --storage-gb 200 \
@@ -324,24 +321,465 @@ curl -fsSL https://raw.githubusercontent.com/MTSmash-TMP-Networks/Projekt-dcloud
   --smb-pass 'starkes-passwort'
 ```
 
-Hinweise:
+Service verwalten:
 
-- `--target linux` richtet einen `systemd`-Service ein.
-- `--target openwrt` richtet einen `/etc/init.d`-Service ein.
-- OpenWrt-Autoupdate nutzt eine Lock-Datei unter `/tmp`, startet den Dienst per Cleanup-Trap nach jedem Updateversuch wieder und vermeidet ein komplettes `pip install -r requirements.txt`, damit kleine Router nicht beim Dependency-Build hängen bleiben. Logs landen in `INSTALL_DIR/logs/autoupdate.log`.
-- `--target windows` erzeugt ein PowerShell-Bootstrap-Skript für eine geplante Aufgabe beim Systemstart (als Dienst-Ersatz).
-- Mindestwert für `--storage-gb` ist `5`.
-
-### Temporäre externe Download-Links
-
-Im Dashboard kann per Rechtsklick auf eine eigene Datei ein temporärer externer Download-Link erzeugt werden. Die Laufzeit wird beim Erstellen abgefragt und serverseitig hart auf maximal 60 Minuten begrenzt. Nach Ablauf liefert der Link keinen Download mehr aus.
-
-Beim Erstellen versucht dcloud zuerst, zusätzlich einen öffentlichen Relay-Link über die konfigurierten PHP-Relays anzulegen. Dieser Link sieht zum Beispiel so aus:
-
-```text
-https://relay.example/dcloud_relay.php?action=external_download&token=...
+```bash
+sudo systemctl status dcloud
+sudo systemctl restart dcloud
+sudo systemctl stop dcloud
+sudo systemctl start dcloud
+sudo journalctl -u dcloud -f
 ```
 
-Der direkte lokale Node-Link unter `/external/<token>` bleibt als Fallback erhalten. Wenn PHP-Relays konfiguriert sind, bevorzugt das Dashboard den Relay-Link auch dann, wenn der Relay-Heartbeat gerade noch nicht als „verbunden“ angezeigt wird.
+Auto-Update verwalten:
 
-Externe Relay-Downloads nutzen jetzt nicht mehr den schnellen Direkt-Forwarder als Pflichtpfad. Beim Öffnen des öffentlichen Links legt das PHP-Relay eine kurzlebige Stream-Anfrage in die Relay-Mailbox. Der dcloud-Knoten holt diese Anfrage aktiv ab und schiebt die Datei anschließend in kleinen Paketen zum Relay, während der Browser aus demselben Relay-Stream liest. Dadurch funktionieren externe Links auch bei Nodes hinter NAT/DS-Lite/Firewall, solange der dcloud-Prozess selbst mit dem PHP-Relay verbunden ist. Für sehr große öffentliche Downloads bleiben Portfreigabe, Reverse Proxy, VPN oder später ein echter Reverse-Tunnel effizienter, aber der bisherige direkte 502-Timeout wird vermieden.
+```bash
+sudo systemctl status dcloud-autoupdate.timer
+sudo systemctl list-timers | grep dcloud
+sudo systemctl restart dcloud-autoupdate.timer
+```
+
+Das Linux-Autoupdate prüft regelmäßig das Git-Remote, stoppt den Dienst, zieht per `git pull --ff-only`, installiert `requirements.txt` neu und startet den Dienst wieder.
+
+### OpenWrt
+
+Empfohlen ist ein Installationspfad mit ausreichend Speicher, zum Beispiel USB/SSD unter `/opt/dcloud`.
+
+```sh
+opkg update
+opkg install ca-bundle curl git-http python3 python3-pip python3-flask python3-cryptography python3-cffi python3-pycparser python3-yaml
+```
+
+Installation:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/MTSmash-TMP-Networks/Projekt-dcloud/main/scripts/install_dcloud_service.sh | sh -s -- \
+  --target openwrt \
+  --role server \
+  --storage-gb 50 \
+  --install-dir /opt/dcloud \
+  --service-name dcloud
+```
+
+Mit SMB:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/MTSmash-TMP-Networks/Projekt-dcloud/main/scripts/install_dcloud_service.sh | sh -s -- \
+  --target openwrt \
+  --role server \
+  --storage-gb 50 \
+  --enable-smb \
+  --smb-user dcloud \
+  --smb-pass 'starkes-passwort'
+```
+
+Service verwalten:
+
+```sh
+/etc/init.d/dcloud status
+/etc/init.d/dcloud restart
+/etc/init.d/dcloud stop
+/etc/init.d/dcloud start
+logread | tail -n 120
+```
+
+Autoupdate:
+
+```sh
+/usr/bin/dcloud_autoupdate.sh
+cat /opt/dcloud/logs/autoupdate.log
+cat /etc/crontabs/root | grep dcloud
+```
+
+Das OpenWrt-Autoupdate nutzt eine Lock-Datei unter `/tmp`, startet den Dienst nach jedem Updateversuch per Cleanup-Trap wieder und vermeidet ein blindes komplettes `pip install -r requirements.txt`. Das schützt kleine Router vor langen Builds und verhindert, dass der Dienst nach einem Updatefehler dauerhaft aus bleibt.
+
+Firewall-Regeln werden vom Skript für LAN-Zugriff angelegt:
+
+- TCP Web/API-Port aus `config.yml`, standardmäßig `8787`
+- UDP `6881-6891`
+
+### macOS mit launchd
+
+Für macOS gibt es ein eigenes Skript:
+
+```text
+scripts/install_dcloud_service_mac.sh
+```
+
+Voraussetzungen:
+
+```bash
+xcode-select --install
+# optional, falls Python fehlt:
+/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+brew install python git
+```
+
+Installation:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/MTSmash-TMP-Networks/Projekt-dcloud/main/scripts/install_dcloud_service_mac.sh | bash -s -- \
+  --role server \
+  --storage-gb 200 \
+  --install-dir "$HOME/dcloud" \
+  --service-name de.tmp-networks.dcloud
+```
+
+Mit SMB:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/MTSmash-TMP-Networks/Projekt-dcloud/main/scripts/install_dcloud_service_mac.sh | bash -s -- \
+  --role server \
+  --storage-gb 200 \
+  --enable-smb \
+  --smb-user dcloud \
+  --smb-pass 'starkes-passwort'
+```
+
+launchd verwalten:
+
+```bash
+launchctl list | grep dcloud
+launchctl unload "$HOME/Library/LaunchAgents/de.tmp-networks.dcloud.plist"
+launchctl load "$HOME/Library/LaunchAgents/de.tmp-networks.dcloud.plist"
+tail -f "$HOME/dcloud/logs/dcloud.out.log"
+tail -f "$HOME/dcloud/logs/dcloud.err.log"
+```
+
+macOS-Autoupdate:
+
+```bash
+launchctl list | grep autoupdate
+tail -f "$HOME/dcloud/logs/dcloud.autoupdate.out.log"
+tail -f "$HOME/dcloud/logs/dcloud.autoupdate.err.log"
+```
+
+Hinweis: Der SMB-Port `445` ist auf macOS häufig bereits vom System belegt oder benötigt erhöhte Rechte. Nutze bei Bedarf einen anderen Port in den SMB-Einstellungen.
+
+### Windows per Bootstrap
+
+Das `.sh`-Skript kann unter Git Bash/MSYS/Cygwin einen Windows-Bootstrap erzeugen. Danach wird ein PowerShell-Skript als Administrator ausgeführt.
+
+In Git Bash:
+
+```bash
+sh scripts/install_dcloud_service.sh \
+  --target windows \
+  --role server \
+  --storage-gb 200 \
+  --install-dir "C:/dcloud" \
+  --service-name dcloud
+```
+
+Danach PowerShell als Administrator öffnen:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File "C:\dcloud\install_windows_service.ps1"
+```
+
+Geplante Aufgabe verwalten:
+
+```powershell
+Get-ScheduledTask -TaskName dcloud
+Start-ScheduledTask -TaskName dcloud
+Stop-ScheduledTask -TaskName dcloud
+Unregister-ScheduledTask -TaskName dcloud
+```
+
+Manueller Windows-Start ohne geplante Aufgabe:
+
+```powershell
+cd C:\dcloud
+.\.venv\Scripts\python -m dcloud_client.main --config config.yml
+```
+
+## PHP-Relay installieren
+
+Das PHP-Relay besteht aus einer Datei:
+
+```text
+relay/dcloud_relay.php
+```
+
+Installation auf einem Webserver:
+
+1. `dcloud_relay.php` auf den Webspace kopieren.
+2. Schreibrechte für das Relay-Datenverzeichnis erlauben. Das Skript legt standardmäßig `dcloud-relay-data/` neben sich an.
+3. PHP mit `curl`-Extension ist empfohlen. Ohne cURL nutzt das Skript einen HTTP-Stream-Fallback, der weniger robust ist.
+4. Die URL im Dashboard oder in `config.yml` unter `network.relay_urls` eintragen.
+
+Beispiel:
+
+```yaml
+network:
+  relay_urls:
+    - "https://example.org/dcloud_relay.php"
+```
+
+Wichtige Hinweise:
+
+- Das Relay sollte über HTTPS laufen.
+- Das Relay ist kein dauerhafter Dateispeicher.
+- Für externe temporäre Links werden nur kurzlebige Token und Stream-Pakete gehalten.
+- Für große Datenmengen ist ein eigener VPS oder die Python-Relay-Variante stabiler als Shared Hosting.
+
+## Python-Relay-Alternative
+
+Für Server/VPS gibt es zusätzlich:
+
+```text
+relay/dcloud_relay_server.py
+```
+
+Startbeispiel:
+
+```bash
+python relay/dcloud_relay_server.py
+```
+
+Diese Variante ist für viele Transfers stabiler als PHP auf Shared Hosting. Je nach Deployment sollte sie hinter einem Reverse Proxy mit HTTPS betrieben werden.
+
+## Beispiel-`config.yml`
+
+```yaml
+node:
+  name: dcloud-node
+  identity_path: ./storage/identity
+  client_type: server
+
+storage:
+  path: ./storage
+  limit_bytes: 53687091200
+  min_free_bytes: 1073741824
+  chunk_size_bytes: 4194304
+  compression:
+    mode: auto
+    algorithm: zlib
+    level: 1
+    min_savings_percent: 3.0
+    min_savings_bytes: 65536
+    skip_incompressible: true
+
+web:
+  host: 0.0.0.0
+  port: 8787
+
+network:
+  udp_host: 0.0.0.0
+  udp_port: 6881
+  udp_port_range:
+    start: 6881
+    end: 6891
+  bootstrap_nodes: []
+  tree_parent_nodes: []
+  relay_children: false
+  discovery_interval_seconds: 10
+  auto_discovery_enabled: true
+  auto_discovery_ports: [6881]
+  auto_discovery_hosts: [255.255.255.255]
+  startup_discovery_seconds: 12
+  startup_discovery_interval_seconds: 2
+  peer_timeout_seconds: 35
+  peer_cleanup_interval_seconds: 5
+  relay_url: "https://support.tmp-networks.de/dcstorage/dcloud_relay.php"
+  relay_urls:
+    - "https://support.tmp-networks.de/dcstorage/dcloud_relay.php"
+    - "http://dcloud.byethost12.com/dcloud_relay.php"
+  relay_secret: ""
+  relay_poll_interval_seconds: 1
+  relay_request_timeout_seconds: 180
+  relay_chunk_size_bytes: 524288
+
+security:
+  protocol_magic: DCLOUD1
+
+smb:
+  enabled: false
+  host: 0.0.0.0
+  port: 445
+  share_name: DCLOUD
+  username: ""
+  password: ""
+```
+
+## Typische Bedienung
+
+### Datei hochladen
+
+1. Dashboard öffnen.
+2. Fenster **Dateien** öffnen.
+3. Datei auswählen und hochladen.
+4. Im **Transfer-Center** prüfen, ob Hintergrund-Replikation läuft.
+
+### Datei auf Peer auslagern
+
+1. Rechtsklick auf Datei.
+2. **Auf Peers auslagern** wählen.
+3. Warten, bis mindestens eine Peer-Kopie erfolgreich geschrieben wurde.
+4. Lokale Chunks werden nur gelöscht, wenn dadurch keine andere lokale Datei beschädigt wird.
+
+### Datei per Chat teilen
+
+1. **Peer-Chat** öffnen.
+2. Peer auswählen.
+3. Auf Büroklammer klicken.
+4. Datei grafisch aus der Dateiliste auswählen.
+5. Nachricht senden.
+
+### Externen Link erstellen
+
+1. Rechtsklick auf eigene Datei.
+2. **Externen Link erstellen** wählen.
+3. Gültigkeit in Minuten eingeben, maximal `60`.
+4. Link kopieren und weitergeben.
+
+### Peer deaktivieren
+
+1. **Netzwerk** öffnen.
+2. Peer in aktiver Liste deaktivieren.
+3. Der Peer bleibt in `disabled_peers.json` gesperrt und wird durch Discovery/Relay nicht automatisch wieder aktiv.
+4. Bei Bedarf im Bereich **Deaktivierte Peers** wieder zulassen.
+
+## Wartung und Fehlerdiagnose
+
+### Logs
+
+Dashboard:
+
+- Fenster **Audit-Logs** öffnen
+
+Linux/systemd:
+
+```bash
+sudo journalctl -u dcloud -f
+```
+
+OpenWrt:
+
+```sh
+logread | tail -n 120
+cat /opt/dcloud/logs/autoupdate.log
+```
+
+macOS:
+
+```bash
+tail -f "$HOME/dcloud/logs/dcloud.out.log"
+tail -f "$HOME/dcloud/logs/dcloud.err.log"
+```
+
+Windows:
+
+```powershell
+Get-ScheduledTask -TaskName dcloud
+Get-ScheduledTaskInfo -TaskName dcloud
+```
+
+### Healthcheck
+
+```bash
+curl http://127.0.0.1:8787/healthz
+```
+
+### Ports prüfen
+
+Linux:
+
+```bash
+ss -ltnup | grep -E '8787|6881|445'
+```
+
+OpenWrt:
+
+```sh
+netstat -ltnup | grep -E '8787|6881|445'
+```
+
+Windows PowerShell:
+
+```powershell
+netstat -ano | findstr "8787 6881 445"
+```
+
+## Häufige Probleme
+
+### Dashboard ist lokal erreichbar, aber andere Peers sehen den Node nicht
+
+- Prüfe Firewall für TCP `8787` und UDP `6881-6891`.
+- Prüfe, ob `web.host` auf `0.0.0.0` steht.
+- Prüfe, ob Peers eventuell deaktiviert wurden.
+- Bei Docker/VM/Router muss UDP-Broadcast ggf. explizit erlaubt werden.
+
+### Relay-Link wird erstellt, Download bricht aber ab
+
+- Stelle sicher, dass die neue `relay/dcloud_relay.php` auf dem Relay-Server liegt.
+- Prüfe, ob der dcloud-Node ausgehend zum Relay verbinden kann.
+- Shared-Hosting kann lange Downloads abbrechen; dann besser eigenes Relay oder Reverse Proxy nutzen.
+
+### SMB-Haken verschwindet oder SMB startet nicht
+
+- Aktuelle Version nutzen; SMB wird beim Speichern der Einstellungen neu gestartet.
+- Prüfe, ob Port `445` belegt ist.
+- Auf Linux/macOS benötigt Port `445` meist Root-Rechte.
+- Testweise einen höheren Port verwenden, zum Beispiel `1445`.
+
+### Upload großer Dateien ist langsam
+
+- Upload selbst sollte nach lokaler Speicherung fertig sein; die Peer-Replikation läuft im Hintergrund.
+- Prüfe das Transfer-Center, ob Replikation noch läuft.
+- Bei Relay-Peers sind kleinere Pakete absichtlich sicherer, aber langsamer.
+- Für große Datenmengen sind direkte Peers, VPN oder Portfreigabe schneller als Shared-PHP-Relay.
+
+### zstd-Chunks können auf einem Peer nicht gelesen werden
+
+- Auf allen Peers `zstandard` installieren oder `algorithm: zlib` nutzen.
+- Bereits vorhandene zstd-Chunks benötigen zum Lesen weiterhin zstd-Unterstützung.
+
+## Sicherheitshinweise
+
+- Die Web-UI hat noch keine vollständige Benutzer-Authentifizierung.
+- `web.host: 0.0.0.0` macht die UI und Peer-API im LAN erreichbar.
+- Stelle die Web-UI nicht ungeschützt ins Internet.
+- Nutze Firewall, VPN oder Reverse Proxy mit Authentifizierung.
+- Private Node-Keys niemals teilen.
+- Relay-URLs sollten nach Möglichkeit HTTPS verwenden.
+- Temporäre externe Links sind tokenbasiert, aber jeder mit Link kann bis zum Ablauf herunterladen.
+
+## Entwicklungsstatus und Grenzen
+
+Bewusst noch nicht vollständig enthalten:
+
+- kein vollständiges DHT
+- kein Erasure Coding
+- keine echte Ende-zu-Ende-Dateiverschlüsselung
+- keine vollständige Benutzer-/Rechteverwaltung für die Web-UI
+- kein WebRTC/QUIC-Hole-Punching
+- kein permanenter Reverse-Tunnel für externe Links
+
+Die Codebasis ist modular aufgebaut, damit spätere Transport-, Index- und Verschlüsselungsprovider ergänzt werden können.
+
+## Modulübersicht
+
+| Pfad | Aufgabe |
+| --- | --- |
+| `dcloud_client/main.py` | Startpunkt, Logging, Konfiguration, Dienste initialisieren |
+| `dcloud_client/config.py` | YAML-Konfiguration laden, normalisieren und speichern |
+| `dcloud_client/identity.py` | Ed25519-Identität und Node-ID |
+| `dcloud_client/crypto.py` | Hashing, Signaturen, Base64-Helfer |
+| `dcloud_client/storage.py` | Chunk-Speicher, adaptive Komprimierung, atomare Writes |
+| `dcloud_client/manifests.py` | Signierte Manifeste, Placement, Restore, Löschung |
+| `dcloud_client/network/udp_discovery.py` | UDP-Discovery, Gossip, NAT-Parent-Weiterleitung |
+| `dcloud_client/network/http_relay.py` | PHP-Relay-Client, Forwarder, Mailbox, externe Streams |
+| `dcloud_client/network/p2p_storage.py` | Peer-Transfers, Batch-/Pack-Upload und Download |
+| `dcloud_client/network/smb_server.py` | optionaler eingebetteter SMB-Server |
+| `dcloud_client/network/peers.py` | Peer-Liste, Deduplizierung, Deaktivierung |
+| `dcloud_client/web/app.py` | Flask-Routen für Dashboard, Dateien, Chat, P2P-API |
+| `dcloud_client/web/templates/dashboard.html` | Desktop-Dashboard, JavaScript und UI |
+| `relay/dcloud_relay.php` | PHP-Relay für Shared Hosting/Webserver |
+| `relay/dcloud_relay_server.py` | Python-Relay-Alternative für Server/VPS |
+| `scripts/install_dcloud_service.sh` | Linux/OpenWrt/Windows-Bootstrap |
+| `scripts/install_dcloud_service_mac.sh` | macOS-launchd-Installer |
+
+## Lizenz
+
+Siehe `LICENSE`.
