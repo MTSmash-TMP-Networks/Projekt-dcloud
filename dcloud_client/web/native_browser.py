@@ -21,7 +21,6 @@ try:  # pragma: no cover - only available in the desktop runtime
     from PySide6.QtGui import QAction
     from PySide6.QtWidgets import (
         QApplication,
-        QFileDialog,
         QLineEdit,
         QMainWindow,
         QMessageBox,
@@ -87,7 +86,7 @@ class DcloudWebPage(QWebEnginePage):
 
 
 class BrowserWindow(QMainWindow):
-    def __init__(self, *, app_url: str, initial_url: str, profile_dir: str | None = None, browser_token: str = "") -> None:
+    def __init__(self, *, app_url: str, initial_url: str, profile_dir: str | None = None, browser_token: str = "", download_dir: str | None = None) -> None:
         super().__init__()
         self.app_url = app_url.rstrip("/")
         self.home_url = initial_url
@@ -97,6 +96,8 @@ class BrowserWindow(QMainWindow):
 
         profile_path = Path(profile_dir).expanduser() if profile_dir else Path.home() / ".dcloud" / "browser_profile"
         profile_path.mkdir(parents=True, exist_ok=True)
+        self.download_dir = Path(download_dir).expanduser() if download_dir else Path.home() / "Downloads"
+        self.download_dir.mkdir(parents=True, exist_ok=True)
         self.profile = QWebEngineProfile("dcloud-browser", self)
         self.profile.setPersistentStoragePath(str(profile_path))
         self.profile.setCachePath(str(profile_path / "cache"))
@@ -180,15 +181,19 @@ class BrowserWindow(QMainWindow):
 
     def _handle_download(self, download: QWebEngineDownloadRequest) -> None:
         suggested = download.suggestedFileName() or "download"
-        target, _ = QFileDialog.getSaveFileName(self, "Download speichern", suggested)
-        if not target:
-            download.cancel()
-            return
-        target_path = Path(target)
+        target_path = self.download_dir / suggested
+        if target_path.exists():
+            stem = target_path.stem or "download"
+            suffix = target_path.suffix
+            for index in range(2, 10000):
+                candidate = self.download_dir / f"{stem}-{index}{suffix}"
+                if not candidate.exists():
+                    target_path = candidate
+                    break
         download.setDownloadDirectory(str(target_path.parent))
         download.setDownloadFileName(target_path.name)
         download.accept()
-        self.statusBar().showMessage(f"Download gestartet: {target_path.name}", 5000)
+        self.statusBar().showMessage(f"Download gespeichert in {target_path.parent}: {target_path.name}", 5000)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -197,6 +202,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--url", default="", help="Initial URL")
     parser.add_argument("--profile-dir", default="", help="Persistent browser profile/cache directory")
     parser.add_argument("--browser-token", default="", help="Ephemeral local access token for dcloud browser proxy")
+    parser.add_argument("--download-dir", default="", help="Download directory for native browser downloads")
     return parser
 
 
@@ -206,7 +212,7 @@ def main() -> int:
         os.environ.setdefault("QTWEBENGINE_DISABLE_SANDBOX", "1")
     app = QApplication(sys.argv)
     initial_url = _normalize_url(args.url, args.app_url)
-    window = BrowserWindow(app_url=args.app_url, initial_url=initial_url, profile_dir=args.profile_dir or None, browser_token=args.browser_token or "")
+    window = BrowserWindow(app_url=args.app_url, initial_url=initial_url, profile_dir=args.profile_dir or None, browser_token=args.browser_token or "", download_dir=args.download_dir or None)
     window.show()
     return app.exec()
 

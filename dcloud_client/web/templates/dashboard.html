@@ -1145,6 +1145,7 @@
       network: {{ network_json | tojson }},
       webHosting: {{ web_hosting_json | tojson }},
       webFiles: {{ web_files_json | tojson }},
+      browserDownloads: {{ browser_downloads_json | tojson }},
       peers: {{ peers_json | tojson }},
       disabledPeers: {{ disabled_peers_json | tojson }},
       fileCount: {{ manifests | length | tojson }},
@@ -1156,6 +1157,7 @@
     const DEFAULT_FOLDER = {{ default_folder | tojson }};
     const SHARED_FOLDER = {{ shared_folder | tojson }};
     const WEB_FOLDER = "web";
+    const DOWNLOADS_FOLDER = "Downloads";
 
     (function(){
       "use strict";
@@ -1306,14 +1308,27 @@
         const normalized = normalizeFolderPath(path || WEB_FOLDER);
         return normalized === WEB_FOLDER || normalized.startsWith(`${WEB_FOLDER}/`);
       }
+      function isDownloadsPath(path){
+        const normalized = normalizeFolderPath(path || DOWNLOADS_FOLDER);
+        return normalized === DOWNLOADS_FOLDER || normalized.startsWith(`${DOWNLOADS_FOLDER}/`);
+      }
       function webRelativePath(path){
         const normalized = normalizeFolderPath(path || WEB_FOLDER);
         if(normalized === WEB_FOLDER) return "";
         return normalized.startsWith(`${WEB_FOLDER}/`) ? normalized.slice(WEB_FOLDER.length + 1) : normalized;
       }
+      function downloadsRelativePath(path){
+        const normalized = normalizeFolderPath(path || DOWNLOADS_FOLDER);
+        if(normalized === DOWNLOADS_FOLDER) return "";
+        return normalized.startsWith(`${DOWNLOADS_FOLDER}/`) ? normalized.slice(DOWNLOADS_FOLDER.length + 1) : normalized;
+      }
       function webExplorerPath(relative){
         const rel = String(relative || "").replace(/\\/g, "/").replace(/^\/+|\/+$/g, "");
         return rel ? `${WEB_FOLDER}/${rel}` : WEB_FOLDER;
+      }
+      function downloadsExplorerPath(relative){
+        const rel = String(relative || "").replace(/\\/g, "/").replace(/^\/+|\/+$/g, "");
+        return rel ? `${DOWNLOADS_FOLDER}/${rel}` : DOWNLOADS_FOLDER;
       }
       function pathJoin(parent, child){
         const clean = String(child || "").trim().replace(/\\/g, "/");
@@ -1399,6 +1414,29 @@
             previewUrl: file.siteUrl || `/dcloud-site/${encodeURIComponent(file.path || "")}`
           });
         });
+        const browserDownloads = appState.browserDownloads || {};
+        ingestFolderPath(DOWNLOADS_FOLDER);
+        (browserDownloads.folders || []).forEach(folder => ingestFolderPath(downloadsExplorerPath(folder)));
+        (browserDownloads.files || []).forEach(file => {
+          const folderPath = downloadsExplorerPath(file.folder || "");
+          ingestFolderPath(folderPath);
+          const node = ensureNode(folderPath);
+          node.files.push({
+            id: `browser-download:${file.path}`,
+            browserDownload: true,
+            name: file.name || String(file.path || "").split("/").pop() || "download",
+            path: file.path || file.name || "",
+            folder: folderPath,
+            size: Number(file.size || 0),
+            chunks: 1,
+            owner: false,
+            modifiedAt: file.modifiedAt || "",
+            mimeType: file.mimeType || "",
+            downloadUrl: file.downloadUrl || `/api/browser/downloads/file?path=${encodeURIComponent(file.path || "")}`,
+            previewUrl: file.previewUrl || `/api/browser/downloads/file?inline=1&path=${encodeURIComponent(file.path || "")}`,
+            deleteUrl: file.deleteUrl || "/api/browser/downloads/delete"
+          });
+        });
         fsMap.forEach(node => {
           node.folders.sort((a,b)=>a.localeCompare(b));
           node.files.sort((a,b)=>a.name.localeCompare(b.name));
@@ -1478,7 +1516,7 @@
         if(/\.(txt|md|log|json|xml|ya?ml)$/.test(name)) return "text";
         return "unknown";
       }
-      function isPreviewable(file){ return previewKind(file) !== "unknown"; }
+      function isPreviewable(file){ return previewKind(file) !== "unknown" && !(file && file.browserDownload && previewKind(file) === "sheet"); }
       function openFile(file){
         if(!file) return;
         if(file.web){
@@ -1631,6 +1669,14 @@
         browserNativeStatus.textContent = message;
         browserNativeStatus.dataset.type = type;
       }
+      window.addEventListener("message", event => {
+        const data = event && event.data ? event.data : null;
+        if(!data || data.type !== "dcloud-browser-download-saved") return;
+        refreshState().then(() => {
+          showToast(`Download gespeichert: ${data.fileName || "Datei"}`, "success");
+          if(!windows.explorer.hidden && isDownloadsPath(explorerPath)) renderExplorer();
+        }).catch(() => {});
+      });
       function updateBrowserMeta(){
         const hosting = appState.webHosting || {};
         const localHost = document.getElementById("browser-local-host");
@@ -2178,7 +2224,7 @@
         const root = ensureNode(VROOT);
         root.folders.forEach(folderName => {
           const fullPath = pathJoin(VROOT, folderName);
-          const glyph = isWebPath(fullPath) ? "🌍" : (normalizeFolderPath(fullPath) === SHARED_FOLDER ? "🤝" : "📁");
+          const glyph = isWebPath(fullPath) ? "🌍" : (isDownloadsPath(fullPath) ? "⬇️" : (normalizeFolderPath(fullPath) === SHARED_FOLDER ? "🤝" : "📁"));
           desktopArea.appendChild(makeDesktopItem({ glyph, label:folderName, folder:fullPath }));
         });
       }
@@ -2197,7 +2243,7 @@
           button.type = "button";
           button.className = "nav-item" + (explorerPath === path ? " active" : "");
           const level = Math.max(0, path.split("/").length - 1);
-          const navIcon = isWebPath(path) ? "🌍" : (normalizeFolderPath(path) === SHARED_FOLDER ? "🤝" : "📁");
+          const navIcon = isWebPath(path) ? "🌍" : (isDownloadsPath(path) ? "⬇️" : (normalizeFolderPath(path) === SHARED_FOLDER ? "🤝" : "📁"));
           button.textContent = `${"  ".repeat(level)}${navIcon} ${path.split("/").pop()}`;
           button.title = path;
           button.onclick = () => openExplorerAt(path);
@@ -2246,10 +2292,11 @@
         document.getElementById("explorer-back").disabled = explorerPath === VROOT;
         const readOnlySharedPath = isSharedSystemPath(explorerPath);
         const webPath = isWebPath(explorerPath);
+        const downloadsPath = isDownloadsPath(explorerPath);
         const uploadBtn = document.getElementById("explorer-upload");
         const newFolderBtn = document.getElementById("explorer-newfolder");
-        if(uploadBtn) uploadBtn.disabled = readOnlySharedPath;
-        if(newFolderBtn) newFolderBtn.disabled = readOnlySharedPath;
+        if(uploadBtn) uploadBtn.disabled = readOnlySharedPath || downloadsPath;
+        if(newFolderBtn) newFolderBtn.disabled = readOnlySharedPath || downloadsPath;
         renderBreadcrumbs();
         renderExplorerNav();
         main.innerHTML = "";
@@ -2259,7 +2306,7 @@
         title.textContent = displayPath(explorerPath);
         const hint = document.createElement("span");
         hint.className = "tile-meta";
-        hint.textContent = isWebPath(explorerPath) ? "Dieser Ordner liegt direkt in storage/web. HTML/PHP hochladen und Textdateien bearbeiten." : "Doppelklick öffnet, Rechtsklick zeigt Aktionen";
+        hint.textContent = isWebPath(explorerPath) ? "Dieser Ordner liegt direkt in storage/web. HTML/PHP hochladen und Textdateien bearbeiten." : (isDownloadsPath(explorerPath) ? "Browser-Downloads werden hier in storage/Downloads gespeichert." : "Doppelklick öffnet, Rechtsklick zeigt Aktionen");
         head.append(title, hint);
         updateExplorerViewButtons();
         const grid = document.createElement("div");
@@ -2282,7 +2329,7 @@
           meta.textContent = `${childNode.folders.length} Ordner · ${childNode.files.length} Datei(en)`;
           const kind = document.createElement("span");
           kind.className = "tile-access";
-          kind.textContent = isWebPath(fullPath) ? "Webseite / storage/web" : (normalizeFolderPath(fullPath) === SHARED_FOLDER ? "Eingehende Freigaben" : "Ordner");
+          kind.textContent = isWebPath(fullPath) ? "Webseite / storage/web" : (isDownloadsPath(fullPath) ? "Browser-Downloads / storage/Downloads" : (normalizeFolderPath(fullPath) === SHARED_FOLDER ? "Eingehende Freigaben" : "Ordner"));
           tile.append(name, meta, kind);
           tile.addEventListener("dblclick", () => openExplorerAt(fullPath));
           tile.addEventListener("click", () => selectExplorerTile(tile, { kind:"folder", path:fullPath }));
@@ -2307,11 +2354,13 @@
           const desiredMirrors = Number(file.placement?.desired_replicas || 0);
           const distribution = file.remoteStorageCount > 0 ? ` · verteilt auf ${file.remoteStorageCount + 1} Knoten` : " · lokal";
           const raidInfo = desiredMirrors > 1 ? ` · RAID‑1 ${desiredMirrors}x` : "";
-          meta.textContent = file.web ? `${formatBytes(file.size)} · storage/web${file.modifiedAt ? " · geändert " + formatDateTime(file.modifiedAt) : ""}` : `${formatBytes(file.size)} · ${file.chunks} Chunk(s)${distribution}${raidInfo}`;
+          meta.textContent = file.web ? `${formatBytes(file.size)} · storage/web${file.modifiedAt ? " · geändert " + formatDateTime(file.modifiedAt) : ""}` : (file.browserDownload ? `${formatBytes(file.size)} · storage/Downloads${file.modifiedAt ? " · gespeichert " + formatDateTime(file.modifiedAt) : ""}` : `${formatBytes(file.size)} · ${file.chunks} Chunk(s)${distribution}${raidInfo}`);
           const access = document.createElement("span");
           access.className = "tile-access";
           if(file.web){
             access.textContent = file.editable ? "✏️ Web-Datei · bearbeitbar" : (file.tooLargeToEdit ? "🌍 Web-Datei · zu groß für Editor" : "🌍 Web-Datei");
+          }else if(file.browserDownload){
+            access.textContent = "⬇️ Browser-Download";
           }else if(file.incomingShare){
             access.innerHTML = `<span class="incoming-share-pill">🤝 Freigabe von Peer</span>`;
           }else{
@@ -2457,10 +2506,12 @@
         const isFile = selectedTarget.kind === "file";
         const isFolder = selectedTarget.kind === "folder";
         const isWebFile = isFile && !!selectedTarget.file.web;
-        const isOwnerFile = isFile && selectedTarget.file.owner && !isWebFile;
+        const isBrowserDownloadFile = isFile && !!selectedTarget.file.browserDownload;
+        const isOwnerFile = isFile && selectedTarget.file.owner && !isWebFile && !isBrowserDownloadFile;
         const selectedFolderPath = isFolder ? normalizeFolderPath(selectedTarget.path) : "";
         const isWebFolder = isFolder && isWebPath(selectedFolderPath);
-        const isDeletableFolder = isFolder && ((isWebFolder && selectedFolderPath !== WEB_FOLDER) || (![DEFAULT_FOLDER, SHARED_FOLDER].includes(selectedFolderPath) && !isSharedSystemPath(selectedFolderPath)));
+        const isDownloadsFolder = isFolder && isDownloadsPath(selectedFolderPath);
+        const isDeletableFolder = isFolder && ((isWebFolder && selectedFolderPath !== WEB_FOLDER) || (isDownloadsFolder && selectedFolderPath !== DOWNLOADS_FOLDER) || (![DEFAULT_FOLDER, SHARED_FOLDER, DOWNLOADS_FOLDER].includes(selectedFolderPath) && !isSharedSystemPath(selectedFolderPath) && !isDownloadsFolder));
         document.getElementById("ctxOpen").hidden = !(isFile || isFolder);
         const previewBtn = document.getElementById("ctxPreview");
         if(previewBtn) previewBtn.hidden = !(isFile && !isWebFile && isPreviewable(selectedTarget.file));
@@ -2473,16 +2524,18 @@
         const moveFolderBtn = document.getElementById("ctxMoveFolder");
         if(moveFolderBtn) moveFolderBtn.hidden = !isOwnerFile;
         document.getElementById("ctxMovePeer").hidden = !isOwnerFile;
-        document.getElementById("ctxDelete").hidden = !(isOwnerFile || isWebFile || isDeletableFolder);
+        document.getElementById("ctxDelete").hidden = !(isOwnerFile || isWebFile || isBrowserDownloadFile || isDeletableFolder);
         const activeFolderForActions = isFolder ? selectedFolderPath : (windows.explorer.hidden ? DEFAULT_FOLDER : explorerPath);
-        const writeIntoSharedSystemFolder = isSharedSystemPath(activeFolderForActions);
+        const writeIntoSharedSystemFolder = isSharedSystemPath(activeFolderForActions) || isDownloadsPath(activeFolderForActions);
         document.getElementById("ctxUpload").hidden = writeIntoSharedSystemFolder;
         document.getElementById("ctxNewFolder").hidden = writeIntoSharedSystemFolder;
         const share = document.getElementById("ctxShare").querySelector("span");
         if(isOwnerFile) share.textContent = selectedTarget.file.shared ? "Freigabe deaktivieren" : "Freigeben an Peer…";
         const deleteLabel = document.getElementById("ctxDelete").querySelector("span");
         if(isWebFile) deleteLabel.textContent = "Web-Datei löschen";
+        else if(isBrowserDownloadFile) deleteLabel.textContent = "Download löschen";
         else if(isWebFolder) deleteLabel.textContent = "Web-Ordner löschen";
+        else if(isDownloadsFolder) deleteLabel.textContent = "Download-Ordner löschen";
         else if(isDeletableFolder) deleteLabel.textContent = "Ordner löschen";
         else if(isOwnerFile) deleteLabel.textContent = "Datei löschen";
         else deleteLabel.textContent = "Löschen";
@@ -2958,6 +3011,7 @@
       }
       async function startDownload(file){
         if(file && file.web){ window.open(file.downloadUrl || localWebUrlForFile(file), "_blank", "noopener"); return; }
+        if(file && file.browserDownload){ window.open(file.downloadUrl || `/api/browser/downloads/file?path=${encodeURIComponent(file.path || "")}`, "_blank", "noopener"); return; }
         if(!file || !file.id) return;
         showDownload(file);
         const response = await fetch(`/api/downloads/${encodeURIComponent(file.id)}/prepare`, {
@@ -3131,7 +3185,23 @@
         showToast(copied ? `${linkMode} kopiert · gültig ${expiryText}` : `${linkMode} erstellt · gültig ${expiryText}`, "success");
       }
       async function deleteFile(file){
-        if(!confirm(`Datei wirklich löschen?\n${file.name}`)) return;
+        if(file && file.browserDownload){
+          if(!confirm(`Download wirklich löschen?
+${file.name}`)) return;
+          const response = await fetch(file.deleteUrl || "/api/browser/downloads/delete", {
+            method:"POST",
+            headers:{ "X-Requested-With":"XMLHttpRequest", "Content-Type":"application/json", "Accept":"application/json" },
+            body:JSON.stringify({ path:file.path })
+          });
+          const payload = await response.json();
+          if(!response.ok || !payload.ok) throw new Error(payload.message || "Download konnte nicht gelöscht werden");
+          if(payload.state) applyState(payload.state);
+          selectedTarget = { kind:"desktop" };
+          showToast(payload.message || "Download gelöscht", "success");
+          return;
+        }
+        if(!confirm(`Datei wirklich löschen?
+${file.name}`)) return;
         await ajaxPost(file.deleteUrl, { next:"/" });
         selectedTarget = { kind:"desktop" };
       }
@@ -3140,6 +3210,26 @@
         if(isWebPath(folderPath)){
           await deleteWebTarget({ kind:"folder", path:folderPath });
           openExplorerAt(parentPath(folderPath));
+          return;
+        }
+        if(isDownloadsPath(folderPath)){
+          if(folderPath === DOWNLOADS_FOLDER){
+            showToast("Der Downloads-Hauptordner kann nicht gelöscht werden", "warning");
+            return;
+          }
+          if(!confirm(`Download-Ordner wirklich löschen?
+${folderPath}`)) return;
+          const response = await fetch("/api/browser/downloads/delete", {
+            method:"POST",
+            headers:{ "X-Requested-With":"XMLHttpRequest", "Content-Type":"application/json", "Accept":"application/json" },
+            body:JSON.stringify({ path:downloadsRelativePath(folderPath) })
+          });
+          const payload = await response.json();
+          if(!response.ok || !payload.ok) throw new Error(payload.message || "Download-Ordner konnte nicht gelöscht werden");
+          if(payload.state) applyState(payload.state);
+          selectedTarget = { kind:"desktop" };
+          openExplorerAt(parentPath(folderPath));
+          showToast(payload.message || "Download-Ordner gelöscht", "success");
           return;
         }
         if(folderPath === DEFAULT_FOLDER){
@@ -3819,11 +3909,14 @@ ${file.name}`)) return;
         if(event.key === "Delete" && selectedTarget.kind === "file" && selectedTarget.file.web){
           event.preventDefault();
           deleteWebTarget(selectedTarget).catch(error => showToast(error.message, "error"));
+        }else if(event.key === "Delete" && selectedTarget.kind === "file" && selectedTarget.file.browserDownload){
+          event.preventDefault();
+          deleteFile(selectedTarget.file).catch(error => showToast(error.message, "error"));
         }else if(event.key === "Delete" && selectedTarget.kind === "file" && selectedTarget.file.owner){
           event.preventDefault();
           deleteFile(selectedTarget.file).catch(error => showToast(error.message, "error"));
         }
-        if(event.key === "Delete" && selectedTarget.kind === "folder" && ![DEFAULT_FOLDER, SHARED_FOLDER].includes(normalizeFolderPath(selectedTarget.path))){
+        if(event.key === "Delete" && selectedTarget.kind === "folder" && ![DEFAULT_FOLDER, SHARED_FOLDER, DOWNLOADS_FOLDER].includes(normalizeFolderPath(selectedTarget.path))){
           event.preventDefault();
           deleteFolder(selectedTarget.path).catch(error => showToast(error.message, "error"));
         }

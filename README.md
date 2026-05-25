@@ -22,8 +22,9 @@ dcloud ist ein Python-basierter Storage-Client mit Web-Dashboard im Desktop-Stil
 - Temporäre externe Download-Links mit maximal 60 Minuten Laufzeit
 - Reverse-Mailbox-Download über Relay, wenn der Node von außen nicht direkt erreichbar ist
 - Peer-Chat mit ungelesen-Badge, Emojis, Bildversand und Datei-Teilen
-- Interner Dashboard-Browser mit Server-Proxy, `peername.dcloud`-Auflösung, normalem Webzugriff und lokalem `storage/web`-Hosting; optional nativer Qt-WebEngine-Browser für lokale Desktop-Nutzung
+- Interner Dashboard-Browser mit Server-Proxy, `peername.dcloud`-Auflösung, normalem Webzugriff, lokalem `storage/web`-Hosting und Download-Ablage in `storage/Downloads`; optional nativer Qt-WebEngine-Browser für lokale Desktop-Nutzung
 - Lokaler Web-Ordner `storage/web` als Datei-Explorer-Spezialordner `web`, inkl. Upload, Unterordnern, Texteditor und optionaler PHP-Ausführung über `php-cgi`/`php`
+- Standardordner `storage/Downloads` als Datei-Explorer-Spezialordner **Downloads**; Downloads aus dem Dashboard-Browser werden dort serverseitig gespeichert
 - Optionaler eingebetteter SMB-Server
 - OpenWrt-, Linux-, macOS-, Windows- und Windows-Docker-Installationspfade
 - Auto-Update-Skripte für systemd, launchd und OpenWrt-Cron
@@ -97,6 +98,10 @@ http://peername.dcloud/
 Aktive Peers werden ebenfalls über ihre dcloud-Namen aufgelöst. Bei direkten LAN-Peers lädt der Browser deren `/dcloud-site`-Route direkt; bei Relay-Peers wird zuerst der schnelle Relay-Forwarder und danach die Relay-Mailbox verwendet. Wenn der schnelle Relay-Forwarder eine generische Server-Fehlerseite liefert, fällt dcloud jetzt automatisch auf die Mailbox-Variante zurück. Dafür muss auf dem Relay-Server die aktuelle `relay/dcloud_relay.php` aus diesem Paket liegen, weil ältere Relay-Dateien `/dcloud-site` blockieren. Das Betriebssystem-DNS wird dadurch nicht verändert: Die `.dcloud`-Namen sind bewusst im dcloud-Browser der App aufgelöst.
 
 Die Webspace-Route `/dcloud-site` wird ohne Weiterleitung und mit automatischer Initialisierung von `storage/web/index.html` ausgeliefert. Interne Fehler werden als Klartext mit Ursache zurückgegeben, damit im Browser nicht nur eine generische Flask-Seite wie „Internal Server Error“ erscheint.
+
+### Browser-Downloads
+
+Der Dashboard-Browser speichert echte Datei-Downloads serverseitig in `storage/Downloads`. Der Ordner wird beim Start automatisch erstellt und erscheint von Anfang an im dcloud Datei-Explorer als **Downloads**. Dateien aus diesem Ordner können über den Datei-Explorer geöffnet, heruntergeladen oder gelöscht werden.
 
 Der Button **Nativ** bleibt als optionale lokale Desktop-Funktion erhalten. Dafür muss `PySide6` bei Bedarf separat installiert werden (`pip install PySide6`). Auf headless Servern oder bei externem Dashboard-Zugriff ist der neue Server-Proxy-Modus der passende Standard, weil er komplett im Web-Dashboard sichtbar bleibt. Hinweis: Ein serverseitig übersetzter Webmodus kann sehr viele moderne Webseiten gut anzeigen, ist aber kein vollständiger Ersatz für Chrome/Firefox. Seiten mit starkem Bot-Schutz, komplexen Service-Workern oder hart codierten Origin-Prüfungen können weiterhin eingeschränkt sein.
 

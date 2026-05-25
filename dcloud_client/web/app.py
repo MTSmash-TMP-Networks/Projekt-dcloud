@@ -74,6 +74,12 @@ class PeerConnector(Protocol):
 
 
 WEB_EXPLORER_FOLDER = "web"
+BROWSER_DOWNLOADS_FOLDER = "Downloads"
+BROWSER_DOWNLOAD_CONTENT_EXTENSIONS = {
+    ".7z", ".apk", ".bin", ".bz2", ".dmg", ".doc", ".docx", ".exe", ".gz",
+    ".iso", ".msi", ".odt", ".ods", ".pdf", ".ppt", ".pptx", ".rar",
+    ".tar", ".tgz", ".txt", ".xls", ".xlsx", ".zip", ".zst",
+}
 WEB_EDITABLE_SUFFIXES = {
     ".html", ".htm", ".php", ".css", ".js", ".mjs", ".json", ".txt",
     ".md", ".xml", ".svg", ".csv", ".yml", ".yaml", ".ini", ".env",
@@ -196,6 +202,7 @@ def create_app(
     replication_queued_manifest_ids: set[str] = set()
     user_store = UserStore(chunk_store.root / "users.json")
     web_root = chunk_store.root / "web"
+    browser_downloads_root = chunk_store.root / BROWSER_DOWNLOADS_FOLDER
 
     def _is_ajax_request() -> bool:
         return request.headers.get("X-Requested-With") == "XMLHttpRequest" or request.accept_mimetypes.best == "application/json"
@@ -472,6 +479,79 @@ def create_app(
         response = jsonify(payload)
         return (response, status) if status != 200 else response
 
+    def _ensure_browser_downloads_root() -> None:
+        browser_downloads_root.mkdir(parents=True, exist_ok=True)
+
+    def _normalize_browser_download_relative(raw_path: str | None, *, allow_empty: bool = False) -> str:
+        clean = url_parse.unquote(str(raw_path or "")).split("?", 1)[0].replace("\\", "/").strip("/")
+        if clean == BROWSER_DOWNLOADS_FOLDER:
+            clean = ""
+        elif clean.startswith(f"{BROWSER_DOWNLOADS_FOLDER}/"):
+            clean = clean[len(BROWSER_DOWNLOADS_FOLDER) + 1:]
+        parts = []
+        for part in clean.split("/"):
+            part = part.strip()
+            if not part or part in {".", ".."}:
+                continue
+            if "\0" in part:
+                raise StorageError("Download-Pfad ist ungültig")
+            parts.append(part)
+        relative = "/".join(parts)
+        if not relative and not allow_empty:
+            raise StorageError("Download-Pfad fehlt")
+        return relative
+
+    def _safe_browser_download_path(raw_path: str | None, *, allow_directory: bool = False, allow_empty: bool = False) -> Path:
+        relative = _normalize_browser_download_relative(raw_path, allow_empty=allow_empty)
+        candidate = (browser_downloads_root / relative).resolve()
+        root = browser_downloads_root.resolve()
+        if candidate != root and root not in candidate.parents:
+            raise StorageError("Download-Pfad ist ungültig")
+        if not allow_directory and candidate.exists() and candidate.is_dir():
+            raise StorageError("Der angegebene Download-Pfad ist ein Ordner")
+        return candidate
+
+    def browser_downloads_payload() -> dict[str, Any]:
+        _ensure_browser_downloads_root()
+        root = browser_downloads_root.resolve()
+        folders: list[str] = []
+        files: list[dict[str, Any]] = []
+        for path in sorted(root.rglob("*"), key=lambda item: item.relative_to(root).as_posix().lower()):
+            try:
+                rel = path.relative_to(root).as_posix()
+            except ValueError:
+                continue
+            if path.is_dir():
+                folders.append(rel)
+                continue
+            if not path.is_file():
+                continue
+            stat = path.stat()
+            parent = path.parent.relative_to(root).as_posix() if path.parent != root else ""
+            quoted = url_parse.quote(rel)
+            files.append({
+                "path": rel,
+                "name": path.name,
+                "folder": parent,
+                "size": stat.st_size,
+                "modifiedAt": datetime.fromtimestamp(stat.st_mtime, timezone.utc).isoformat(),
+                "mimeType": mimetypes.guess_type(path.name)[0] or "application/octet-stream",
+                "downloadUrl": url_for("api_browser_download_file") + "?path=" + quoted,
+                "previewUrl": url_for("api_browser_download_file") + "?inline=1&path=" + quoted,
+                "deleteUrl": url_for("api_browser_download_delete"),
+            })
+        return {
+            "rootFolder": BROWSER_DOWNLOADS_FOLDER,
+            "rootPath": str(root),
+            "folders": folders,
+            "files": files,
+        }
+
+    def _browser_download_json_state(message: str, *, ok: bool = True, status: int = 200) -> tuple[Response, int] | Response:
+        payload = {"ok": ok, "message": message, "browserDownloads": browser_downloads_payload(), "state": state_payload()}
+        response = jsonify(payload)
+        return (response, status) if status != 200 else response
+
     def _browser_url(value: str | None) -> str:
         raw = str(value or "").strip()
         if not raw:
@@ -671,11 +751,120 @@ def create_app(
             text += injection
         return text.encode("utf-8")
 
+    def _browser_header_value(headers: dict[str, str], name: str) -> str:
+        wanted = name.lower()
+        for key, value in (headers or {}).items():
+            if str(key).lower() == wanted:
+                return str(value)
+        return ""
+
+    def _browser_request_is_navigation() -> bool:
+        dest = request.headers.get("Sec-Fetch-Dest", "").lower()
+        mode = request.headers.get("Sec-Fetch-Mode", "").lower()
+        accept = request.headers.get("Accept", "").lower()
+        return dest in {"", "document", "iframe", "empty"} or mode == "navigate" or "text/html" in accept
+
+    def _browser_download_filename(headers: dict[str, str], final_url: str) -> str:
+        disposition = _browser_header_value(headers, "Content-Disposition")
+        filename = ""
+        star_match = re.search(r"filename\*\s*=\s*(?:UTF-8''|utf-8'')?([^;]+)", disposition, flags=re.IGNORECASE)
+        if star_match:
+            filename = url_parse.unquote(star_match.group(1).strip().strip('"'))
+        if not filename:
+            plain_match = re.search(r'filename\s*=\s*(?:"([^"]+)"|([^;]+))', disposition, flags=re.IGNORECASE)
+            if plain_match:
+                filename = (plain_match.group(1) or plain_match.group(2) or "").strip().strip('"')
+        if not filename:
+            parsed = url_parse.urlsplit(final_url)
+            filename = Path(url_parse.unquote(parsed.path)).name
+        return secure_filename(filename) or f"download-{datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S')}.bin"
+
+    def _browser_response_should_save_download(headers: dict[str, str], final_url: str) -> bool:
+        if str(request.args.get("browser_download") or "").lower() in {"1", "true", "yes"}:
+            return True
+        disposition = _browser_header_value(headers, "Content-Disposition").lower()
+        if "attachment" in disposition:
+            return True
+        if not _browser_request_is_navigation():
+            return False
+        if ("filename=" in disposition or "filename*=" in disposition) and "inline" not in disposition:
+            return True
+        content_type = _browser_header_value(headers, "Content-Type").split(";", 1)[0].strip().lower()
+        inline_types = {
+            "text/html", "text/plain", "text/css", "text/javascript", "application/javascript",
+            "application/json", "application/xml", "image/svg+xml", "application/xhtml+xml",
+        }
+        if content_type in inline_types or content_type.startswith("image/") or content_type.startswith("audio/") or content_type.startswith("video/") or content_type.startswith("font/"):
+            return False
+        extension = Path(url_parse.unquote(url_parse.urlsplit(final_url).path)).suffix.lower()
+        if extension in BROWSER_DOWNLOAD_CONTENT_EXTENSIONS:
+            return True
+        return content_type in {"application/octet-stream", "application/x-msdownload", "application/x-zip-compressed"}
+
+    def _unique_browser_download_path(file_name: str) -> Path:
+        _ensure_browser_downloads_root()
+        safe_name = secure_filename(file_name) or "download.bin"
+        target = browser_downloads_root / safe_name
+        if not target.exists():
+            return target
+        stem = Path(safe_name).stem or "download"
+        suffix = Path(safe_name).suffix
+        for index in range(2, 10000):
+            candidate = browser_downloads_root / f"{stem}-{index}{suffix}"
+            if not candidate.exists():
+                return candidate
+        return browser_downloads_root / f"{stem}-{uuid4().hex[:8]}{suffix}"
+
+    def _save_browser_download_stream(stream: Any, headers: dict[str, str], final_url: str) -> Path:
+        output = _unique_browser_download_path(_browser_download_filename(headers, final_url))
+        tmp = output.with_name(f".{output.name}.{uuid4().hex}.tmp")
+        total = 0
+        try:
+            with tmp.open("wb") as handle:
+                while True:
+                    chunk = stream.read(1024 * 1024)
+                    if not chunk:
+                        break
+                    total += len(chunk)
+                    handle.write(chunk)
+            tmp.replace(output)
+        finally:
+            tmp.unlink(missing_ok=True)
+        return output
+
+    def _save_browser_download_bytes(body: bytes, headers: dict[str, str], final_url: str) -> Path:
+        output = _unique_browser_download_path(_browser_download_filename(headers, final_url))
+        output.write_bytes(body)
+        return output
+
+    def _browser_download_saved_response(path: Path, source_url: str) -> Response:
+        rel = path.relative_to(browser_downloads_root.resolve()).as_posix()
+        file_name = path.name
+        download_url = url_for("api_browser_download_file") + "?path=" + url_parse.quote(rel)
+        preview_url = url_for("api_browser_download_file") + "?inline=1&path=" + url_parse.quote(rel)
+        html_body = f"""<!doctype html>
+<html lang="de">
+<head><meta charset="utf-8"><title>Download gespeichert</title>
+<style>body{{font-family:system-ui,-apple-system,Segoe UI,sans-serif;background:#eef4ff;color:#162033;display:grid;place-items:center;min-height:100vh;margin:0}}main{{max-width:640px;background:white;border-radius:22px;padding:32px;box-shadow:0 20px 60px rgba(20,40,80,.16)}}code{{background:#edf2ff;padding:.15rem .35rem;border-radius:.35rem}}a{{color:#0b63ce}}</style></head>
+<body><main>
+<h1>Download gespeichert</h1>
+<p><strong>{html.escape(file_name)}</strong> wurde in <code>{html.escape(BROWSER_DOWNLOADS_FOLDER)}</code> gespeichert.</p>
+<p><a href="{html.escape(preview_url, quote=True)}">Öffnen</a> · <a href="{html.escape(download_url, quote=True)}">Als Datei herunterladen</a></p>
+<p style="color:#64748b;font-size:.92rem">Quelle: {html.escape(source_url)}</p>
+<script>try{{window.parent.postMessage({{type:'dcloud-browser-download-saved',fileName:{json.dumps(file_name)},folder:{json.dumps(BROWSER_DOWNLOADS_FOLDER)}}}, '*');}}catch(e){{}}</script>
+</main></body></html>"""
+        response = Response(html_body, status=200, content_type="text/html; charset=utf-8")
+        response.headers["Cache-Control"] = "no-store"
+        return response
+
     def _proxy_response_from_bytes(body: bytes, *, status: int = 200, headers: dict[str, str] | None = None, base_url: str = "", native_mode: bool = False) -> Response:
         source_headers = headers or {}
         content_type = source_headers.get("Content-Type") or source_headers.get("content-type") or "application/octet-stream"
         out_body = body
         lower_content_type = content_type.lower()
+        if base_url and _browser_response_should_save_download(source_headers, base_url):
+            output = _save_browser_download_bytes(body, source_headers, base_url)
+            return _browser_download_saved_response(output, base_url)
         if "text/html" in lower_content_type and base_url:
             out_body = _rewrite_browser_html(body, base_url, native_mode=native_mode)
             content_type = "text/html; charset=utf-8"
@@ -726,9 +915,12 @@ def create_app(
         )
         try:
             with browser_http_opener.open(req, timeout=18) as remote:
-                body = remote.read(16 * 1024 * 1024)
                 headers = {str(k): str(v) for k, v in remote.headers.items()}
                 final_url = str(remote.geturl() or url)
+                if _browser_response_should_save_download(headers, final_url):
+                    output = _save_browser_download_stream(remote, headers, final_url)
+                    return _browser_download_saved_response(output, final_url)
+                body = remote.read(16 * 1024 * 1024)
                 return _proxy_response_from_bytes(body, status=int(remote.status), headers=headers, base_url=final_url, native_mode=native_mode)
         except url_error.HTTPError as exc:
             body = exc.read(2 * 1024 * 1024)
@@ -815,10 +1007,15 @@ def create_app(
             return Response(str(exc), status=404, content_type="text/plain; charset=utf-8")
         if target_kind == "local":
             response = _serve_local_web_path(parsed.path or "/", query_string=parsed.query)
+            response_headers = dict(response.headers)
             if response.content_type and "text/html" in response.content_type.lower():
                 response.direct_passthrough = False
                 body = response.get_data()
-                return _proxy_response_from_bytes(body, status=response.status_code, headers=dict(response.headers), base_url=url, native_mode=native_mode)
+                return _proxy_response_from_bytes(body, status=response.status_code, headers=response_headers, base_url=url, native_mode=native_mode)
+            if _browser_response_should_save_download(response_headers, url):
+                response.direct_passthrough = False
+                body = response.get_data()
+                return _proxy_response_from_bytes(body, status=response.status_code, headers=response_headers, base_url=url, native_mode=native_mode)
             return response
         return _fetch_peer_dcloud_site(peer, parsed, url, native_mode=native_mode)
 
@@ -855,6 +1052,8 @@ def create_app(
             str(profile_dir),
             "--browser-token",
             browser_access_token,
+            "--download-dir",
+            str(browser_downloads_root),
         ]
         kwargs: dict[str, Any] = {
             "cwd": str(project_root),
@@ -897,6 +1096,7 @@ def create_app(
         }
 
     _ensure_web_root()
+    _ensure_browser_downloads_root()
 
     def _load_disabled_peers() -> None:
         """Load user-disabled peers that discovery must not re-add to the UI."""
@@ -2149,6 +2349,7 @@ def create_app(
             "networkCapacity": _network_storage_capacity(stats, peers),
             "webHosting": web_hosting_payload(peers),
             "webFiles": web_files_payload(),
+            "browserDownloads": browser_downloads_payload(),
             "peers": [peer.to_dict() for peer in peers],
             "disabledPeers": _disabled_peers_payload(),
             "fileCount": len(manifests),
@@ -2305,6 +2506,7 @@ def create_app(
             network_json=network_payload(),
             web_hosting_json=web_hosting_payload(peers),
             web_files_json=web_files_payload(),
+            browser_downloads_json=browser_downloads_payload(),
             manifests=manifests,
             folder_tree=tree,
             folder_tree_json=folder_tree_json(tree),
@@ -2760,6 +2962,40 @@ def create_app(
             return _web_json_state(message)
         except StorageError as exc:
             return jsonify({"ok": False, "message": str(exc), "webFiles": web_files_payload()}), 400
+
+    @app.get("/api/browser/downloads")
+    def api_browser_downloads() -> Response:
+        return jsonify({"ok": True, "browserDownloads": browser_downloads_payload()})
+
+    @app.get("/api/browser/downloads/file")
+    def api_browser_download_file() -> Response:
+        try:
+            path = _safe_browser_download_path(request.args.get("path"))
+            if not path.exists() or not path.is_file():
+                raise StorageError("Download-Datei nicht gefunden")
+            inline = str(request.args.get("inline") or "").lower() in {"1", "true", "yes"}
+            return send_file(path, as_attachment=not inline, download_name=path.name, conditional=True)
+        except StorageError as exc:
+            return Response(str(exc), status=404, content_type="text/plain; charset=utf-8")
+
+    @app.post("/api/browser/downloads/delete")
+    def api_browser_download_delete() -> Response:
+        payload = request.get_json(silent=True) or request.form
+        try:
+            target = _safe_browser_download_path(payload.get("path"), allow_directory=True)
+            if target == browser_downloads_root.resolve():
+                raise StorageError("Der Downloads-Hauptordner kann nicht gelöscht werden")
+            if not target.exists():
+                raise StorageError("Download-Datei oder Download-Ordner nicht gefunden")
+            if target.is_dir():
+                shutil.rmtree(target)
+                message = f"Download-Ordner gelöscht: {target.name}"
+            else:
+                target.unlink()
+                message = f"Download gelöscht: {target.name}"
+            return _browser_download_json_state(message)
+        except StorageError as exc:
+            return jsonify({"ok": False, "message": str(exc), "browserDownloads": browser_downloads_payload()}), 400
 
     @app.post("/upload")
     def upload() -> Response | str:
