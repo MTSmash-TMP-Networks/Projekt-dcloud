@@ -27,7 +27,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 from urllib import error as urlerror, request as urlrequest
 
-VERSION = "py-1.1.0"
+VERSION = "py-1.1.1"
 TOKEN_ROTATION_SECONDS = 86400
 PEER_TTL_SECONDS = 45
 MESSAGE_TTL_SECONDS = 900
@@ -288,12 +288,21 @@ class Handler(BaseHTTPRequestHandler):
                 allowed[name] = str(value).replace("\r", " ").replace("\n", " ")
         return allowed
 
+    @staticmethod
+    def _allowed_peer_path(method: str, path: str) -> bool:
+        method = method.upper()
+        if method not in {"GET", "POST"}:
+            return False
+        if path.startswith("/api/p2p/"):
+            return True
+        return path == "/dcloud-site" or path.startswith("/dcloud-site/") or path.startswith("/dcloud-site?")
+
     def handle_direct_proxy(self, data: dict[str, Any]) -> None:
         target_node_id = safe_id(data.get("target_node_id") or data.get("to_node_id") or data.get("peer_node_id"), "target_node_id")
         method = str(data.get("method", "GET")).upper()
         path = str(data.get("path") or data.get("api_path") or "")
-        if method not in {"GET", "POST"} or not path.startswith("/api/p2p/"):
-            self._json({"ok": False, "message": "Forwarder erlaubt nur GET/POST auf /api/p2p/", "status": 403})
+        if not self._allowed_peer_path(method, path):
+            self._json({"ok": False, "message": "Forwarder erlaubt nur GET/POST auf /api/p2p/ oder /dcloud-site", "status": 403})
             return
         peers = read_json(DATA_DIR / "peers.json", {})
         peer = peers.get(target_node_id) if isinstance(peers, dict) else None
@@ -349,8 +358,8 @@ class Handler(BaseHTTPRequestHandler):
         from_node_id = safe_id(data.get("node_id") or data.get("from_node_id") or data.get("sender_node_id"), "node_id")
         method = str(data.get("method", "GET")).upper()
         path = str(data.get("path") or data.get("api_path") or "")
-        if method not in {"GET", "POST"} or not path.startswith("/api/p2p/"):
-            self._json({"ok": False, "message": "Nur GET/POST auf /api/p2p/ sind erlaubt", "status": 403})
+        if not self._allowed_peer_path(method, path):
+            self._json({"ok": False, "message": "Nur GET/POST auf /api/p2p/ oder /dcloud-site sind erlaubt", "status": 403})
             return
         body64 = str(data.get("body_base64") or data.get("body") or "")
         if len(body64) > MAX_BODY_BYTES:

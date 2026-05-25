@@ -94,7 +94,7 @@ Im internen Browser ist die eigene Seite unter dem angezeigten Hostnamen erreich
 http://peername.dcloud/
 ```
 
-Aktive Peers werden ebenfalls über ihre dcloud-Namen aufgelöst. Bei direkten LAN-Peers lädt der Browser deren `/dcloud-site`-Route direkt; bei Relay-Peers wird, soweit möglich, der bestehende dcloud-Relay-Kanal verwendet. Das Betriebssystem-DNS wird dadurch nicht verändert: Die `.dcloud`-Namen sind bewusst im internen Browser der App aufgelöst.
+Aktive Peers werden ebenfalls über ihre dcloud-Namen aufgelöst. Bei direkten LAN-Peers lädt der Browser deren `/dcloud-site`-Route direkt; bei Relay-Peers wird zuerst der schnelle Relay-Forwarder und danach die Relay-Mailbox verwendet. Dafür muss auf dem Relay-Server die aktuelle `relay/dcloud_relay.php` aus diesem Paket liegen, weil ältere Relay-Dateien `/dcloud-site` blockieren. Das Betriebssystem-DNS wird dadurch nicht verändert: Die `.dcloud`-Namen sind bewusst im internen Browser der App aufgelöst.
 
 ### Login und Benutzerverwaltung
 
@@ -731,7 +731,8 @@ Installation auf einem Webserver:
 1. `dcloud_relay.php` auf den Webspace kopieren.
 2. Schreibrechte für das Relay-Datenverzeichnis erlauben. Das Skript legt standardmäßig `dcloud-relay-data/` neben sich an.
 3. PHP mit `curl`-Extension ist empfohlen. Ohne cURL nutzt das Skript einen HTTP-Stream-Fallback, der weniger robust ist.
-4. Die URL im Dashboard oder in `config.yml` unter `network.relay_urls` eintragen.
+4. Wichtig für `peername.dcloud` über Relay: Vorhandene Relay-Installationen müssen mit dieser Datei aktualisiert werden, weil die Relay-Allowlist jetzt zusätzlich `/dcloud-site` erlaubt.
+5. Die URL im Dashboard oder in `config.yml` unter `network.relay_urls` eintragen.
 
 Beispiel:
 
@@ -744,7 +745,7 @@ network:
 Wichtige Hinweise:
 
 - Das Relay sollte über HTTPS laufen.
-- Das Relay ist kein dauerhafter Dateispeicher.
+- Das Relay ist kein dauerhafter Dateispeicher. Peer-Webseiten werden nur durchgereicht; HTML/PHP-Dateien bleiben auf dem jeweiligen dcloud-Node.
 - Für externe temporäre Links werden nur kurzlebige Token und Stream-Pakete gehalten.
 - Für große Datenmengen ist ein eigener VPS oder die Python-Relay-Variante stabiler als Shared Hosting.
 

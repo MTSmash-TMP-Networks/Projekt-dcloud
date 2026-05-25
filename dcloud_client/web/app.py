@@ -533,6 +533,23 @@ def create_app(
         with relay_lock:
             relay_client = relay_clients.get(relay_url)
         if relay_client is not None:
+            last_relay_error = ""
+            try:
+                relay_response = relay_client.direct_proxy_request(
+                    peer,
+                    method="GET",
+                    path=relay_path,
+                    headers={"Accept": request.headers.get("Accept", "text/html,*/*")},
+                    timeout=20,
+                )
+                return _proxy_response_from_bytes(
+                    relay_response.body,
+                    status=relay_response.status_code,
+                    headers=relay_response.headers,
+                    base_url=original_url,
+                )
+            except Exception as exc:
+                last_relay_error = str(exc)
             try:
                 relay_response = relay_client.forward_request(
                     peer,
@@ -548,7 +565,10 @@ def create_app(
                     base_url=original_url,
                 )
             except Exception as exc:
-                return Response(f"Peer-Webseite über Relay nicht erreichbar: {exc}", status=502, content_type="text/plain; charset=utf-8")
+                details = str(exc)
+                if last_relay_error and last_relay_error != details:
+                    details = f"{details} (direkter Relay-Forward vorher: {last_relay_error})"
+                return Response(f"Peer-Webseite über Relay nicht erreichbar: {details}", status=502, content_type="text/plain; charset=utf-8")
         return Response("Peer-Webseite ist aktuell nicht erreichbar.", status=502, content_type="text/plain; charset=utf-8")
 
     def _fetch_dcloud_browser_url(url: str) -> Response:

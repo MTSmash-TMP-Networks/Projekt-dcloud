@@ -10,7 +10,7 @@ declare(strict_types=1);
  * Landing page intentionally reveals only minimal information.
  */
 
-const DCLOUD_RELAY_VERSION = '1.5.1';
+const DCLOUD_RELAY_VERSION = '1.5.2';
 const DCLOUD_RELAY_TOKEN_ROTATION_SECONDS = 86400;
 const DCLOUD_PEER_TTL_SECONDS = 45;
 const DCLOUD_MESSAGE_TTL_SECONDS = 900;
@@ -150,10 +150,19 @@ function dcloud_safe_public_token($value): string {
 }
 
 
+function dcloud_path_is_allowed_for_peer_web(string $method, string $path): bool {
+    $method = strtoupper($method);
+    if (!in_array($method, ['GET', 'POST'], true)) return false;
+    // dcloud peer websites are served by the client under /dcloud-site.
+    // Keep the relay allow-list narrow so it cannot be used as a general proxy.
+    return $path === '/dcloud-site' || strncmp($path, '/dcloud-site/', 13) === 0 || strncmp($path, '/dcloud-site?', 13) === 0;
+}
+
 function dcloud_path_is_allowed_for_mailbox(string $method, string $path): bool {
     $method = strtoupper($method);
     if (!in_array($method, ['GET', 'POST'], true)) return false;
     if (strncmp($path, '/api/p2p/', 9) === 0) return true;
+    if (dcloud_path_is_allowed_for_peer_web($method, $path)) return true;
     if ($method === 'GET' && preg_match('#^/api/external-relay/stream/[A-Za-z0-9_-]{12,200}/[A-Za-z0-9_.:-]{12,160}$#', $path) === 1) return true;
     if ($method === 'GET' && preg_match('#^/external/[A-Za-z0-9_-]{12,200}$#', $path) === 1) return true;
     return false;
@@ -1311,8 +1320,10 @@ function dcloud_decode_direct_proxy_input(array $input): array {
     $targetNodeId = dcloud_safe_id($targetNodeIdRaw, 'target_node_id');
     $method = strtoupper((string)($input['method'] ?? 'GET'));
     $path = (string)($input['path'] ?? ($input['api_path'] ?? ''));
-    if (!in_array($method, ['GET', 'POST'], true) || strncmp($path, '/api/p2p/', 9) !== 0) {
-        dcloud_fail('PHP-Forwarder erlaubt nur GET/POST auf /api/p2p/', 403, ['method' => $method, 'path' => $path]);
+    $allowedPeerApi = strncmp($path, '/api/p2p/', 9) === 0;
+    $allowedPeerWeb = dcloud_path_is_allowed_for_peer_web($method, $path);
+    if (!in_array($method, ['GET', 'POST'], true) || (!$allowedPeerApi && !$allowedPeerWeb)) {
+        dcloud_fail('PHP-Forwarder erlaubt nur GET/POST auf /api/p2p/ oder /dcloud-site', 403, ['method' => $method, 'path' => $path]);
     }
 
     $bodyBase64 = (string)($input['body_base64'] ?? ($input['body'] ?? ''));
@@ -1697,7 +1708,7 @@ function dcloud_enqueue_request(array $input): void {
     $path = (string)($input['path'] ?? ($input['api_path'] ?? ''));
 
     if (!dcloud_path_is_allowed_for_mailbox($method, $path)) {
-        dcloud_fail('Nur GET/POST auf /api/p2p/ oder externe Relay-Stream-Pfade sind erlaubt', 403, ['method' => $method, 'path' => $path]);
+        dcloud_fail('Nur GET/POST auf /api/p2p/, /dcloud-site oder externe Relay-Stream-Pfade sind erlaubt', 403, ['method' => $method, 'path' => $path]);
     }
 
     $bodyBase64 = (string)($input['body_base64'] ?? ($input['body'] ?? ''));
