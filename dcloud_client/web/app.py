@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 import os
+import sys
 import tempfile
 import json
 import secrets
@@ -98,6 +99,27 @@ def current_git_revision() -> str:
         return revision or "unbekannt"
     except Exception:
         return "unbekannt"
+
+
+def _restart_current_process_delayed(delay_seconds: float = 0.8) -> None:
+    """Restart the running dcloud process after the HTTP response has been sent."""
+
+    def restart_worker() -> None:
+        time.sleep(delay_seconds)
+        command = [sys.executable, *sys.argv]
+        try:
+            os.chdir(str(Path.cwd()))
+        except Exception:
+            pass
+        try:
+            sys.stdout.flush()
+            sys.stderr.flush()
+        except Exception:
+            pass
+        os.execv(sys.executable, command)
+
+    thread = threading.Thread(target=restart_worker, name="dcloud-self-restart", daemon=True)
+    thread.start()
 
 def _tail_text_file(path: Path, *, max_lines: int = 120, max_chars: int = 12000) -> str:
     try:
@@ -1909,6 +1931,14 @@ def create_app(
         if _is_ajax_request():
             return jsonify({"ok": True, "message": "Abgemeldet"})
         return redirect(url_for("login"))
+
+    @app.post("/api/system/restart")
+    def api_system_restart() -> Response:
+        admin_error = _require_admin()
+        if admin_error is not None:
+            return admin_error
+        _restart_current_process_delayed()
+        return jsonify({"ok": True, "message": "Service-Neustart wurde ausgelöst"})
 
     @app.get("/api/users")
     def api_users() -> Response:
