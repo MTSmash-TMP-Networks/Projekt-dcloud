@@ -929,7 +929,7 @@
       </div>
     </section>
 
-    <aside class="transfer-panel" id="transfer-panel">
+    <aside class="transfer-panel" id="transfer-panel" hidden>
       <button class="transfer-toggle" id="transfer-toggle" type="button" aria-expanded="true">
         <span>⚡ Transfer-Center</span>
         <small id="transfer-toggle-label" aria-hidden="true">▴</small>
@@ -2304,6 +2304,11 @@
         if(!transferPanel) return;
         transferPanel.hidden = false;
       }
+      function hideTransferPanel(){
+        if(!transferPanel) return;
+        setTransferPanelExpanded(false);
+        transferPanel.hidden = true;
+      }
       function setTransferPanelExpanded(expanded){
         transferExpanded = !!expanded;
         if(transferBody) transferBody.hidden = !transferExpanded;
@@ -2717,6 +2722,7 @@
               untrackUploadId(uploadId);
               currentUploadId = null;
               updateQueueDisplay();
+              hideTransferPanel();
               refreshState().catch(() => {});
             }
             stopUploadPolling();
@@ -2790,12 +2796,11 @@
         currentUploadXhr = null;
         if(backgroundActive){
           lastSuccessfulUploadAt = Date.now();
-          document.getElementById("transfer-title").textContent = "Datei gespeichert";
-          document.getElementById("transfer-status").textContent = message || "Datei ist lokal verfügbar; Sicherheitskopie läuft im Hintergrund";
-          document.getElementById("transfer-subtitle").textContent = "Du kannst weiterarbeiten; die Peer-Verteilung läuft asynchron";
-          const cancel = document.getElementById("transfer-cancel");
-          cancel.textContent = "Schließen";
-          cancel.disabled = false;
+          stopUploadPolling();
+          currentUploadId = null;
+          untrackUploadId(finishedUploadId);
+          updateQueueDisplay();
+          hideTransferPanel();
           refreshState().catch(() => {});
           return;
         }
@@ -2816,6 +2821,7 @@
         const cancel = document.getElementById("transfer-cancel");
         cancel.textContent = "Schließen";
         cancel.disabled = false;
+        hideTransferPanel();
         refreshState().catch(() => {});
       }
       function applyDownloadProgress(progress){
@@ -2872,6 +2878,8 @@
               document.getElementById("transfer-title").textContent = "Download fehlgeschlagen";
               showToast(progress.message || "Download fehlgeschlagen", "error");
             }
+            currentDownloadId = null;
+            hideTransferPanel();
           }
         }catch(error){
           // Polling ist nur Zusatzinformation; beim nächsten Takt wird erneut versucht.
@@ -3717,9 +3725,9 @@ ${file.name}`)) return;
           stopDownloadPolling();
           currentDownloadId = null;
           document.getElementById("transfer-status").textContent = "Download-Status ausgeblendet; Server kann noch vorbereiten.";
-          setTransferPanelExpanded(false);
+          hideTransferPanel();
         }else{
-          setTransferPanelExpanded(!transferExpanded);
+          hideTransferPanel();
         }
       };
       if(transferToggle){
@@ -3798,7 +3806,7 @@ ${file.name}`)) return;
 
       applyState(appState);
       refreshLogs().catch(() => {});
-      setTransferPanelExpanded(false);
+      hideTransferPanel();
       updateQueueDisplay();
       updateTaskbar();
       restorePersistedUploads().catch(() => {});

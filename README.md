@@ -65,7 +65,7 @@ Die Dateiübertragung nutzt nach Möglichkeit direkte Peer-Verbindungen. Wenn da
 Das Dashboard ist als Desktop-Oberfläche aufgebaut. Wichtige Bereiche sind über Icons erreichbar:
 
 - **Dateien** – Explorer für Upload, Download, Ordner, Löschen, Verschieben, Freigaben, Auslagern, externe Links und umschaltbare Ansichten
-- **Transfer-Center** – Hintergrundstatus für Upload, Download, Replikation und Auslagerung
+- **Transfer-Center** – erscheint nur während aktiver Uploads oder Downloads und verschwindet danach vollständig
 - **Netzwerk** – aktive Peers, deaktivierte Peers, Relay-Status, Peer-Suche und manuelles Hinzufügen
 - **Peer-Chat** – Nachrichten, Emojis, Bilder und Datei-Karten
 - **Benutzer** – lokale Benutzer anlegen, deaktivieren, löschen, Rollen ändern und Passwörter zurücksetzen
@@ -834,7 +834,7 @@ smb:
 1. Dashboard öffnen.
 2. Fenster **Dateien** öffnen.
 3. Datei auswählen und hochladen.
-4. Im **Transfer-Center** prüfen, ob Hintergrund-Replikation läuft.
+4. Während des aktiven Uploads erscheint das **Transfer-Center** automatisch und verschwindet danach wieder.
 
 ### Datei ansehen
 
@@ -958,7 +958,7 @@ netstat -ano | findstr "8787 6881 445"
 ### Upload großer Dateien ist langsam
 
 - Upload selbst sollte nach lokaler Speicherung fertig sein; die Peer-Replikation läuft im Hintergrund.
-- Prüfe das Transfer-Center, ob Replikation noch läuft.
+- Das Transfer-Center erscheint nur während aktiver Uploads/Downloads; Peer-Replikation läuft nach lokaler Speicherung im Hintergrund weiter.
 - Bei Relay-Peers sind kleinere Pakete absichtlich sicherer, aber langsamer.
 - Für große Datenmengen sind direkte Peers, VPN oder Portfreigabe schneller als Shared-PHP-Relay.
 
