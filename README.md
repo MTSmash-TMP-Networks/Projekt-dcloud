@@ -1,6 +1,6 @@
 # dcloud – dezentraler Desktop-Speicher mit Peer-Replikation
 
-dcloud ist ein Python-basierter Storage-Client mit Web-Dashboard im Desktop-Stil. Jeder Knoten kann Dateien lokal speichern, automatisch im LAN oder über PHP-Relays andere Peers finden und Dateien zur Ausfallsicherheit auf aktive Peers replizieren. Das Dashboard enthält Datei-Explorer, Transfer-Center, Peer-Netzwerk, Chat, SMB-Freigabe, Audit-Logs, Einstellungen und temporäre externe Download-Links.
+dcloud ist ein Python-basierter Storage-Client mit Web-Dashboard im Desktop-Stil. Jeder Knoten kann Dateien lokal speichern, automatisch im LAN oder über PHP-Relays andere Peers finden und Dateien zur Ausfallsicherheit auf aktive Peers replizieren. Das Dashboard enthält Datei-Explorer, integrierte Datei-Vorschau, Transfer-Center, Peer-Netzwerk, Chat, SMB-Freigabe, Audit-Logs, Einstellungen und temporäre externe Download-Links.
 
 > Aktueller Status: Das Projekt ist ein funktionsfähiger MVP/Prototyp. Die Web-UI besitzt jetzt eine lokale Benutzerverwaltung mit Login, Admin-Rollen und erster Setup-Seite. Für produktive Nutzung bleiben Firewall, VPN, Reverse Proxy oder ein separates internes Netz sinnvoll, weil Peer-/Relay-Endpunkte weiterhin erreichbar sein müssen.
 
@@ -9,6 +9,7 @@ dcloud ist ein Python-basierter Storage-Client mit Web-Dashboard im Desktop-Stil
 - Web-Dashboard im Win11-Desktop-Stil unter `http://127.0.0.1:8787`
 - Lokale Benutzerverwaltung mit Ersteinrichtung, Login, Admin-/Benutzer-Rollen und Passwort-Hashing
 - Datei-Upload mit lokaler Sofort-Speicherung
+- Integrierte Vorschau für Bilder, PDFs, Audio, Video, CSV und Excel-Tabellen ohne direkten Browser-Download
 - Dynamische RAID-1-Mirror-Replikation auf aktive Peers für Ausfallsicherheit
 - „Auf Peers auslagern“, um lokale Chunks nach erfolgreicher Peer-Kopie zu entfernen
 - P2P-Downloads mit Chunk-Wiederherstellung von der aktuell schnellsten erreichbaren Quelle
@@ -116,6 +117,21 @@ Die Ansicht kann wie im Windows-Explorer umgeschaltet werden:
 - **Details** für eine tabellarischere Übersicht mit Größe/Status
 
 Die gewählte Ansicht wird im Browser lokal gespeichert.
+
+### Integrierte Datei-Vorschau
+
+Unterstützte Dateien können direkt im Dashboard geöffnet werden, ohne dass sofort ein klassischer Browser-Download ausgelöst wird. Doppelklick auf eine unterstützte Datei oder Rechtsklick → **Vorschau öffnen** öffnet das neue Vorschaufenster.
+
+Unterstützt sind aktuell:
+
+- Bilder: PNG, JPG/JPEG, GIF, WebP, BMP, SVG
+- PDFs
+- Audio: MP3, WAV, OGG, M4A, FLAC
+- Video: MP4, WebM, MOV, M4V, soweit der Browser den Codec abspielen kann
+- Tabellen: CSV, XLSX, XLSM als browserfreundliche Tabellenansicht
+- Text-/Log-/JSON-/XML-/YAML-Dateien als Inline-Vorschau
+
+Bei ausgelagerten Dateien stellt dcloud fehlende Chunks zuerst über lokale/Peer-Quellen wieder her und zeigt die Datei danach inline an. Für alte Excel-Formate wie `.xls` oder OpenDocument-Tabellen kann das Vorschaufenster eine Hinweisseite anzeigen, wenn der Browser-/Server-Fallback sie nicht direkt lesen kann. Der normale Button **Herunterladen** bleibt immer verfügbar.
 
 ### Datei-Upload
 
@@ -796,6 +812,13 @@ smb:
 2. Fenster **Dateien** öffnen.
 3. Datei auswählen und hochladen.
 4. Im **Transfer-Center** prüfen, ob Hintergrund-Replikation läuft.
+
+### Datei ansehen
+
+1. Fenster **Dateien** öffnen.
+2. Unterstützte Datei per Doppelklick öffnen oder per Rechtsklick **Vorschau öffnen** wählen.
+3. Im Vorschaufenster können Bilder, PDFs, MP3/Audio, MP4/Video und Tabellen direkt betrachtet werden.
+4. Bei Bedarf über **Herunterladen** weiterhin den klassischen Download starten.
 
 ### Datei auf Peer auslagern
 

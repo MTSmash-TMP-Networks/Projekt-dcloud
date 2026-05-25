@@ -338,6 +338,19 @@
     .explorer-tile .icon{ font-size:2.45rem; line-height:1; filter:drop-shadow(0 4px 7px rgba(20,49,88,.18)); }
     .tile-name{ font-weight:700; overflow-wrap:anywhere; max-width:100%; }
     .tile-meta{ color:var(--muted); font-size:.82rem; line-height:1.26; }
+    .tile-preview-pill{ display:inline-flex; align-items:center; gap:4px; padding:2px 7px; border-radius:999px; background:rgba(8,102,232,.10); color:#075fcb; font-size:.72rem; font-weight:800; }
+    .viewer-shell{ height:100%; display:flex; flex-direction:column; background:linear-gradient(180deg, rgba(245,249,255,.86), rgba(232,242,255,.70)); }
+    .viewer-toolbar{ display:flex; align-items:center; justify-content:space-between; gap:12px; padding:11px 13px; border-bottom:1px solid var(--line); background:rgba(255,255,255,.78); backdrop-filter:blur(18px); }
+    .viewer-title{ min-width:0; display:flex; align-items:center; gap:10px; color:#183250; font-weight:850; }
+    .viewer-title span:last-child{ overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+    .viewer-actions{ display:flex; gap:8px; flex-wrap:wrap; }
+    .viewer-stage{ flex:1; min-height:0; display:flex; align-items:center; justify-content:center; padding:14px; overflow:auto; }
+    .viewer-stage img{ max-width:100%; max-height:100%; object-fit:contain; border-radius:18px; box-shadow:0 18px 48px rgba(20,54,102,.20); background:#fff; }
+    .viewer-stage iframe{ width:100%; height:100%; min-height:460px; border:0; border-radius:18px; background:#fff; box-shadow:0 14px 36px rgba(20,54,102,.14); }
+    .viewer-stage video{ max-width:100%; max-height:100%; border-radius:18px; box-shadow:0 18px 48px rgba(20,54,102,.20); background:#020617; }
+    .viewer-stage audio{ width:min(720px, 96%); padding:22px; border-radius:22px; background:rgba(255,255,255,.92); box-shadow:0 18px 48px rgba(20,54,102,.18); }
+    .viewer-empty{ max-width:640px; padding:24px; border:1px solid rgba(123,151,195,.32); border-radius:22px; background:rgba(255,255,255,.82); color:#3c5877; text-align:center; box-shadow:0 14px 36px rgba(20,54,102,.10); }
+    .viewer-empty strong{ display:block; color:#183250; margin-bottom:6px; }
     .tile-access{ color:#406285; font-size:.82rem; line-height:1.26; }
     .incoming-share-pill{ color:#075fcb; font-weight:800; }
     .empty{ padding:2.2rem; border:1px dashed rgba(98,135,190,.54); border-radius:18px; background:rgba(255,255,255,.72); color:var(--muted); text-align:center; }
@@ -611,6 +624,29 @@
       </div>
     </section>
 
+    <section class="window" id="win-viewer" hidden>
+      <div class="titlebar" data-app="viewer">
+        <span class="title"><span id="viewer-title-icon">👁️</span><span id="viewer-title-text">Vorschau</span></span>
+        <div class="window-controls">
+          <button type="button" data-action="min" aria-label="Minimieren">–</button>
+          <button type="button" data-action="max" aria-label="Maximieren">□</button>
+          <button type="button" data-action="close" aria-label="Schließen">×</button>
+        </div>
+      </div>
+      <div class="window-content viewer-shell">
+        <div class="viewer-toolbar">
+          <div class="viewer-title"><span id="viewer-file-icon">👁️</span><span id="viewer-file-name">Keine Datei geöffnet</span></div>
+          <div class="viewer-actions">
+            <button type="button" class="explorer-btn" id="viewer-open-new">In neuem Tab</button>
+            <button type="button" class="explorer-btn" id="viewer-download">Herunterladen</button>
+          </div>
+        </div>
+        <div class="viewer-stage" id="viewer-stage">
+          <div class="viewer-empty"><strong>Keine Vorschau geöffnet</strong>Wähle im Datei-Explorer eine Datei aus und nutze Öffnen oder Vorschau.</div>
+        </div>
+      </div>
+    </section>
+
     <section class="window" id="win-network" hidden>
       <div class="titlebar" data-app="network">
         <span class="title"><span>🌐</span><span>Netzwerk</span></span>
@@ -869,6 +905,7 @@
 
     <div class="ctx" id="ctxMenu" role="menu" aria-label="Desktop Kontextmenü">
       <button type="button" id="ctxOpen"><span>Öffnen</span><span class="kbd">Enter</span></button>
+      <button type="button" id="ctxPreview"><span>Vorschau öffnen</span><span class="kbd">Space</span></button>
       <button type="button" id="ctxDownload"><span>Herunterladen</span><span class="kbd">Ctrl+S</span></button>
       <button type="button" id="ctxExternalLink"><span>Externen Link erstellen…</span><span class="kbd">1h</span></button>
       <button type="button" id="ctxShare"><span>An Peer freigeben…</span><span class="kbd">Ctrl+H</span></button>
@@ -1117,6 +1154,7 @@
 
       const windows = {
         explorer: document.getElementById("win-explorer"),
+        viewer: document.getElementById("win-viewer"),
         network: document.getElementById("win-network"),
         status: document.getElementById("win-status"),
         logs: document.getElementById("win-logs"),
@@ -1126,6 +1164,7 @@
       };
       const appLabels = {
         explorer:"📁 Datei-Explorer",
+        viewer:"👁️ Vorschau",
         network:"🌐 Netzwerk",
         status:"🖥️ System",
         logs:"📜 Audit-Logs",
@@ -1136,6 +1175,7 @@
       let activeChatPeerId = "";
       let chatSummary = { total_unread: 0, conversations: [] };
       let pendingChatAttachment = null;
+      let currentViewerFile = null;
       let transferExpanded = true;
 
       function normalizeFolderPath(value){
@@ -1199,6 +1239,8 @@
             ownerNodeId: file.owner_node_id || "",
             createdAt: file.created_at || "",
             downloadUrl: file.download_url || `/download/${file.manifest_id}`,
+            previewUrl: file.preview_url || `/preview/${file.manifest_id}`,
+            sheetPreviewUrl: file.sheet_preview_url || `/preview/${file.manifest_id}/sheet`,
             deleteUrl: file.delete_url || `/files/${file.manifest_id}/delete`,
             shareUrl: file.share_url || `/files/${file.manifest_id}/share`,
             offloadUrl: file.offload_url || `/files/${file.manifest_id}/offload`,
@@ -1253,7 +1295,9 @@
             owner: file.owner_node_id === appState.nodeId,
             ownerNodeId: file.owner_node_id || "",
             createdAt: file.created_at || "",
-            downloadUrl: file.download_url || `/download/${file.manifest_id}`
+            downloadUrl: file.download_url || `/download/${file.manifest_id}`,
+            previewUrl: file.preview_url || `/preview/${file.manifest_id}`,
+            sheetPreviewUrl: file.sheet_preview_url || `/preview/${file.manifest_id}/sheet`
           }));
         });
         return files.sort((a,b)=>a.name.localeCompare(b.name));
@@ -1268,6 +1312,67 @@
         if(/\.(docx?|odt|rtf|txt|md)$/.test(name)) return "📄";
         if(/\.(xlsx?|ods|csv)$/.test(name)) return "📊";
         return "📎";
+      }
+      function previewKind(file){
+        const name = String(file?.name || "").toLowerCase();
+        if(/\.(png|jpe?g|gif|webp|bmp|svg)$/.test(name)) return "image";
+        if(/\.pdf$/.test(name)) return "pdf";
+        if(/\.(mp3|wav|ogg|flac|m4a)$/.test(name)) return "audio";
+        if(/\.(mp4|webm|mov|m4v)$/.test(name)) return "video";
+        if(/\.(xlsx?|xlsm|ods|csv)$/.test(name)) return "sheet";
+        if(/\.(txt|md|log|json|xml|ya?ml)$/.test(name)) return "text";
+        return "unknown";
+      }
+      function isPreviewable(file){ return previewKind(file) !== "unknown"; }
+      function openFile(file){
+        if(!file) return;
+        if(isPreviewable(file)) openPreview(file);
+        else startDownload(file).catch(error => showToast(error.message, "error"));
+      }
+      function openPreview(file){
+        if(!file || !file.id) return;
+        currentViewerFile = file;
+        const kind = previewKind(file);
+        const icon = chatFileIcon(file);
+        const url = kind === "sheet" ? (file.sheetPreviewUrl || `/preview/${encodeURIComponent(file.id)}/sheet`) : (file.previewUrl || `/preview/${encodeURIComponent(file.id)}`);
+        document.getElementById("viewer-title-icon").textContent = icon;
+        document.getElementById("viewer-title-text").textContent = "Vorschau";
+        document.getElementById("viewer-file-icon").textContent = icon;
+        document.getElementById("viewer-file-name").textContent = file.name || "Datei";
+        const stage = document.getElementById("viewer-stage");
+        stage.innerHTML = "";
+        if(kind === "image"){
+          const img = document.createElement("img");
+          img.alt = file.name || "Bildvorschau";
+          img.src = url;
+          stage.appendChild(img);
+        }else if(kind === "audio"){
+          const audio = document.createElement("audio");
+          audio.controls = true;
+          audio.src = url;
+          stage.appendChild(audio);
+        }else if(kind === "video"){
+          const video = document.createElement("video");
+          video.controls = true;
+          video.playsInline = true;
+          video.src = url;
+          stage.appendChild(video);
+        }else if(kind === "pdf" || kind === "sheet" || kind === "text"){
+          const frame = document.createElement("iframe");
+          frame.title = `Vorschau: ${file.name || "Datei"}`;
+          frame.src = url;
+          stage.appendChild(frame);
+        }else{
+          const empty = document.createElement("div");
+          empty.className = "viewer-empty";
+          empty.innerHTML = `<strong>Keine integrierte Vorschau</strong>${escapeHtml(file.name || "Diese Datei")} kann im Dashboard nicht direkt angezeigt werden. Bitte nutze Herunterladen.`;
+          stage.appendChild(empty);
+        }
+        const newTab = document.getElementById("viewer-open-new");
+        if(newTab) newTab.onclick = () => window.open(url, "_blank", "noopener");
+        const download = document.getElementById("viewer-download");
+        if(download) download.onclick = () => startDownload(file).catch(error => showToast(error.message, "error"));
+        openWindow("viewer");
       }
       function chatPreview(msg){
         if(!msg) return "Noch keine Nachrichten";
@@ -1872,7 +1977,7 @@
           tile.type = "button";
           tile.className = "explorer-tile file-tile";
           tile.dataset.kind = "file";
-          tile.innerHTML = `<span class=\"icon\">${file.incomingShare ? "🤝" : "📄"}</span>`;
+          tile.innerHTML = `<span class=\"icon\">${file.incomingShare ? "🤝" : chatFileIcon(file)}</span>`;
           const name = document.createElement("span");
           name.className = "tile-name";
           name.textContent = file.name;
@@ -1889,8 +1994,14 @@
           }else{
             access.textContent = file.shared ? "🌐 an Peer freigegeben" : "🔒 privat";
           }
+          if(isPreviewable(file)){
+            const preview = document.createElement("span");
+            preview.className = "tile-preview-pill";
+            preview.textContent = "👁️ Vorschau";
+            access.append(" ", preview);
+          }
           tile.append(name, meta, access);
-          tile.addEventListener("dblclick", () => { startDownload(file).catch(error => showToast(error.message, "error")); });
+          tile.addEventListener("dblclick", () => { openFile(file); });
           tile.addEventListener("click", () => selectExplorerTile(tile, { kind:"file", file }));
           tile.addEventListener("contextmenu", event => {
             event.preventDefault();
@@ -2020,6 +2131,8 @@
         const selectedFolderPath = isFolder ? normalizeFolderPath(selectedTarget.path) : "";
         const isDeletableFolder = isFolder && ![DEFAULT_FOLDER, SHARED_FOLDER].includes(selectedFolderPath) && !isSharedSystemPath(selectedFolderPath);
         document.getElementById("ctxOpen").hidden = !(isFile || isFolder);
+        const previewBtn = document.getElementById("ctxPreview");
+        if(previewBtn) previewBtn.hidden = !(isFile && isPreviewable(selectedTarget.file));
         document.getElementById("ctxDownload").hidden = !isFile;
         document.getElementById("ctxExternalLink").hidden = !isOwnerFile;
         document.getElementById("ctxShare").hidden = !isOwnerFile;
@@ -3226,8 +3339,10 @@ ${file.name}`)) return;
       document.getElementById("ctxOpen").onclick = () => {
         closeCtx();
         if(selectedTarget.kind === "folder") openExplorerAt(selectedTarget.path);
-        if(selectedTarget.kind === "file") startDownload(selectedTarget.file).catch(error => showToast(error.message, "error"));
+        if(selectedTarget.kind === "file") openFile(selectedTarget.file);
       };
+      const ctxPreviewBtn = document.getElementById("ctxPreview");
+      if(ctxPreviewBtn) ctxPreviewBtn.onclick = () => { closeCtx(); if(selectedTarget.kind === "file") openPreview(selectedTarget.file); };
       document.getElementById("ctxDownload").onclick = () => { closeCtx(); if(selectedTarget.kind === "file") startDownload(selectedTarget.file).catch(error => showToast(error.message, "error")); };
       document.getElementById("ctxExternalLink").onclick = () => { closeCtx(); if(selectedTarget.kind === "file") createExternalDownloadLink(selectedTarget.file).catch(error => showToast(error.message, "error")); };
       document.getElementById("ctxShare").onclick = () => { closeCtx(); if(selectedTarget.kind === "file") toggleShare(selectedTarget.file).catch(error => showToast(error.message, "error")); };
@@ -3321,6 +3436,7 @@ ${file.name}`)) return;
         if(event.key === "Escape"){
           if(!folderDialog.hidden) closeFolderDialog();
           if(chatFileDialog && !chatFileDialog.hidden) closeChatFileDialog();
+          if(!windows.viewer.hidden) closeWindow("viewer");
           closeCtx();
         }
         if(event.key === "F5") return;
@@ -3342,7 +3458,11 @@ ${file.name}`)) return;
         }
         if(event.key === "Enter"){
           if(selectedTarget.kind === "folder") openExplorerAt(selectedTarget.path);
-          if(selectedTarget.kind === "file") startDownload(selectedTarget.file).catch(error => showToast(error.message, "error"));
+          if(selectedTarget.kind === "file") openFile(selectedTarget.file);
+        }
+        if(event.key === " " && selectedTarget.kind === "file" && isPreviewable(selectedTarget.file)){
+          event.preventDefault();
+          openPreview(selectedTarget.file);
         }
         if(event.ctrlKey && (event.key === "s" || event.key === "S") && selectedTarget.kind === "file"){
           event.preventDefault();

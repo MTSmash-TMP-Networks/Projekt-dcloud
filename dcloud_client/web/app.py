@@ -6,6 +6,11 @@ from pathlib import Path
 import tempfile
 import json
 import secrets
+import csv
+import html
+import mimetypes
+import zipfile
+import xml.etree.ElementTree as ET
 from typing import Any, Protocol
 from io import BytesIO
 import threading
@@ -1366,6 +1371,8 @@ def create_app(
             "storage_locations": locations,
             "remote_storage_count": len([node_id for node_id in locations if node_id != identity.node_id]),
             "download_url": url_for("download", manifest_id=manifest.manifest_id),
+            "preview_url": url_for("preview_file", manifest_id=manifest.manifest_id),
+            "sheet_preview_url": url_for("preview_sheet", manifest_id=manifest.manifest_id),
             "external_link_url": url_for("api_create_external_download_link", manifest_id=manifest.manifest_id),
             "delete_url": url_for("delete_file", manifest_id=manifest.manifest_id),
             "share_url": url_for("share_file", manifest_id=manifest.manifest_id),
@@ -2803,6 +2810,213 @@ def create_app(
         if not result or not path.exists():
             abort(404)
         return send_file(path, as_attachment=True, download_name=str(result.get("file_name") or path.name))
+
+
+    PREVIEW_TEXT_EXTENSIONS = {".txt", ".md", ".log", ".json", ".xml", ".yml", ".yaml", ".csv"}
+    PREVIEW_SHEET_EXTENSIONS = {".csv", ".xlsx", ".xlsm", ".xls", ".ods"}
+    PREVIEW_INLINE_EXTENSIONS = {
+        ".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".svg",
+        ".pdf", ".mp3", ".wav", ".ogg", ".m4a", ".flac",
+        ".mp4", ".webm", ".mov", ".m4v",
+        *PREVIEW_TEXT_EXTENSIONS,
+    }
+
+    def _manifest_for_access(manifest_id: str) -> FileManifest:
+        manifest = manifest_store.load(manifest_id)
+        if not manifest_store.may_access(manifest, identity.node_id):
+            abort(404)
+        return manifest
+
+    def _safe_preview_path(manifest: FileManifest) -> Path:
+        safe_id = re.sub(r"[^a-zA-Z0-9_.-]", "_", manifest.manifest_id)[:96] or "preview"
+        safe_name = secure_filename(manifest.file_name) or "preview.bin"
+        preview_dir = chunk_store.tmp_dir / "previews"
+        preview_dir.mkdir(parents=True, exist_ok=True)
+        return preview_dir / f"{safe_id}-{safe_name}"
+
+    def _ensure_preview_file(manifest: FileManifest) -> Path:
+        output = _safe_preview_path(manifest)
+        if output.exists() and output.stat().st_size == int(manifest.file_size):
+            return output
+        _ensure_manifest_chunks_available(manifest)
+        manifest_store.restore(manifest.manifest_id, target=output)
+        return output
+
+    def _file_extension(file_name: str) -> str:
+        return Path(str(file_name or "")).suffix.lower()
+
+    def _preview_mimetype(file_name: str) -> str:
+        ext = _file_extension(file_name)
+        explicit = {
+            ".md": "text/markdown; charset=utf-8",
+            ".log": "text/plain; charset=utf-8",
+            ".yaml": "text/yaml; charset=utf-8",
+            ".yml": "text/yaml; charset=utf-8",
+            ".csv": "text/csv; charset=utf-8",
+            ".svg": "image/svg+xml",
+            ".m4a": "audio/mp4",
+            ".m4v": "video/mp4",
+        }.get(ext)
+        if explicit:
+            return explicit
+        guessed, _ = mimetypes.guess_type(file_name)
+        return guessed or "application/octet-stream"
+
+    def _html_page(title: str, body: str) -> Response:
+        safe_title = html.escape(title or "Vorschau")
+        return Response(
+            "<!doctype html><html lang='de'><head><meta charset='utf-8'>"
+            "<meta name='viewport' content='width=device-width, initial-scale=1'>"
+            f"<title>{safe_title}</title>"
+            "<style>body{font-family:system-ui,-apple-system,Segoe UI,sans-serif;margin:0;background:#f6f9ff;color:#17233a;}"
+            "header{position:sticky;top:0;background:rgba(255,255,255,.92);backdrop-filter:blur(16px);border-bottom:1px solid #d7e4f7;padding:12px 16px;}"
+            "h1{font-size:16px;margin:0;}main{padding:16px;}table{border-collapse:collapse;background:white;box-shadow:0 8px 28px rgba(20,54,102,.08);border-radius:12px;overflow:hidden;}"
+            "td,th{border:1px solid #dbe6f7;padding:6px 9px;min-width:70px;max-width:360px;white-space:pre-wrap;vertical-align:top;font-size:13px;}"
+            "th{position:sticky;top:45px;background:#eaf3ff;color:#405b7c;font-weight:800;}"
+            ".note{padding:14px 16px;border:1px solid #d7e4f7;border-radius:14px;background:white;box-shadow:0 8px 28px rgba(20,54,102,.08);}"
+            "pre{white-space:pre-wrap;background:white;border:1px solid #d7e4f7;border-radius:14px;padding:14px;box-shadow:0 8px 28px rgba(20,54,102,.08);overflow:auto;}"
+            "</style></head><body>"
+            f"<header><h1>{safe_title}</h1></header><main>{body}</main></body></html>",
+            mimetype="text/html; charset=utf-8",
+        )
+
+    def _read_csv_preview(path: Path, *, max_rows: int = 220, max_cols: int = 60) -> list[list[str]]:
+        raw = path.read_bytes()[:2 * 1024 * 1024]
+        text = raw.decode("utf-8-sig", errors="replace")
+        sample = text[:4096]
+        try:
+            dialect = csv.Sniffer().sniff(sample, delimiters=",;\t|")
+        except Exception:
+            dialect = csv.excel
+        rows: list[list[str]] = []
+        for idx, row in enumerate(csv.reader(text.splitlines(), dialect)):
+            if idx >= max_rows:
+                break
+            rows.append([str(cell) for cell in row[:max_cols]])
+        return rows
+
+    def _xlsx_column_index(ref: str) -> int:
+        letters = "".join(ch for ch in ref if ch.isalpha()).upper()
+        value = 0
+        for char in letters:
+            value = value * 26 + (ord(char) - ord("A") + 1)
+        return max(value - 1, 0)
+
+    def _read_xlsx_preview(path: Path, *, max_rows: int = 220, max_cols: int = 60) -> list[list[str]]:
+        ns = {"main": "http://schemas.openxmlformats.org/spreadsheetml/2006/main"}
+        with zipfile.ZipFile(path) as archive:
+            shared: list[str] = []
+            if "xl/sharedStrings.xml" in archive.namelist():
+                root = ET.fromstring(archive.read("xl/sharedStrings.xml"))
+                for si in root.findall("main:si", ns):
+                    texts = [node.text or "" for node in si.findall(".//main:t", ns)]
+                    shared.append("".join(texts))
+            sheet_name = "xl/worksheets/sheet1.xml"
+            if sheet_name not in archive.namelist():
+                sheets = sorted(name for name in archive.namelist() if name.startswith("xl/worksheets/sheet") and name.endswith(".xml"))
+                if not sheets:
+                    return []
+                sheet_name = sheets[0]
+            root = ET.fromstring(archive.read(sheet_name))
+            rows: list[list[str]] = []
+            for row_el in root.findall(".//main:sheetData/main:row", ns):
+                if len(rows) >= max_rows:
+                    break
+                row_values = [""] * max_cols
+                sequential_col = 0
+                has_value = False
+                for cell in row_el.findall("main:c", ns):
+                    ref = str(cell.get("r") or "")
+                    col = _xlsx_column_index(ref) if ref else sequential_col
+                    sequential_col = col + 1
+                    if col >= max_cols:
+                        continue
+                    cell_type = str(cell.get("t") or "")
+                    value = ""
+                    if cell_type == "inlineStr":
+                        texts = [node.text or "" for node in cell.findall(".//main:t", ns)]
+                        value = "".join(texts)
+                    else:
+                        v = cell.find("main:v", ns)
+                        raw_value = v.text if v is not None and v.text is not None else ""
+                        if cell_type == "s":
+                            try:
+                                value = shared[int(raw_value)]
+                            except Exception:
+                                value = raw_value
+                        elif cell_type == "b":
+                            value = "WAHR" if raw_value == "1" else "FALSCH"
+                        else:
+                            value = raw_value
+                    if value:
+                        has_value = True
+                    row_values[col] = value
+                if has_value or rows:
+                    while row_values and row_values[-1] == "":
+                        row_values.pop()
+                    rows.append(row_values)
+            return rows
+
+    def _rows_to_table(rows: list[list[str]]) -> str:
+        if not rows:
+            return "<div class='note'>Keine darstellbaren Tabellenwerte gefunden.</div>"
+        max_cols = max((len(row) for row in rows), default=0)
+        header = "<tr><th>#</th>" + "".join(f"<th>{html.escape(chr(65 + idx) if idx < 26 else str(idx + 1))}</th>" for idx in range(max_cols)) + "</tr>"
+        body_rows = []
+        for row_index, row in enumerate(rows, start=1):
+            cells = "".join(f"<td>{html.escape(str(row[col]) if col < len(row) else '')}</td>" for col in range(max_cols))
+            body_rows.append(f"<tr><th>{row_index}</th>{cells}</tr>")
+        return "<table>" + header + "".join(body_rows) + "</table>"
+
+    @app.get("/preview/<manifest_id>")
+    def preview_file(manifest_id: str) -> Response:
+        manifest = _manifest_for_access(manifest_id)
+        ext = _file_extension(manifest.file_name)
+        if ext in PREVIEW_SHEET_EXTENSIONS:
+            return redirect(url_for("preview_sheet", manifest_id=manifest.manifest_id))
+        if ext not in PREVIEW_INLINE_EXTENSIONS:
+            return _html_page(
+                manifest.file_name,
+                "<div class='note'>Für diesen Dateityp gibt es keine integrierte Vorschau. Bitte nutze Herunterladen.</div>",
+            )
+        try:
+            output = _ensure_preview_file(manifest)
+        except StorageError as exc:
+            abort(503, str(exc))
+        response = send_file(
+            output,
+            as_attachment=False,
+            download_name=manifest.file_name,
+            mimetype=_preview_mimetype(manifest.file_name),
+            conditional=True,
+            max_age=0,
+        )
+        response.headers["Content-Disposition"] = f"inline; filename={secure_filename(manifest.file_name) or 'preview'}"
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        return response
+
+    @app.get("/preview/<manifest_id>/sheet")
+    def preview_sheet(manifest_id: str) -> Response:
+        manifest = _manifest_for_access(manifest_id)
+        ext = _file_extension(manifest.file_name)
+        try:
+            output = _ensure_preview_file(manifest)
+            if ext == ".csv":
+                rows = _read_csv_preview(output)
+            elif ext in {".xlsx", ".xlsm"}:
+                rows = _read_xlsx_preview(output)
+            else:
+                return _html_page(
+                    manifest.file_name,
+                    "<div class='note'>Dieser Tabellen-Typ kann im Browser noch nicht direkt angezeigt werden. Unterstützt sind CSV, XLSX und XLSM.</div>",
+                )
+        except zipfile.BadZipFile:
+            return _html_page(manifest.file_name, "<div class='note'>Die Excel-Datei konnte nicht gelesen werden.</div>")
+        except StorageError as exc:
+            abort(503, str(exc))
+        except Exception as exc:
+            return _html_page(manifest.file_name, f"<div class='note'>Vorschau konnte nicht erzeugt werden: {html.escape(str(exc))}</div>")
+        return _html_page(manifest.file_name, _rows_to_table(rows))
 
     @app.post("/api/external-links/<manifest_id>")
     def api_create_external_download_link(manifest_id: str) -> Response:
