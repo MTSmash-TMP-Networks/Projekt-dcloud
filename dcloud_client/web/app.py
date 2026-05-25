@@ -26,6 +26,7 @@ import time
 import subprocess
 import re
 import shutil
+import importlib.util
 import unicodedata
 from urllib import error as url_error, parse as url_parse, request as url_request
 
@@ -166,6 +167,7 @@ def create_app(
     app.secret_key = identity.node_id[:32]
     app.config["DCLOUD_APP_CONFIG"] = config
     app.jinja_env.filters["human_bytes"] = human_bytes
+    browser_access_token = secrets.token_urlsafe(32)
     relay_clients: dict[str, HttpRelayClient] = {}
     relay_transports: dict[str, HttpRelayTransport] = {}
     relay_lock = threading.RLock()
@@ -478,7 +480,7 @@ def create_app(
                 return "peer", peer
         raise StorageError(f"Kein aktiver dcloud-Peer für {hostname} gefunden")
 
-    def _rewrite_browser_html(body: bytes, base_url: str) -> bytes:
+    def _rewrite_browser_html(body: bytes, base_url: str, *, native_mode: bool = False) -> bytes:
         text = body.decode("utf-8", errors="replace")
         def repl(match: re.Match[str]) -> str:
             attr = match.group(1)
@@ -487,17 +489,27 @@ def create_app(
             if not target or target.startswith(("#", "mailto:", "tel:", "javascript:", "data:")):
                 return match.group(0)
             absolute = url_parse.urljoin(base_url, target)
+            if native_mode:
+                absolute_parsed = url_parse.urlsplit(absolute)
+                absolute_host = (absolute_parsed.hostname or "").lower()
+                if absolute_parsed.scheme.lower() in {"http", "https"} and not absolute_host.endswith(".dcloud"):
+                    return f'{attr}={quote}{html.escape(absolute, quote=True)}{quote}'
             proxied = url_for("browser_view") + "?url=" + url_parse.quote(absolute, safe="")
+            if native_mode:
+                proxied += "&native=1"
+                token = str(request.args.get("browser_token") or "")
+                if token and secrets.compare_digest(token, browser_access_token):
+                    proxied += "&browser_token=" + url_parse.quote(token, safe="")
             return f'{attr}={quote}{html.escape(proxied, quote=True)}{quote}'
         text = re.sub(r'\b(href|src|action)=(["\'])(.*?)(\2)', lambda m: repl(m), text, flags=re.IGNORECASE | re.DOTALL)
         return text.encode("utf-8")
 
-    def _proxy_response_from_bytes(body: bytes, *, status: int = 200, headers: dict[str, str] | None = None, base_url: str = "") -> Response:
+    def _proxy_response_from_bytes(body: bytes, *, status: int = 200, headers: dict[str, str] | None = None, base_url: str = "", native_mode: bool = False) -> Response:
         source_headers = headers or {}
         content_type = source_headers.get("Content-Type") or source_headers.get("content-type") or "application/octet-stream"
         out_body = body
         if "text/html" in content_type.lower() and base_url:
-            out_body = _rewrite_browser_html(body, base_url)
+            out_body = _rewrite_browser_html(body, base_url, native_mode=native_mode)
             content_type = "text/html; charset=utf-8"
         response = Response(out_body, status=status, content_type=content_type)
         for key, value in source_headers.items():
@@ -507,43 +519,58 @@ def create_app(
         response.headers["Cache-Control"] = "no-store"
         return response
 
-    def _fetch_external_browser_url(url: str) -> Response:
+    def _browser_forward_request_parts() -> tuple[str, bytes, dict[str, str]]:
+        method = request.method.upper()
+        if method not in {"GET", "POST", "HEAD"}:
+            method = "GET"
+        body = request.get_data() if method == "POST" else b""
+        headers = {
+            "User-Agent": "dcloud-internal-browser/1.0",
+            "Accept": request.headers.get("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"),
+        }
+        if method == "POST":
+            if request.headers.get("Content-Type"):
+                headers["Content-Type"] = request.headers.get("Content-Type", "")
+            headers["Content-Length"] = str(len(body))
+        return method, body, headers
+
+    def _fetch_external_browser_url(url: str, *, native_mode: bool = False) -> Response:
         parsed = url_parse.urlsplit(url)
         if parsed.scheme.lower() not in {"http", "https"}:
             return Response("Der interne Browser erlaubt nur http:// und https:// URLs.", status=400, content_type="text/plain; charset=utf-8")
+        method, body, headers = _browser_forward_request_parts()
         req = url_request.Request(
             url,
-            headers={
-                "User-Agent": "dcloud-internal-browser/1.0",
-                "Accept": request.headers.get("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"),
-            },
-            method="GET",
+            data=body if method == "POST" else None,
+            headers=headers,
+            method=method,
         )
         try:
             with url_request.urlopen(req, timeout=18) as remote:
                 body = remote.read(8 * 1024 * 1024)
                 headers = {str(k): str(v) for k, v in remote.headers.items()}
-                return _proxy_response_from_bytes(body, status=int(remote.status), headers=headers, base_url=url)
+                return _proxy_response_from_bytes(body, status=int(remote.status), headers=headers, base_url=url, native_mode=native_mode)
         except url_error.HTTPError as exc:
             body = exc.read(1024 * 1024)
             headers = {str(k): str(v) for k, v in exc.headers.items()}
-            return _proxy_response_from_bytes(body, status=int(exc.code), headers=headers, base_url=url)
+            return _proxy_response_from_bytes(body, status=int(exc.code), headers=headers, base_url=url, native_mode=native_mode)
         except Exception as exc:
             return Response(f"Seite konnte nicht geladen werden: {exc}", status=502, content_type="text/plain; charset=utf-8")
 
-    def _fetch_peer_dcloud_site(peer: Any, parsed: Any, original_url: str) -> Response:
+    def _fetch_peer_dcloud_site(peer: Any, parsed: Any, original_url: str, *, native_mode: bool = False) -> Response:
         site_path = parsed.path or "/"
         relay_path = "/dcloud-site" + (site_path if site_path.startswith("/") else "/" + site_path)
         if parsed.query:
             relay_path += "?" + parsed.query
+        method, body, headers = _browser_forward_request_parts()
         if getattr(peer, "host", "") and getattr(peer, "host", "") != "__relay__":
             port = int(getattr(peer, "web_port", None) or config.web.port)
             direct_url = f"http://{getattr(peer, 'host')}:{port}{relay_path}"
             try:
-                with url_request.urlopen(url_request.Request(direct_url, headers={"User-Agent": "dcloud-internal-browser/1.0"}), timeout=10) as remote:
+                with url_request.urlopen(url_request.Request(direct_url, data=body if method == "POST" else None, headers=headers, method=method), timeout=10) as remote:
                     body = remote.read(8 * 1024 * 1024)
                     headers = {str(k): str(v) for k, v in remote.headers.items()}
-                    return _proxy_response_from_bytes(body, status=int(remote.status), headers=headers, base_url=original_url)
+                    return _proxy_response_from_bytes(body, status=int(remote.status), headers=headers, base_url=original_url, native_mode=native_mode)
             except Exception:
                 pass
         relay_url = str(getattr(peer, "relay_url", "") or "").rstrip("/")
@@ -554,9 +581,10 @@ def create_app(
             try:
                 relay_response = relay_client.direct_proxy_request(
                     peer,
-                    method="GET",
+                    method=method,
                     path=relay_path,
-                    headers={"Accept": request.headers.get("Accept", "text/html,*/*")},
+                    headers=headers,
+                    body=body,
                     timeout=20,
                 )
                 return _proxy_response_from_bytes(
@@ -564,15 +592,17 @@ def create_app(
                     status=relay_response.status_code,
                     headers=relay_response.headers,
                     base_url=original_url,
+                    native_mode=native_mode,
                 )
             except Exception as exc:
                 last_relay_error = str(exc)
             try:
                 relay_response = relay_client.forward_request(
                     peer,
-                    method="GET",
+                    method=method,
                     path=relay_path,
-                    headers={"Accept": request.headers.get("Accept", "text/html,*/*")},
+                    headers=headers,
+                    body=body,
                     timeout=20,
                 )
                 return _proxy_response_from_bytes(
@@ -580,6 +610,7 @@ def create_app(
                     status=relay_response.status_code,
                     headers=relay_response.headers,
                     base_url=original_url,
+                    native_mode=native_mode,
                 )
             except Exception as exc:
                 details = str(exc)
@@ -588,7 +619,7 @@ def create_app(
                 return Response(f"Peer-Webseite über Relay nicht erreichbar: {details}", status=502, content_type="text/plain; charset=utf-8")
         return Response("Peer-Webseite ist aktuell nicht erreichbar.", status=502, content_type="text/plain; charset=utf-8")
 
-    def _fetch_dcloud_browser_url(url: str) -> Response:
+    def _fetch_dcloud_browser_url(url: str, *, native_mode: bool = False) -> Response:
         parsed = url_parse.urlsplit(url)
         hostname = (parsed.hostname or "").lower()
         try:
@@ -600,9 +631,55 @@ def create_app(
             if response.content_type and "text/html" in response.content_type.lower():
                 response.direct_passthrough = False
                 body = response.get_data()
-                return _proxy_response_from_bytes(body, status=response.status_code, headers=dict(response.headers), base_url=url)
+                return _proxy_response_from_bytes(body, status=response.status_code, headers=dict(response.headers), base_url=url, native_mode=native_mode)
             return response
-        return _fetch_peer_dcloud_site(peer, parsed, url)
+        return _fetch_peer_dcloud_site(peer, parsed, url, native_mode=native_mode)
+
+
+
+    def _local_dashboard_base_url() -> str:
+        host = str(getattr(config.web, "host", "127.0.0.1") or "127.0.0.1")
+        if host in {"0.0.0.0", "::", ""}:
+            host = "127.0.0.1"
+        if ":" in host and not host.startswith("["):
+            host = f"[{host}]"
+        return f"http://{host}:{int(config.web.port)}"
+
+    def _native_browser_available() -> bool:
+        return importlib.util.find_spec("PySide6") is not None
+
+    def _launch_native_browser(target_url: str) -> None:
+        project_root = Path(__file__).resolve().parents[2]
+        profile_dir = config.storage.path / "browser_profile"
+        profile_dir.mkdir(parents=True, exist_ok=True)
+        env = os.environ.copy()
+        env["PYTHONPATH"] = str(project_root) + (os.pathsep + env["PYTHONPATH"] if env.get("PYTHONPATH") else "")
+        if os.name != "nt" and hasattr(os, "geteuid") and os.geteuid() == 0:
+            env.setdefault("QTWEBENGINE_DISABLE_SANDBOX", "1")
+        command = [
+            sys.executable,
+            "-m",
+            "dcloud_client.web.native_browser",
+            "--app-url",
+            _local_dashboard_base_url(),
+            "--url",
+            target_url,
+            "--profile-dir",
+            str(profile_dir),
+            "--browser-token",
+            browser_access_token,
+        ]
+        kwargs: dict[str, Any] = {
+            "cwd": str(project_root),
+            "env": env,
+            "stdin": subprocess.DEVNULL,
+            "stdout": subprocess.DEVNULL,
+            "stderr": subprocess.DEVNULL,
+            "close_fds": os.name != "nt",
+        }
+        if os.name == "nt":
+            kwargs["creationflags"] = getattr(subprocess, "DETACHED_PROCESS", 0) | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+        subprocess.Popen(command, **kwargs)
 
     def web_hosting_payload(peers: list[Any] | None = None) -> dict[str, Any]:
         peer_items = []
@@ -625,6 +702,8 @@ def create_app(
             "localUrl": f"http://{local_names[0] if local_names else _primary_web_hostname()}/",
             "phpAvailable": bool(_php_binary()),
             "phpBinary": _php_binary(),
+            "nativeBrowserAvailable": _native_browser_available(),
+            "nativeBrowserEngine": "Qt WebEngine / PySide6" if _native_browser_available() else "PySide6 fehlt",
             "peers": peer_items,
         }
 
@@ -1012,6 +1091,9 @@ def create_app(
             return True
         if path.startswith("/dcloud-site"):
             return True
+        if path.startswith("/browser/view"):
+            token = str(request.args.get("browser_token") or "")
+            return bool(token and secrets.compare_digest(token, browser_access_token))
         # Peer/relay endpoints must stay reachable without dashboard login.
         if path.startswith("/api/p2p/"):
             return True
@@ -2083,14 +2165,32 @@ def create_app(
         peers = _list_active_peers()
         return jsonify({"ok": True, "webHosting": web_hosting_payload(peers)})
 
-    @app.route("/browser/view", methods=["GET"])
+
+    @app.post("/api/browser/native/open")
+    def api_open_native_browser() -> Response:
+        payload = request.get_json(silent=True) or {}
+        target_url = _browser_url(str(payload.get("url") or ""))
+        if not _native_browser_available():
+            return jsonify({
+                "ok": False,
+                "message": "Der vollwertige Browser benötigt PySide6/Qt WebEngine. Bitte `pip install -r requirements.txt` ausführen und dcloud neu starten.",
+                "targetUrl": target_url,
+            }), 503
+        try:
+            _launch_native_browser(target_url)
+        except Exception as exc:
+            return jsonify({"ok": False, "message": f"Browser konnte nicht gestartet werden: {exc}", "targetUrl": target_url}), 500
+        return jsonify({"ok": True, "message": "Vollwertiger dcloud Browser wurde gestartet", "targetUrl": target_url})
+
+    @app.route("/browser/view", methods=["GET", "POST", "HEAD"])
     def browser_view() -> Response:
         target_url = _browser_url(request.args.get("url"))
         parsed = url_parse.urlsplit(target_url)
         hostname = (parsed.hostname or "").lower()
+        native_mode = str(request.args.get("native") or "").lower() in {"1", "true", "yes"}
         if hostname.endswith(".dcloud"):
-            return _fetch_dcloud_browser_url(target_url)
-        return _fetch_external_browser_url(target_url)
+            return _fetch_dcloud_browser_url(target_url, native_mode=native_mode)
+        return _fetch_external_browser_url(target_url, native_mode=native_mode)
 
     @app.get("/api/uploads/<upload_id>")
     def api_upload_progress(upload_id: str) -> Response:
