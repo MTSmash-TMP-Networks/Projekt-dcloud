@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import os
 import tempfile
 import json
 import secrets
@@ -23,6 +24,9 @@ import socket
 import time
 import subprocess
 import re
+import shutil
+import unicodedata
+from urllib import error as url_error, parse as url_parse, request as url_request
 
 from flask import Flask, Response, abort, flash, jsonify, redirect, render_template, request, send_file, session, url_for
 from werkzeug.utils import secure_filename
@@ -160,6 +164,7 @@ def create_app(
     replication_worker_started = False
     replication_queued_manifest_ids: set[str] = set()
     user_store = UserStore(chunk_store.root / "users.json")
+    web_root = chunk_store.root / "web"
 
     def _is_ajax_request() -> bool:
         return request.headers.get("X-Requested-With") == "XMLHttpRequest" or request.accept_mimetypes.best == "application/json"
@@ -170,6 +175,335 @@ def create_app(
 
     def _safe_peer_id(value: str | None) -> str:
         return "".join(char for char in (value or "") if char.isalnum() or char in "-_")[:128]
+
+    def _web_host_slug(value: str | None) -> str:
+        """Return a DNS-ish label used by the internal .dcloud browser."""
+        normalized = unicodedata.normalize("NFKD", str(value or ""))
+        ascii_text = normalized.encode("ascii", "ignore").decode("ascii")
+        slug = re.sub(r"[^a-z0-9-]+", "-", ascii_text.lower()).strip("-")
+        slug = re.sub(r"-+", "-", slug)
+        if len(slug) > 48:
+            slug = slug[:48].strip("-")
+        return slug
+
+    def _web_host_candidates(node_id: str, configured_name: str | None = None) -> list[str]:
+        configured = str(configured_name or "").strip()
+        configured_slug = "" if configured.lower() in {"", "dcloud-node", "node", "client", "server"} else _web_host_slug(configured)
+        candidates = [
+            configured_slug,
+            _web_host_slug(display_name_for_peer(node_id, configured_name)),
+            _web_host_slug(node_id[:12]),
+        ]
+        result: list[str] = []
+        for candidate in candidates:
+            if candidate and candidate not in result:
+                result.append(candidate)
+        return result or ["peer"]
+
+    def _primary_web_hostname() -> str:
+        return f"{_web_host_candidates(identity.node_id, config.node.name)[0]}.dcloud"
+
+    def _php_binary() -> str:
+        return shutil.which("php-cgi") or shutil.which("php") or ""
+
+    def _default_web_index_html() -> str:
+        host = html.escape(_primary_web_hostname())
+        display_name = html.escape(display_name_for_peer(identity.node_id, config.node.name))
+        return f"""<!doctype html>
+<html lang=\"de\">
+<head>
+  <meta charset=\"utf-8\" />
+  <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\" />
+  <title>{display_name} · dcloud Web</title>
+  <style>
+    body{{margin:0;font-family:system-ui,-apple-system,Segoe UI,sans-serif;background:linear-gradient(135deg,#07111f,#0d63d8);color:white;min-height:100vh;display:grid;place-items:center}}
+    main{{width:min(860px,calc(100vw - 32px));padding:42px;border:1px solid rgba(255,255,255,.28);border-radius:28px;background:rgba(255,255,255,.13);box-shadow:0 24px 80px rgba(0,0,0,.35);backdrop-filter:blur(18px)}}
+    h1{{font-size:clamp(2rem,6vw,4.5rem);margin:0 0 10px}}
+    p{{font-size:1.1rem;line-height:1.65;color:rgba(255,255,255,.88)}}
+    code{{background:rgba(0,0,0,.22);padding:.16rem .38rem;border-radius:.42rem}}
+  </style>
+</head>
+<body>
+  <main>
+    <h1>Willkommen auf {host}</h1>
+    <p>Diese Seite wird direkt aus dem lokalen dcloud-Ordner <code>storage/web</code> ausgeliefert.</p>
+    <p>Lege hier eigene <code>.html</code>, Assets und optional <code>.php</code>-Dateien ab. Im internen Browser ist die Seite unter <code>http://{host}</code> erreichbar.</p>
+  </main>
+</body>
+</html>
+"""
+
+    def _ensure_web_root() -> None:
+        web_root.mkdir(parents=True, exist_ok=True)
+        index_path = web_root / "index.html"
+        if not index_path.exists():
+            index_path.write_text(_default_web_index_html(), encoding="utf-8")
+        readme_path = web_root / "README.txt"
+        if not readme_path.exists():
+            readme_path.write_text(
+                "dcloud Web-Ordner\n\n"
+                "Dateien in diesem Ordner werden vom lokalen dcloud-Node ausgeliefert.\n"
+                f"Startseite im internen Browser: http://{_primary_web_hostname()}/\n\n"
+                "Unterstuetzt werden statische HTML/CSS/JS-Dateien und PHP-Dateien, "
+                "wenn php-cgi oder php auf dem System installiert ist.\n",
+                encoding="utf-8",
+            )
+
+    def _safe_web_path(raw_path: str | None) -> Path:
+        clean = str(raw_path or "").split("?", 1)[0].replace("\\", "/").lstrip("/")
+        if not clean or clean.endswith("/"):
+            clean = f"{clean}index.html"
+        candidate = (web_root / clean).resolve()
+        root = web_root.resolve()
+        if candidate != root and root not in candidate.parents:
+            raise StorageError("Web-Pfad ist ungültig")
+        if candidate.is_dir():
+            candidate = candidate / "index.html"
+        return candidate
+
+    def _split_cgi_response(raw: bytes) -> tuple[dict[str, str], bytes]:
+        for separator in (b"\r\n\r\n", b"\n\n"):
+            if separator in raw:
+                header_blob, body = raw.split(separator, 1)
+                headers: dict[str, str] = {}
+                for line in header_blob.replace(b"\r\n", b"\n").split(b"\n"):
+                    if b":" not in line:
+                        continue
+                    key, value = line.split(b":", 1)
+                    headers[key.decode("latin1", errors="ignore").strip()] = value.decode("latin1", errors="ignore").strip()
+                return headers, body
+        return {}, raw
+
+    def _render_php_file(script_path: Path, web_path: str, *, query_string: str | None = None) -> Response:
+        php_binary = _php_binary()
+        if not php_binary:
+            return Response(
+                "PHP-Unterstützung ist nicht aktiv: Installiere php-cgi oder php auf diesem System.",
+                status=501,
+                content_type="text/plain; charset=utf-8",
+            )
+        body = request.get_data() if request.method in {"POST", "PUT", "PATCH"} else b""
+        env = os.environ.copy()
+        env.update(
+            {
+                "GATEWAY_INTERFACE": "CGI/1.1",
+                "SERVER_PROTOCOL": "HTTP/1.1",
+                "REQUEST_METHOD": request.method,
+                "QUERY_STRING": request.query_string.decode("latin1", errors="ignore") if query_string is None else str(query_string),
+                "SCRIPT_FILENAME": str(script_path),
+                "SCRIPT_NAME": "/dcloud-site/" + web_path.lstrip("/"),
+                "DOCUMENT_ROOT": str(web_root.resolve()),
+                "SERVER_NAME": _primary_web_hostname(),
+                "SERVER_PORT": str(config.web.port),
+                "CONTENT_TYPE": request.headers.get("Content-Type", ""),
+                "CONTENT_LENGTH": str(len(body)),
+                "REDIRECT_STATUS": "200",
+            }
+        )
+        command = [php_binary]
+        if Path(php_binary).name != "php-cgi":
+            command = [php_binary, str(script_path)]
+        try:
+            result = subprocess.run(
+                command,
+                input=body,
+                capture_output=True,
+                env=env,
+                cwd=str(script_path.parent),
+                timeout=20,
+                check=False,
+            )
+        except subprocess.TimeoutExpired:
+            return Response("PHP-Skript hat das Zeitlimit überschritten.", status=504, content_type="text/plain; charset=utf-8")
+        except Exception as exc:
+            return Response(f"PHP-Ausführung fehlgeschlagen: {exc}", status=500, content_type="text/plain; charset=utf-8")
+        if result.returncode != 0:
+            message = result.stderr.decode("utf-8", errors="replace") or "PHP-Skript wurde mit Fehler beendet."
+            return Response(message, status=500, content_type="text/plain; charset=utf-8")
+        headers, response_body = _split_cgi_response(result.stdout)
+        status = 200
+        status_header = headers.pop("Status", "")
+        if status_header:
+            try:
+                status = int(status_header.split()[0])
+            except Exception:
+                status = 200
+        response_headers = {}
+        for key, value in headers.items():
+            if key.lower() in {"content-type", "location", "cache-control"}:
+                response_headers[key] = value
+        if not any(key.lower() == "content-type" for key in response_headers):
+            response_headers["Content-Type"] = "text/html; charset=utf-8"
+        return Response(response_body, status=status, headers=response_headers)
+
+    def _serve_local_web_path(path: str | None = None, *, query_string: str | None = None) -> Response:
+        try:
+            file_path = _safe_web_path(path)
+        except StorageError as exc:
+            return Response(str(exc), status=400, content_type="text/plain; charset=utf-8")
+        if not file_path.exists() or not file_path.is_file():
+            return Response("Web-Datei nicht gefunden", status=404, content_type="text/plain; charset=utf-8")
+        rel_path = file_path.relative_to(web_root.resolve()).as_posix()
+        if file_path.suffix.lower() == ".php":
+            return _render_php_file(file_path, rel_path, query_string=query_string)
+        return send_file(file_path, conditional=True)
+
+    def _browser_url(value: str | None) -> str:
+        raw = str(value or "").strip()
+        if not raw:
+            return f"http://{_primary_web_hostname()}/"
+        if raw.startswith("//"):
+            return "https:" + raw
+        if "://" not in raw:
+            raw = ("http://" if raw.lower().endswith(".dcloud") or ".dcloud/" in raw.lower() else "https://") + raw
+        return raw
+
+    def _resolve_dcloud_peer(hostname: str) -> tuple[str, Any | None]:
+        label = hostname.lower().removesuffix(".dcloud").strip(".")
+        local_candidates = _web_host_candidates(identity.node_id, config.node.name)
+        if label in local_candidates:
+            return "local", None
+        for peer in _list_active_peers():
+            if label in _web_host_candidates(peer.node_id, getattr(peer, "name", None)):
+                return "peer", peer
+        if label == identity.node_id[:12].lower():
+            return "local", None
+        for peer in _list_active_peers():
+            if label == str(peer.node_id or "")[:12].lower():
+                return "peer", peer
+        raise StorageError(f"Kein aktiver dcloud-Peer für {hostname} gefunden")
+
+    def _rewrite_browser_html(body: bytes, base_url: str) -> bytes:
+        text = body.decode("utf-8", errors="replace")
+        def repl(match: re.Match[str]) -> str:
+            attr = match.group(1)
+            quote = match.group(2)
+            target = html.unescape(match.group(3).strip())
+            if not target or target.startswith(("#", "mailto:", "tel:", "javascript:", "data:")):
+                return match.group(0)
+            absolute = url_parse.urljoin(base_url, target)
+            proxied = url_for("browser_view") + "?url=" + url_parse.quote(absolute, safe="")
+            return f'{attr}={quote}{html.escape(proxied, quote=True)}{quote}'
+        text = re.sub(r'\b(href|src|action)=(["\'])(.*?)(\2)', lambda m: repl(m), text, flags=re.IGNORECASE | re.DOTALL)
+        return text.encode("utf-8")
+
+    def _proxy_response_from_bytes(body: bytes, *, status: int = 200, headers: dict[str, str] | None = None, base_url: str = "") -> Response:
+        source_headers = headers or {}
+        content_type = source_headers.get("Content-Type") or source_headers.get("content-type") or "application/octet-stream"
+        out_body = body
+        if "text/html" in content_type.lower() and base_url:
+            out_body = _rewrite_browser_html(body, base_url)
+            content_type = "text/html; charset=utf-8"
+        response = Response(out_body, status=status, content_type=content_type)
+        for key, value in source_headers.items():
+            lower = key.lower()
+            if lower in {"cache-control", "expires", "last-modified", "etag"}:
+                response.headers[key] = value
+        response.headers["Cache-Control"] = "no-store"
+        return response
+
+    def _fetch_external_browser_url(url: str) -> Response:
+        parsed = url_parse.urlsplit(url)
+        if parsed.scheme.lower() not in {"http", "https"}:
+            return Response("Der interne Browser erlaubt nur http:// und https:// URLs.", status=400, content_type="text/plain; charset=utf-8")
+        req = url_request.Request(
+            url,
+            headers={
+                "User-Agent": "dcloud-internal-browser/1.0",
+                "Accept": request.headers.get("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"),
+            },
+            method="GET",
+        )
+        try:
+            with url_request.urlopen(req, timeout=18) as remote:
+                body = remote.read(8 * 1024 * 1024)
+                headers = {str(k): str(v) for k, v in remote.headers.items()}
+                return _proxy_response_from_bytes(body, status=int(remote.status), headers=headers, base_url=url)
+        except url_error.HTTPError as exc:
+            body = exc.read(1024 * 1024)
+            headers = {str(k): str(v) for k, v in exc.headers.items()}
+            return _proxy_response_from_bytes(body, status=int(exc.code), headers=headers, base_url=url)
+        except Exception as exc:
+            return Response(f"Seite konnte nicht geladen werden: {exc}", status=502, content_type="text/plain; charset=utf-8")
+
+    def _fetch_peer_dcloud_site(peer: Any, parsed: Any, original_url: str) -> Response:
+        site_path = parsed.path or "/"
+        relay_path = "/dcloud-site" + (site_path if site_path.startswith("/") else "/" + site_path)
+        if parsed.query:
+            relay_path += "?" + parsed.query
+        if getattr(peer, "host", "") and getattr(peer, "host", "") != "__relay__":
+            port = int(getattr(peer, "web_port", None) or config.web.port)
+            direct_url = f"http://{getattr(peer, 'host')}:{port}{relay_path}"
+            try:
+                with url_request.urlopen(url_request.Request(direct_url, headers={"User-Agent": "dcloud-internal-browser/1.0"}), timeout=10) as remote:
+                    body = remote.read(8 * 1024 * 1024)
+                    headers = {str(k): str(v) for k, v in remote.headers.items()}
+                    return _proxy_response_from_bytes(body, status=int(remote.status), headers=headers, base_url=original_url)
+            except Exception:
+                pass
+        relay_url = str(getattr(peer, "relay_url", "") or "").rstrip("/")
+        with relay_lock:
+            relay_client = relay_clients.get(relay_url)
+        if relay_client is not None:
+            try:
+                relay_response = relay_client.forward_request(
+                    peer,
+                    method="GET",
+                    path=relay_path,
+                    headers={"Accept": request.headers.get("Accept", "text/html,*/*")},
+                    timeout=20,
+                )
+                return _proxy_response_from_bytes(
+                    relay_response.body,
+                    status=relay_response.status_code,
+                    headers=relay_response.headers,
+                    base_url=original_url,
+                )
+            except Exception as exc:
+                return Response(f"Peer-Webseite über Relay nicht erreichbar: {exc}", status=502, content_type="text/plain; charset=utf-8")
+        return Response("Peer-Webseite ist aktuell nicht erreichbar.", status=502, content_type="text/plain; charset=utf-8")
+
+    def _fetch_dcloud_browser_url(url: str) -> Response:
+        parsed = url_parse.urlsplit(url)
+        hostname = (parsed.hostname or "").lower()
+        try:
+            target_kind, peer = _resolve_dcloud_peer(hostname)
+        except StorageError as exc:
+            return Response(str(exc), status=404, content_type="text/plain; charset=utf-8")
+        if target_kind == "local":
+            response = _serve_local_web_path(parsed.path or "/", query_string=parsed.query)
+            if response.content_type and "text/html" in response.content_type.lower():
+                response.direct_passthrough = False
+                body = response.get_data()
+                return _proxy_response_from_bytes(body, status=response.status_code, headers=dict(response.headers), base_url=url)
+            return response
+        return _fetch_peer_dcloud_site(peer, parsed, url)
+
+    def web_hosting_payload(peers: list[Any] | None = None) -> dict[str, Any]:
+        peer_items = []
+        for peer in (peers if peers is not None else _list_active_peers()):
+            names = [f"{candidate}.dcloud" for candidate in _web_host_candidates(peer.node_id, getattr(peer, "name", None))]
+            peer_items.append(
+                {
+                    "nodeId": peer.node_id,
+                    "displayName": display_name_for_peer(peer.node_id, getattr(peer, "name", None)),
+                    "hostnames": names,
+                    "primaryHost": names[0] if names else "",
+                }
+            )
+        local_names = [f"{candidate}.dcloud" for candidate in _web_host_candidates(identity.node_id, config.node.name)]
+        return {
+            "enabled": True,
+            "webRoot": str(web_root),
+            "localHostnames": local_names,
+            "primaryHost": local_names[0] if local_names else _primary_web_hostname(),
+            "localUrl": f"http://{local_names[0] if local_names else _primary_web_hostname()}/",
+            "phpAvailable": bool(_php_binary()),
+            "phpBinary": _php_binary(),
+            "peers": peer_items,
+        }
+
+    _ensure_web_root()
 
     def _load_disabled_peers() -> None:
         """Load user-disabled peers that discovery must not re-add to the UI."""
@@ -550,6 +884,8 @@ def create_app(
         if path.startswith("/static/"):
             return True
         if path.startswith("/external/"):
+            return True
+        if path.startswith("/dcloud-site"):
             return True
         # Peer/relay endpoints must stay reachable without dashboard login.
         if path.startswith("/api/p2p/"):
@@ -1129,16 +1465,17 @@ def create_app(
             return _stream_external_download_to_relay(stream_match.group(1), stream_match.group(2), relay_client)
 
         is_p2p_path = path.startswith("/api/p2p/") and method in {"GET", "POST"}
+        is_dcloud_site = path.startswith("/dcloud-site") and method in {"GET", "POST"}
         is_external_download = (
             method == "GET"
             and path.startswith("/external/")
             and external_header
         )
-        if not (is_p2p_path or is_external_download):
+        if not (is_p2p_path or is_dcloud_site or is_external_download):
             return RelayHttpResponse(
                 status_code=403,
                 headers={"Content-Type": "application/json"},
-                body=b'{"ok":false,"message":"Relay darf nur P2P-API-Endpunkte oder freigegebene externe Download-Tokens aufrufen"}',
+                body=b'{"ok":false,"message":"Relay darf nur P2P-API-Endpunkte, dcloud-Webseiten oder freigegebene externe Download-Tokens aufrufen"}',
             )
         try:
             body = base64.b64decode(str(envelope.get("body_base64", "")))
@@ -1406,6 +1743,7 @@ def create_app(
             "settings": settings_payload(stats, peers),
             "network": network_payload(),
             "networkCapacity": _network_storage_capacity(stats, peers),
+            "webHosting": web_hosting_payload(peers),
             "peers": [peer.to_dict() for peer in peers],
             "disabledPeers": _disabled_peers_payload(),
             "fileCount": len(manifests),
@@ -1537,6 +1875,7 @@ def create_app(
     @app.get("/")
     def dashboard() -> str:
         stats = chunk_store.stats()
+        peers = _list_active_peers()
         manifests = manifest_store.list_visible_for_node(identity.node_id)
         folders = manifest_store.list_folders_for_node(identity.node_id)
         tree = build_folder_tree(manifests, folders, identity.node_id)
@@ -1546,11 +1885,12 @@ def create_app(
             identity=identity,
             stats=stats,
             stats_json=stats_payload(stats),
-            peers=_list_active_peers(),
-            peers_json=[peer.to_dict() for peer in _list_active_peers()],
+            peers=peers,
+            peers_json=[peer.to_dict() for peer in peers],
             disabled_peers_json=_disabled_peers_payload(),
-            settings_json=settings_payload(stats),
+            settings_json=settings_payload(stats, peers),
             network_json=network_payload(),
+            web_hosting_json=web_hosting_payload(peers),
             manifests=manifests,
             folder_tree=tree,
             folder_tree_json=folder_tree_json(tree),
@@ -1596,6 +1936,26 @@ def create_app(
                 "updatedAt": datetime.now(timezone.utc).isoformat(),
             }
         )
+
+    @app.route("/dcloud-site", defaults={"path": ""}, methods=["GET", "POST", "HEAD"])
+    @app.route("/dcloud-site/", defaults={"path": ""}, methods=["GET", "POST", "HEAD"])
+    @app.route("/dcloud-site/<path:path>", methods=["GET", "POST", "HEAD"])
+    def dcloud_site(path: str = "") -> Response:
+        return _serve_local_web_path(path or "/")
+
+    @app.get("/api/browser/hosts")
+    def api_browser_hosts() -> Response:
+        peers = _list_active_peers()
+        return jsonify({"ok": True, "webHosting": web_hosting_payload(peers)})
+
+    @app.route("/browser/view", methods=["GET"])
+    def browser_view() -> Response:
+        target_url = _browser_url(request.args.get("url"))
+        parsed = url_parse.urlsplit(target_url)
+        hostname = (parsed.hostname or "").lower()
+        if hostname.endswith(".dcloud"):
+            return _fetch_dcloud_browser_url(target_url)
+        return _fetch_external_browser_url(target_url)
 
     @app.get("/api/uploads/<upload_id>")
     def api_upload_progress(upload_id: str) -> Response:
@@ -2877,7 +3237,7 @@ def create_app(
             "pre{white-space:pre-wrap;background:white;border:1px solid #d7e4f7;border-radius:14px;padding:14px;box-shadow:0 8px 28px rgba(20,54,102,.08);overflow:auto;}"
             "</style></head><body>"
             f"<header><h1>{safe_title}</h1></header><main>{body}</main></body></html>",
-            mimetype="text/html; charset=utf-8",
+            content_type="text/html; charset=utf-8",
         )
 
     def _read_csv_preview(path: Path, *, max_rows: int = 220, max_cols: int = 60) -> list[list[str]]:

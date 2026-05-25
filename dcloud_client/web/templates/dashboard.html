@@ -191,6 +191,7 @@
     #win-settings{ left:360px; top:120px; width:780px; height:680px; }
     #win-chat{ left:420px; top:90px; width:690px; height:540px; }
     #win-users{ left:455px; top:124px; width:720px; height:570px; }
+    #win-browser{ left:210px; top:72px; width:min(1080px, calc(100vw - 250px)); height:min(720px, calc(100vh - 138px)); }
     @keyframes pop{ from{ opacity:.2; transform:translateY(8px) scale(.982); } to{ opacity:1; transform:none; } }
 
     .titlebar{
@@ -521,6 +522,17 @@
     .sep{ height:1px; background:rgba(10,30,60,.12); margin:7px 5px; }
     .kbd{ font-size:.77rem; opacity:.72; border:1px solid rgba(0,0,0,.12); padding:1px 7px; border-radius:999px; background:rgba(255,255,255,.72); }
 
+    .browser-shell{ display:flex; flex-direction:column; min-height:0; background:rgba(239,247,255,.82); }
+    .browser-toolbar{ display:grid; grid-template-columns:auto auto minmax(220px,1fr) auto; gap:8px; align-items:center; padding:10px 12px; border-bottom:1px solid var(--line); background:linear-gradient(180deg, rgba(255,255,255,.82), rgba(227,240,255,.70)); }
+    .browser-toolbar button, .browser-toolbar input{ border:1px solid rgba(112,142,190,.42); border-radius:13px; background:#fff; color:var(--text); }
+    .browser-toolbar button{ padding:.58rem .78rem; font-weight:750; }
+    .browser-toolbar button:hover{ border-color:rgba(8,102,232,.42); box-shadow:0 8px 18px rgba(32,74,140,.10); }
+    .browser-toolbar input{ width:100%; padding:.63rem .76rem; font-family:ui-monospace, SFMono-Regular, Consolas, monospace; }
+    .browser-meta{ display:flex; flex-wrap:wrap; align-items:center; gap:8px; padding:8px 12px; border-bottom:1px solid rgba(133,162,207,.22); color:#35506f; font-size:.86rem; background:rgba(255,255,255,.55); }
+    .browser-chip{ display:inline-flex; align-items:center; gap:5px; border:1px solid rgba(112,142,190,.26); border-radius:999px; padding:.25rem .55rem; background:rgba(255,255,255,.70); }
+    .browser-stage{ flex:1; min-height:0; background:#fff; }
+    .browser-frame{ width:100%; height:100%; border:0; background:#fff; display:block; }
+
     .taskbar{ position:absolute; left:10px; right:10px; bottom:10px; height:54px; display:flex; align-items:center; gap:10px; padding:8px 12px; background:var(--taskbar); border:1px solid rgba(255,255,255,.20); border-radius:20px; box-shadow:0 -2px 22px rgba(0,0,0,.32), inset 0 1px 0 rgba(255,255,255,.17); backdrop-filter:blur(22px) saturate(1.5); user-select:none; z-index:100; }
     .start{ border:0; padding:.52rem 1rem; border-radius:14px; background:linear-gradient(135deg, #0b65d8, #19c7ff); color:#fff; font-weight:850; box-shadow:0 10px 22px rgba(8,102,232,.28); }
     .start:hover{ filter:brightness(1.08); }
@@ -566,6 +578,9 @@
       </button>
       <button class="desk-item app-icon" data-app="network" type="button">
         <span class="glyph">🌐</span><span class="label">Netzwerk</span>
+      </button>
+      <button class="desk-item app-icon" data-app="browser" type="button">
+        <span class="glyph">🧭</span><span class="label">Browser</span>
       </button>
       <button class="desk-item app-icon" data-app="status" type="button">
         <span class="glyph">🖥️</span><span class="label">System</span>
@@ -643,6 +658,33 @@
         </div>
         <div class="viewer-stage" id="viewer-stage">
           <div class="viewer-empty"><strong>Keine Vorschau geöffnet</strong>Wähle im Datei-Explorer eine Datei aus und nutze Öffnen oder Vorschau.</div>
+        </div>
+      </div>
+    </section>
+
+    <section class="window" id="win-browser" hidden>
+      <div class="titlebar" data-app="browser">
+        <span class="title"><span>🧭</span><span>Interner Browser</span></span>
+        <div class="window-controls">
+          <button type="button" data-action="min" aria-label="Minimieren">–</button>
+          <button type="button" data-action="max" aria-label="Maximieren">□</button>
+          <button type="button" data-action="close" aria-label="Schließen">×</button>
+        </div>
+      </div>
+      <div class="browser-shell window-content">
+        <form class="browser-toolbar" id="browser-form">
+          <button type="button" id="browser-home" title="Lokale dcloud-Webseite öffnen">🏠</button>
+          <button type="button" id="browser-reload" title="Aktuelle Seite neu laden">↻</button>
+          <input id="browser-url" type="text" spellcheck="false" autocomplete="off" placeholder="peername.dcloud oder https://example.com" />
+          <button type="submit">Los</button>
+        </form>
+        <div class="browser-meta">
+          <span class="browser-chip">🏠 <strong id="browser-local-host">-</strong></span>
+          <span class="browser-chip">📂 <span id="browser-web-root">storage/web</span></span>
+          <span class="browser-chip" id="browser-php-status">PHP: wird geprüft</span>
+        </div>
+        <div class="browser-stage">
+          <iframe class="browser-frame" id="browser-frame" title="Interner dcloud Browser" sandbox="allow-forms allow-scripts allow-popups allow-downloads"></iframe>
         </div>
       </div>
     </section>
@@ -1051,6 +1093,7 @@
       stats: {{ stats_json | tojson }},
       settings: {{ settings_json | tojson }},
       network: {{ network_json | tojson }},
+      webHosting: {{ web_hosting_json | tojson }},
       peers: {{ peers_json | tojson }},
       disabledPeers: {{ disabled_peers_json | tojson }},
       fileCount: {{ manifests | length | tojson }},
@@ -1143,6 +1186,11 @@
       const transferBody = document.getElementById("transfer-body");
       const transferToggle = document.getElementById("transfer-toggle");
       const transferToggleLabel = document.getElementById("transfer-toggle-label");
+      const browserFrame = document.getElementById("browser-frame");
+      const browserForm = document.getElementById("browser-form");
+      const browserUrlInput = document.getElementById("browser-url");
+      const browserHomeButton = document.getElementById("browser-home");
+      const browserReloadButton = document.getElementById("browser-reload");
       let pendingShareFile = null;
       let pendingMovePeerFile = null;
       let refreshRequestSeq = 0;
@@ -1155,6 +1203,7 @@
       const windows = {
         explorer: document.getElementById("win-explorer"),
         viewer: document.getElementById("win-viewer"),
+        browser: document.getElementById("win-browser"),
         network: document.getElementById("win-network"),
         status: document.getElementById("win-status"),
         logs: document.getElementById("win-logs"),
@@ -1165,6 +1214,7 @@
       const appLabels = {
         explorer:"📁 Datei-Explorer",
         viewer:"👁️ Vorschau",
+        browser:"🧭 Browser",
         network:"🌐 Netzwerk",
         status:"🖥️ System",
         logs:"📜 Audit-Logs",
@@ -1431,6 +1481,7 @@
         renderDesktopFolders();
         renderExplorerNav();
         if(!windows.explorer.hidden) renderExplorer();
+        if(windows.browser && !windows.browser.hidden) updateBrowserMeta();
       }
       async function refreshState(){
         const requestSeq = ++refreshRequestSeq;
@@ -1452,6 +1503,41 @@
         const source = document.getElementById("logs-source");
         if(source) source.textContent = `Quelle: ${data.manifestAuditPath || "-"} · Aktualisiert: ${formatDateTime(data.updatedAt)}`;
         if(output) output.textContent = String(data.manifestAuditLog || "Keine Logs verfügbar.");
+      }
+
+      function normalizeBrowserUrl(raw){
+        let value = String(raw || "").trim();
+        const hosting = appState.webHosting || {};
+        if(!value) value = hosting.localUrl || `http://${hosting.primaryHost || "peer.dcloud"}/`;
+        if(value.startsWith("//")) value = "https:" + value;
+        if(!/^[a-z][a-z0-9+.-]*:\/\//i.test(value)){
+          value = (value.toLowerCase().includes(".dcloud") ? "http://" : "https://") + value;
+        }
+        return value;
+      }
+      function browserProxySrc(url){
+        return `/browser/view?url=${encodeURIComponent(url)}`;
+      }
+      function updateBrowserMeta(){
+        const hosting = appState.webHosting || {};
+        const localHost = document.getElementById("browser-local-host");
+        const webRoot = document.getElementById("browser-web-root");
+        const phpStatus = document.getElementById("browser-php-status");
+        if(localHost) localHost.textContent = hosting.primaryHost || "peer.dcloud";
+        if(webRoot) webRoot.textContent = hosting.webRoot || "storage/web";
+        if(phpStatus) phpStatus.textContent = hosting.phpAvailable ? `PHP aktiv${hosting.phpBinary ? ": " + hosting.phpBinary : ""}` : "PHP optional: php-cgi/php nicht gefunden";
+      }
+      function navigateBrowser(raw){
+        const target = normalizeBrowserUrl(raw);
+        if(browserUrlInput) browserUrlInput.value = target;
+        if(browserFrame) browserFrame.src = browserProxySrc(target);
+        updateBrowserMeta();
+      }
+      function ensureBrowserLoaded(){
+        updateBrowserMeta();
+        if(browserFrame && !browserFrame.getAttribute("src")){
+          navigateBrowser((appState.webHosting || {}).localUrl || "");
+        }
       }
 
       function renderStats(){
@@ -2037,6 +2123,7 @@
         focusWindow(app);
         if(!openOrder.includes(app)) openOrder.push(app);
         if(app === "explorer") renderExplorer();
+        if(app === "browser") ensureBrowserLoaded();
         if(app === "logs") refreshLogs().catch(() => {});
         if(app === "users") loadUsers().catch(() => {});
         if(app === "chat"){ renderChatPeers(); loadChatMessages().catch(() => {}); }
@@ -3476,6 +3563,17 @@ ${file.name}`)) return;
           event.preventDefault();
           toggleShare(selectedTarget.file).catch(error => showToast(error.message, "error"));
         }
+      });
+
+      browserForm?.addEventListener("submit", event => {
+        event.preventDefault();
+        navigateBrowser(browserUrlInput?.value || "");
+      });
+      browserHomeButton?.addEventListener("click", () => navigateBrowser((appState.webHosting || {}).localUrl || ""));
+      browserReloadButton?.addEventListener("click", () => {
+        if(!browserFrame) return;
+        const current = browserUrlInput?.value || (appState.webHosting || {}).localUrl || "";
+        navigateBrowser(current);
       });
 
       applyState(appState);

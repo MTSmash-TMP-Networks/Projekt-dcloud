@@ -343,7 +343,10 @@ class HttpRelayClient:
             raise RelayError("Peer nutzt einen anderen Relay-Server")
         if not relay_id_is_valid(peer.node_id):
             raise RelayError(f"Peer hat keine gueltige Node-ID: {str(peer.node_id or '')[:24]}")
-        if method.upper() not in {"GET", "POST"} or not path.startswith("/api/p2p/"):
+        method_upper = method.upper()
+        allowed_peer_api = path.startswith("/api/p2p/") and method_upper in {"GET", "POST"}
+        allowed_dcloud_site = path.startswith("/dcloud-site") and method_upper in {"GET", "POST"}
+        if not (allowed_peer_api or allowed_dcloud_site):
             raise RelayError("Ungueltige Relay-Anfrage")
 
     @staticmethod

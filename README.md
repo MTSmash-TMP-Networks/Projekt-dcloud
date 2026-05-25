@@ -22,6 +22,8 @@ dcloud ist ein Python-basierter Storage-Client mit Web-Dashboard im Desktop-Stil
 - Temporäre externe Download-Links mit maximal 60 Minuten Laufzeit
 - Reverse-Mailbox-Download über Relay, wenn der Node von außen nicht direkt erreichbar ist
 - Peer-Chat mit ungelesen-Badge, Emojis, Bildversand und Datei-Teilen
+- Neuer interner Browser mit `peername.dcloud`-Auflösung, normalem Webzugriff und lokalem `storage/web`-Hosting
+- Lokaler Web-Ordner `storage/web` mit HTML/CSS/JS-Auslieferung und optionaler PHP-Ausführung über `php-cgi`/`php`
 - Optionaler eingebetteter SMB-Server
 - OpenWrt-, Linux-, macOS-, Windows- und Windows-Docker-Installationspfade
 - Auto-Update-Skripte für systemd, launchd und OpenWrt-Cron
@@ -72,6 +74,25 @@ Das Dashboard ist als Desktop-Oberfläche aufgebaut. Wichtige Bereiche sind übe
 - **Audit-Logs** – Logausgabe getrennt vom Systemstatus
 - **Einstellungen** – Storage, Komprimierung, Relay, SMB, Netzwerk
 
+
+
+### Interner Browser und dcloud-Webhosting
+
+Das Dashboard enthält jetzt ein neues Desktop-Icon **Browser**. Der interne Browser kann normale `http://`- und `https://`-Adressen öffnen und löst zusätzlich dcloud-interne Hostnamen wie `peername.dcloud` auf. Für den eigenen Node wird beim Start automatisch ein neuer Ordner angelegt:
+
+```text
+storage/web
+```
+
+Die Startseite liegt dort als `index.html`. Eigene Webseiten können direkt in diesem Ordner abgelegt werden. Statische Dateien wie HTML, CSS, JavaScript, Bilder und Downloads werden über `/dcloud-site/...` ausgeliefert. PHP-Dateien mit der Endung `.php` werden ausgeführt, wenn auf dem System `php-cgi` oder alternativ `php` installiert ist. Ohne PHP-Binary bleibt die statische Auslieferung aktiv und PHP-Dateien liefern einen Hinweistext.
+
+Im internen Browser ist die eigene Seite unter dem angezeigten Hostnamen erreichbar, zum Beispiel:
+
+```text
+http://peername.dcloud/
+```
+
+Aktive Peers werden ebenfalls über ihre dcloud-Namen aufgelöst. Bei direkten LAN-Peers lädt der Browser deren `/dcloud-site`-Route direkt; bei Relay-Peers wird, soweit möglich, der bestehende dcloud-Relay-Kanal verwendet. Das Betriebssystem-DNS wird dadurch nicht verändert: Die `.dcloud`-Namen sind bewusst im internen Browser der App aufgelöst.
 
 ### Login und Benutzerverwaltung
 
