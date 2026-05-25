@@ -532,6 +532,15 @@
     .browser-chip{ display:inline-flex; align-items:center; gap:5px; border:1px solid rgba(112,142,190,.26); border-radius:999px; padding:.25rem .55rem; background:rgba(255,255,255,.70); }
     .browser-stage{ flex:1; min-height:0; background:#fff; }
     .browser-frame{ width:100%; height:100%; border:0; background:#fff; display:block; }
+    #win-web-editor{ left:250px; top:92px; width:min(980px, calc(100vw - 290px)); height:min(700px, calc(100vh - 150px)); }
+    .web-editor-shell{ display:flex; flex-direction:column; min-height:0; background:rgba(239,247,255,.86); }
+    .web-editor-toolbar{ display:flex; flex-wrap:wrap; align-items:center; gap:8px; padding:10px 12px; border-bottom:1px solid var(--line); background:linear-gradient(180deg, rgba(255,255,255,.86), rgba(227,240,255,.72)); }
+    .web-editor-toolbar button{ border:1px solid rgba(112,142,190,.42); border-radius:13px; background:#fff; color:var(--text); padding:.58rem .78rem; font-weight:750; }
+    .web-editor-toolbar button.primary{ background:linear-gradient(135deg, #0b65d8, #19c7ff); color:#fff; border-color:rgba(8,102,232,.35); }
+    .web-editor-toolbar button:hover{ border-color:rgba(8,102,232,.42); box-shadow:0 8px 18px rgba(32,74,140,.10); }
+    .web-editor-path{ flex:1; min-width:180px; font-family:ui-monospace, SFMono-Regular, Consolas, monospace; color:#37516e; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+    .web-editor-textarea{ flex:1; min-height:0; width:100%; resize:none; border:0; border-top:1px solid rgba(133,162,207,.18); padding:16px; background:#07111f; color:#e8f2ff; font:14px/1.55 ui-monospace, SFMono-Regular, Consolas, "Liberation Mono", monospace; outline:none; user-select:text; tab-size:2; }
+    .web-editor-status{ padding:7px 12px; border-top:1px solid rgba(133,162,207,.22); color:#35506f; background:rgba(255,255,255,.62); font-size:.86rem; }
 
     .taskbar{ position:absolute; left:10px; right:10px; bottom:10px; height:54px; display:flex; align-items:center; gap:10px; padding:8px 12px; background:var(--taskbar); border:1px solid rgba(255,255,255,.20); border-radius:20px; box-shadow:0 -2px 22px rgba(0,0,0,.32), inset 0 1px 0 rgba(255,255,255,.17); backdrop-filter:blur(22px) saturate(1.5); user-select:none; z-index:100; }
     .start{ border:0; padding:.52rem 1rem; border-radius:14px; background:linear-gradient(135deg, #0b65d8, #19c7ff); color:#fff; font-weight:850; box-shadow:0 10px 22px rgba(8,102,232,.28); }
@@ -686,6 +695,26 @@
         <div class="browser-stage">
           <iframe class="browser-frame" id="browser-frame" title="Interner dcloud Browser" sandbox="allow-forms allow-scripts allow-popups allow-downloads"></iframe>
         </div>
+      </div>
+    </section>
+
+    <section class="window" id="win-web-editor" hidden>
+      <div class="titlebar" data-app="webEditor">
+        <span class="title"><span>✏️</span><span id="web-editor-title">Web-Texteditor</span></span>
+        <div class="window-controls">
+          <button type="button" data-action="min" aria-label="Minimieren">–</button>
+          <button type="button" data-action="max" aria-label="Maximieren">□</button>
+          <button type="button" data-action="close" aria-label="Schließen">×</button>
+        </div>
+      </div>
+      <div class="web-editor-shell window-content">
+        <div class="web-editor-toolbar">
+          <button type="button" class="primary" id="web-editor-save">💾 Speichern</button>
+          <button type="button" id="web-editor-open-browser">🧭 Im Browser öffnen</button>
+          <span class="web-editor-path" id="web-editor-path">Keine Datei geöffnet</span>
+        </div>
+        <textarea class="web-editor-textarea" id="web-editor-textarea" spellcheck="false" autocomplete="off" autocapitalize="off"></textarea>
+        <div class="web-editor-status" id="web-editor-status">Bereit</div>
       </div>
     </section>
 
@@ -948,6 +977,7 @@
     <div class="ctx" id="ctxMenu" role="menu" aria-label="Desktop Kontextmenü">
       <button type="button" id="ctxOpen"><span>Öffnen</span><span class="kbd">Enter</span></button>
       <button type="button" id="ctxPreview"><span>Vorschau öffnen</span><span class="kbd">Space</span></button>
+      <button type="button" id="ctxEdit"><span>Im Texteditor bearbeiten</span><span class="kbd">Ctrl+E</span></button>
       <button type="button" id="ctxDownload"><span>Herunterladen</span><span class="kbd">Ctrl+S</span></button>
       <button type="button" id="ctxExternalLink"><span>Externen Link erstellen…</span><span class="kbd">1h</span></button>
       <button type="button" id="ctxShare"><span>An Peer freigeben…</span><span class="kbd">Ctrl+H</span></button>
@@ -1094,6 +1124,7 @@
       settings: {{ settings_json | tojson }},
       network: {{ network_json | tojson }},
       webHosting: {{ web_hosting_json | tojson }},
+      webFiles: {{ web_files_json | tojson }},
       peers: {{ peers_json | tojson }},
       disabledPeers: {{ disabled_peers_json | tojson }},
       fileCount: {{ manifests | length | tojson }},
@@ -1104,6 +1135,7 @@
     };
     const DEFAULT_FOLDER = {{ default_folder | tojson }};
     const SHARED_FOLDER = {{ shared_folder | tojson }};
+    const WEB_FOLDER = "web";
 
     (function(){
       "use strict";
@@ -1191,6 +1223,13 @@
       const browserUrlInput = document.getElementById("browser-url");
       const browserHomeButton = document.getElementById("browser-home");
       const browserReloadButton = document.getElementById("browser-reload");
+      const webEditorTitle = document.getElementById("web-editor-title");
+      const webEditorPath = document.getElementById("web-editor-path");
+      const webEditorTextarea = document.getElementById("web-editor-textarea");
+      const webEditorStatus = document.getElementById("web-editor-status");
+      const webEditorSaveButton = document.getElementById("web-editor-save");
+      const webEditorBrowserButton = document.getElementById("web-editor-open-browser");
+      let currentWebEditorFile = null;
       let pendingShareFile = null;
       let pendingMovePeerFile = null;
       let refreshRequestSeq = 0;
@@ -1204,6 +1243,7 @@
         explorer: document.getElementById("win-explorer"),
         viewer: document.getElementById("win-viewer"),
         browser: document.getElementById("win-browser"),
+        webEditor: document.getElementById("win-web-editor"),
         network: document.getElementById("win-network"),
         status: document.getElementById("win-status"),
         logs: document.getElementById("win-logs"),
@@ -1215,6 +1255,7 @@
         explorer:"📁 Datei-Explorer",
         viewer:"👁️ Vorschau",
         browser:"🧭 Browser",
+        webEditor:"✏️ Web-Editor",
         network:"🌐 Netzwerk",
         status:"🖥️ System",
         logs:"📜 Audit-Logs",
@@ -1236,6 +1277,19 @@
       function isSharedSystemPath(path){
         const normalized = normalizeFolderPath(path);
         return normalized === SHARED_FOLDER || normalized.startsWith(`${SHARED_FOLDER}/`);
+      }
+      function isWebPath(path){
+        const normalized = normalizeFolderPath(path || WEB_FOLDER);
+        return normalized === WEB_FOLDER || normalized.startsWith(`${WEB_FOLDER}/`);
+      }
+      function webRelativePath(path){
+        const normalized = normalizeFolderPath(path || WEB_FOLDER);
+        if(normalized === WEB_FOLDER) return "";
+        return normalized.startsWith(`${WEB_FOLDER}/`) ? normalized.slice(WEB_FOLDER.length + 1) : normalized;
+      }
+      function webExplorerPath(relative){
+        const rel = String(relative || "").replace(/\\/g, "/").replace(/^\/+|\/+$/g, "");
+        return rel ? `${WEB_FOLDER}/${rel}` : WEB_FOLDER;
       }
       function pathJoin(parent, child){
         const clean = String(child || "").trim().replace(/\\/g, "/");
@@ -1297,7 +1351,34 @@
             externalLinkUrl: file.external_link_url || `/api/external-links/${file.manifest_id}`
           })).sort((a,b)=>a.name.localeCompare(b.name));
         });
-        fsMap.forEach(node => node.folders.sort((a,b)=>a.localeCompare(b)));
+        const webFiles = appState.webFiles || {};
+        ingestFolderPath(WEB_FOLDER);
+        (webFiles.folders || []).forEach(folder => ingestFolderPath(webExplorerPath(folder)));
+        (webFiles.files || []).forEach(file => {
+          const folderPath = webExplorerPath(file.folder || "");
+          ingestFolderPath(folderPath);
+          const node = ensureNode(folderPath);
+          node.files.push({
+            id: `web:${file.path}`,
+            web: true,
+            name: file.name || String(file.path || "").split("/").pop() || "web-datei",
+            path: file.path || file.name || "",
+            folder: folderPath,
+            size: Number(file.size || 0),
+            chunks: 1,
+            owner: true,
+            editable: !!file.editable,
+            tooLargeToEdit: !!file.tooLargeToEdit,
+            modifiedAt: file.modifiedAt || "",
+            mimeType: file.mimeType || "",
+            downloadUrl: file.siteUrl || `/dcloud-site/${encodeURIComponent(file.path || "")}`,
+            previewUrl: file.siteUrl || `/dcloud-site/${encodeURIComponent(file.path || "")}`
+          });
+        });
+        fsMap.forEach(node => {
+          node.folders.sort((a,b)=>a.localeCompare(b));
+          node.files.sort((a,b)=>a.name.localeCompare(b.name));
+        });
       }
       function flattenFolderPaths(){
         const paths = [];
@@ -1376,11 +1457,17 @@
       function isPreviewable(file){ return previewKind(file) !== "unknown"; }
       function openFile(file){
         if(!file) return;
+        if(file.web){
+          if(file.editable) openWebEditor(file).catch(error => showToast(error.message, "error"));
+          else openWebFileInBrowser(file);
+          return;
+        }
         if(isPreviewable(file)) openPreview(file);
         else startDownload(file).catch(error => showToast(error.message, "error"));
       }
       function openPreview(file){
         if(!file || !file.id) return;
+        if(file.web){ openWebFileInBrowser(file); return; }
         currentViewerFile = file;
         const kind = previewKind(file);
         const icon = chatFileIcon(file);
@@ -1538,6 +1625,84 @@
         if(browserFrame && !browserFrame.getAttribute("src")){
           navigateBrowser((appState.webHosting || {}).localUrl || "");
         }
+      }
+
+      function localWebUrlForFile(file){
+        const host = (appState.webHosting || {}).primaryHost || "peer.dcloud";
+        const rel = String(file?.path || "").split("/").map(encodeURIComponent).join("/");
+        return `http://${host}/${rel}`;
+      }
+      function openWebFileInBrowser(file){
+        navigateBrowser(localWebUrlForFile(file));
+        openWindow("browser");
+      }
+      async function openWebEditor(file){
+        if(!file || !file.web) return;
+        if(!file.editable){
+          showToast(file.tooLargeToEdit ? "Datei ist zu groß für den integrierten Editor" : "Diese Web-Datei ist nicht als Text bearbeitbar", "warning");
+          return;
+        }
+        const response = await fetch(`/api/web/file?path=${encodeURIComponent(file.path)}`, { headers:{ "Accept":"application/json" }, cache:"no-store" });
+        const payload = await response.json();
+        if(!response.ok || !payload.ok) throw new Error(payload.message || "Web-Datei konnte nicht geöffnet werden");
+        currentWebEditorFile = { ...file, path: payload.path, name: payload.name || file.name };
+        if(webEditorTitle) webEditorTitle.textContent = `Web-Editor · ${currentWebEditorFile.name}`;
+        if(webEditorPath) webEditorPath.textContent = `${WEB_FOLDER}/${currentWebEditorFile.path}`;
+        if(webEditorTextarea) webEditorTextarea.value = payload.content || "";
+        if(webEditorStatus) webEditorStatus.textContent = `Geöffnet · ${formatDateTime(payload.modifiedAt)}`;
+        openWindow("webEditor");
+        setTimeout(() => webEditorTextarea?.focus(), 40);
+      }
+      async function saveWebEditor(){
+        if(!currentWebEditorFile || !webEditorTextarea) return;
+        const response = await fetch("/api/web/file", {
+          method:"POST",
+          headers:{ "X-Requested-With":"XMLHttpRequest", "Content-Type":"application/json", "Accept":"application/json" },
+          body:JSON.stringify({ path: currentWebEditorFile.path, content: webEditorTextarea.value })
+        });
+        const payload = await response.json();
+        if(!response.ok || !payload.ok) throw new Error(payload.message || "Web-Datei konnte nicht gespeichert werden");
+        if(payload.state) applyState(payload.state);
+        if(webEditorStatus) webEditorStatus.textContent = `Gespeichert · ${new Date().toLocaleTimeString()}`;
+        showToast(payload.message || "Web-Datei gespeichert", "success");
+      }
+      async function uploadWebFile(file, folder, doneCallback=null){
+        const targetFolder = isWebPath(folder) ? folder : WEB_FOLDER;
+        const data = new FormData();
+        data.append("file", file);
+        data.append("folder", webRelativePath(targetFolder));
+        showTransfer(file, targetFolder);
+        setMiniProgress("client", 30);
+        updateTransfer(30, "Web-Datei wird in storage/web hochgeladen…");
+        try{
+          const response = await fetch("/api/web/upload", { method:"POST", headers:{ "X-Requested-With":"XMLHttpRequest", "Accept":"application/json" }, body:data });
+          const payload = await response.json();
+          if(!response.ok || !payload.ok) throw new Error(payload.message || "Web-Upload fehlgeschlagen");
+          if(payload.state) applyState(payload.state);
+          finishTransfer(payload.message || "Web-Upload abgeschlossen", true, null);
+          showToast(payload.message || "Web-Upload abgeschlossen", "success");
+          openExplorerAt(targetFolder);
+        }catch(error){
+          finishTransfer(error.message || "Web-Upload fehlgeschlagen", false, null);
+          showToast(error.message || "Web-Upload fehlgeschlagen", "error");
+        }finally{
+          if(doneCallback) doneCallback();
+        }
+      }
+      async function deleteWebTarget(target){
+        const path = target.kind === "file" ? target.file.path : webRelativePath(target.path);
+        if(!path){ showToast("Der Web-Hauptordner kann nicht gelöscht werden", "warning"); return; }
+        if(!confirm(`${target.kind === "file" ? "Web-Datei" : "Web-Ordner"} wirklich löschen?\nweb/${path}`)) return;
+        const response = await fetch("/api/web/delete", {
+          method:"POST",
+          headers:{ "X-Requested-With":"XMLHttpRequest", "Content-Type":"application/json", "Accept":"application/json" },
+          body:JSON.stringify({ path })
+        });
+        const payload = await response.json();
+        if(!response.ok || !payload.ok) throw new Error(payload.message || "Web-Datei konnte nicht gelöscht werden");
+        if(payload.state) applyState(payload.state);
+        selectedTarget = { kind:"desktop" };
+        showToast(payload.message || "Gelöscht", "success");
       }
 
       function renderStats(){
@@ -1942,7 +2107,7 @@
         const root = ensureNode(VROOT);
         root.folders.forEach(folderName => {
           const fullPath = pathJoin(VROOT, folderName);
-          const glyph = normalizeFolderPath(fullPath) === SHARED_FOLDER ? "🤝" : "📁";
+          const glyph = isWebPath(fullPath) ? "🌍" : (normalizeFolderPath(fullPath) === SHARED_FOLDER ? "🤝" : "📁");
           desktopArea.appendChild(makeDesktopItem({ glyph, label:folderName, folder:fullPath }));
         });
       }
@@ -1961,7 +2126,7 @@
           button.type = "button";
           button.className = "nav-item" + (explorerPath === path ? " active" : "");
           const level = Math.max(0, path.split("/").length - 1);
-          const navIcon = normalizeFolderPath(path) === SHARED_FOLDER ? "🤝" : "📁";
+          const navIcon = isWebPath(path) ? "🌍" : (normalizeFolderPath(path) === SHARED_FOLDER ? "🤝" : "📁");
           button.textContent = `${"  ".repeat(level)}${navIcon} ${path.split("/").pop()}`;
           button.title = path;
           button.onclick = () => openExplorerAt(path);
@@ -2009,11 +2174,12 @@
         const data = ensureNode(explorerPath);
         document.getElementById("explorer-back").disabled = explorerPath === VROOT;
         const readOnlySharedPath = isSharedSystemPath(explorerPath);
+        const webPath = isWebPath(explorerPath);
         const uploadBtn = document.getElementById("explorer-upload");
         const smbBtn = document.getElementById("explorer-upload-smb");
         const newFolderBtn = document.getElementById("explorer-newfolder");
         if(uploadBtn) uploadBtn.disabled = readOnlySharedPath;
-        if(smbBtn) smbBtn.disabled = readOnlySharedPath;
+        if(smbBtn) smbBtn.disabled = readOnlySharedPath || webPath;
         if(newFolderBtn) newFolderBtn.disabled = readOnlySharedPath;
         renderBreadcrumbs();
         renderExplorerNav();
@@ -2024,7 +2190,7 @@
         title.textContent = displayPath(explorerPath);
         const hint = document.createElement("span");
         hint.className = "tile-meta";
-        hint.textContent = "Doppelklick öffnet, Rechtsklick zeigt Aktionen";
+        hint.textContent = isWebPath(explorerPath) ? "Dieser Ordner liegt direkt in storage/web. HTML/PHP hochladen und Textdateien bearbeiten." : "Doppelklick öffnet, Rechtsklick zeigt Aktionen";
         head.append(title, hint);
         updateExplorerViewButtons();
         const grid = document.createElement("div");
@@ -2036,7 +2202,7 @@
           tile.className = "explorer-tile folder-tile";
           tile.dataset.kind = "folder";
           tile.dataset.folder = fullPath;
-          const folderIcon = normalizeFolderPath(fullPath) === SHARED_FOLDER ? "🤝" : "📁";
+          const folderIcon = isWebPath(fullPath) ? "🌍" : (normalizeFolderPath(fullPath) === SHARED_FOLDER ? "🤝" : "📁");
           tile.innerHTML = `<span class=\"icon\">${folderIcon}</span>`;
           const name = document.createElement("span");
           name.className = "tile-name";
@@ -2047,7 +2213,7 @@
           meta.textContent = `${childNode.folders.length} Ordner · ${childNode.files.length} Datei(en)`;
           const kind = document.createElement("span");
           kind.className = "tile-access";
-          kind.textContent = normalizeFolderPath(fullPath) === SHARED_FOLDER ? "Eingehende Freigaben" : "Ordner";
+          kind.textContent = isWebPath(fullPath) ? "Webseite / storage/web" : (normalizeFolderPath(fullPath) === SHARED_FOLDER ? "Eingehende Freigaben" : "Ordner");
           tile.append(name, meta, kind);
           tile.addEventListener("dblclick", () => openExplorerAt(fullPath));
           tile.addEventListener("click", () => selectExplorerTile(tile, { kind:"folder", path:fullPath }));
@@ -2072,15 +2238,17 @@
           const desiredMirrors = Number(file.placement?.desired_replicas || 0);
           const distribution = file.remoteStorageCount > 0 ? ` · verteilt auf ${file.remoteStorageCount + 1} Knoten` : " · lokal";
           const raidInfo = desiredMirrors > 1 ? ` · RAID‑1 ${desiredMirrors}x` : "";
-          meta.textContent = `${formatBytes(file.size)} · ${file.chunks} Chunk(s)${distribution}${raidInfo}`;
+          meta.textContent = file.web ? `${formatBytes(file.size)} · storage/web${file.modifiedAt ? " · geändert " + formatDateTime(file.modifiedAt) : ""}` : `${formatBytes(file.size)} · ${file.chunks} Chunk(s)${distribution}${raidInfo}`;
           const access = document.createElement("span");
           access.className = "tile-access";
-          if(file.incomingShare){
+          if(file.web){
+            access.textContent = file.editable ? "✏️ Web-Datei · bearbeitbar" : (file.tooLargeToEdit ? "🌍 Web-Datei · zu groß für Editor" : "🌍 Web-Datei");
+          }else if(file.incomingShare){
             access.innerHTML = `<span class="incoming-share-pill">🤝 Freigabe von Peer</span>`;
           }else{
             access.textContent = file.shared ? "🌐 an Peer freigegeben" : "🔒 privat";
           }
-          if(isPreviewable(file)){
+          if(!file.web && isPreviewable(file)){
             const preview = document.createElement("span");
             preview.className = "tile-preview-pill";
             preview.textContent = "👁️ Vorschau";
@@ -2214,12 +2382,16 @@
       function updateCtxEnabled(){
         const isFile = selectedTarget.kind === "file";
         const isFolder = selectedTarget.kind === "folder";
-        const isOwnerFile = isFile && selectedTarget.file.owner;
+        const isWebFile = isFile && !!selectedTarget.file.web;
+        const isOwnerFile = isFile && selectedTarget.file.owner && !isWebFile;
         const selectedFolderPath = isFolder ? normalizeFolderPath(selectedTarget.path) : "";
-        const isDeletableFolder = isFolder && ![DEFAULT_FOLDER, SHARED_FOLDER].includes(selectedFolderPath) && !isSharedSystemPath(selectedFolderPath);
+        const isWebFolder = isFolder && isWebPath(selectedFolderPath);
+        const isDeletableFolder = isFolder && ((isWebFolder && selectedFolderPath !== WEB_FOLDER) || (![DEFAULT_FOLDER, SHARED_FOLDER].includes(selectedFolderPath) && !isSharedSystemPath(selectedFolderPath)));
         document.getElementById("ctxOpen").hidden = !(isFile || isFolder);
         const previewBtn = document.getElementById("ctxPreview");
-        if(previewBtn) previewBtn.hidden = !(isFile && isPreviewable(selectedTarget.file));
+        if(previewBtn) previewBtn.hidden = !(isFile && !isWebFile && isPreviewable(selectedTarget.file));
+        const editBtn = document.getElementById("ctxEdit");
+        if(editBtn) editBtn.hidden = !(isWebFile && selectedTarget.file.editable);
         document.getElementById("ctxDownload").hidden = !isFile;
         document.getElementById("ctxExternalLink").hidden = !isOwnerFile;
         document.getElementById("ctxShare").hidden = !isOwnerFile;
@@ -2227,7 +2399,7 @@
         const moveFolderBtn = document.getElementById("ctxMoveFolder");
         if(moveFolderBtn) moveFolderBtn.hidden = !isOwnerFile;
         document.getElementById("ctxMovePeer").hidden = !isOwnerFile;
-        document.getElementById("ctxDelete").hidden = !(isOwnerFile || isDeletableFolder);
+        document.getElementById("ctxDelete").hidden = !(isOwnerFile || isWebFile || isDeletableFolder);
         const activeFolderForActions = isFolder ? selectedFolderPath : (windows.explorer.hidden ? DEFAULT_FOLDER : explorerPath);
         const writeIntoSharedSystemFolder = isSharedSystemPath(activeFolderForActions);
         document.getElementById("ctxUpload").hidden = writeIntoSharedSystemFolder;
@@ -2235,7 +2407,9 @@
         const share = document.getElementById("ctxShare").querySelector("span");
         if(isOwnerFile) share.textContent = selectedTarget.file.shared ? "Freigabe deaktivieren" : "Freigeben an Peer…";
         const deleteLabel = document.getElementById("ctxDelete").querySelector("span");
-        if(isDeletableFolder) deleteLabel.textContent = "Ordner löschen";
+        if(isWebFile) deleteLabel.textContent = "Web-Datei löschen";
+        else if(isWebFolder) deleteLabel.textContent = "Web-Ordner löschen";
+        else if(isDeletableFolder) deleteLabel.textContent = "Ordner löschen";
         else if(isOwnerFile) deleteLabel.textContent = "Datei löschen";
         else deleteLabel.textContent = "Löschen";
       }
@@ -2263,6 +2437,20 @@
         if(!cleanName){ showToast("Ordnername darf nicht leer sein", "error"); return; }
         const targetPath = pathJoin(basePath || VROOT, cleanName);
         if(isSharedSystemPath(targetPath)){ showToast("Der Ordner für Peer-Freigaben ist ein Systemordner", "warning"); return; }
+        if(isWebPath(targetPath)){
+          const response = await fetch("/api/web/folders", {
+            method:"POST",
+            headers:{ "X-Requested-With":"XMLHttpRequest", "Content-Type":"application/json", "Accept":"application/json" },
+            body:JSON.stringify({ folder:webRelativePath(targetPath) })
+          });
+          const data = await response.json();
+          if(!response.ok || !data.ok) throw new Error(data.message || "Web-Ordner konnte nicht erstellt werden");
+          if(data.state) applyState(data.state);
+          showToast(data.message || `Web-Ordner erstellt: ${targetPath}`, "success");
+          closeFolderDialog();
+          openExplorerAt(parentPath(normalizeFolderPath(targetPath)));
+          return;
+        }
         const body = new URLSearchParams({ folder: targetPath, next: "/" });
         const response = await fetch("/folders", {
           method:"POST",
@@ -2692,6 +2880,7 @@
         pollDownloadProgress();
       }
       async function startDownload(file){
+        if(file && file.web){ window.open(file.downloadUrl || localWebUrlForFile(file), "_blank", "noopener"); return; }
         if(!file || !file.id) return;
         showDownload(file);
         const response = await fetch(`/api/downloads/${encodeURIComponent(file.id)}/prepare`, {
@@ -2707,6 +2896,10 @@
       }
       function uploadFile(file, folder, doneCallback=null){
         const targetFolder = normalizeFolderPath(folder || DEFAULT_FOLDER);
+        if(isWebPath(targetFolder)){
+          uploadWebFile(file, targetFolder, doneCallback);
+          return;
+        }
         const uploadId = makeUploadId();
         currentUploadId = uploadId;
         trackUploadId(uploadId);
@@ -2905,6 +3098,11 @@
       }
       async function deleteFolder(path){
         const folderPath = normalizeFolderPath(path);
+        if(isWebPath(folderPath)){
+          await deleteWebTarget({ kind:"folder", path:folderPath });
+          openExplorerAt(parentPath(folderPath));
+          return;
+        }
         if(folderPath === DEFAULT_FOLDER){
           showToast("Der Standardordner kann nicht gelöscht werden", "error");
           return;
@@ -3430,6 +3628,8 @@ ${file.name}`)) return;
       };
       const ctxPreviewBtn = document.getElementById("ctxPreview");
       if(ctxPreviewBtn) ctxPreviewBtn.onclick = () => { closeCtx(); if(selectedTarget.kind === "file") openPreview(selectedTarget.file); };
+      const ctxEditBtn = document.getElementById("ctxEdit");
+      if(ctxEditBtn) ctxEditBtn.onclick = () => { closeCtx(); if(selectedTarget.kind === "file") openWebEditor(selectedTarget.file).catch(error => showToast(error.message, "error")); };
       document.getElementById("ctxDownload").onclick = () => { closeCtx(); if(selectedTarget.kind === "file") startDownload(selectedTarget.file).catch(error => showToast(error.message, "error")); };
       document.getElementById("ctxExternalLink").onclick = () => { closeCtx(); if(selectedTarget.kind === "file") createExternalDownloadLink(selectedTarget.file).catch(error => showToast(error.message, "error")); };
       document.getElementById("ctxShare").onclick = () => { closeCtx(); if(selectedTarget.kind === "file") toggleShare(selectedTarget.file).catch(error => showToast(error.message, "error")); };
@@ -3441,7 +3641,8 @@ ${file.name}`)) return;
       document.getElementById("ctxMovePeer").onclick = () => { closeCtx(); if(selectedTarget.kind === "file") openMovePeerDialog(selectedTarget.file); };
       document.getElementById("ctxDelete").onclick = () => {
         closeCtx();
-        if(selectedTarget.kind === "file") deleteFile(selectedTarget.file).catch(error => showToast(error.message, "error"));
+        if(selectedTarget.kind === "file" && selectedTarget.file.web) deleteWebTarget(selectedTarget).catch(error => showToast(error.message, "error"));
+        else if(selectedTarget.kind === "file") deleteFile(selectedTarget.file).catch(error => showToast(error.message, "error"));
         if(selectedTarget.kind === "folder") deleteFolder(selectedTarget.path).catch(error => showToast(error.message, "error"));
       };
       document.getElementById("ctxNewFolder").onclick = () => { closeCtx(); openFolderDialog(selectedTarget.kind === "folder" ? selectedTarget.path : (windows.explorer.hidden ? VROOT : explorerPath)); };
@@ -3535,7 +3736,10 @@ ${file.name}`)) return;
           event.preventDefault();
           openUploadPicker(chooseUploadTarget());
         }
-        if(event.key === "Delete" && selectedTarget.kind === "file" && selectedTarget.file.owner){
+        if(event.key === "Delete" && selectedTarget.kind === "file" && selectedTarget.file.web){
+          event.preventDefault();
+          deleteWebTarget(selectedTarget).catch(error => showToast(error.message, "error"));
+        }else if(event.key === "Delete" && selectedTarget.kind === "file" && selectedTarget.file.owner){
           event.preventDefault();
           deleteFile(selectedTarget.file).catch(error => showToast(error.message, "error"));
         }
@@ -3551,7 +3755,14 @@ ${file.name}`)) return;
           event.preventDefault();
           openPreview(selectedTarget.file);
         }
-        if(event.ctrlKey && (event.key === "s" || event.key === "S") && selectedTarget.kind === "file"){
+        if(event.ctrlKey && (event.key === "e" || event.key === "E") && selectedTarget.kind === "file" && selectedTarget.file.web){
+          event.preventDefault();
+          openWebEditor(selectedTarget.file).catch(error => showToast(error.message, "error"));
+        }
+        if(event.ctrlKey && (event.key === "s" || event.key === "S") && activeWindow === "webEditor"){
+          event.preventDefault();
+          saveWebEditor().catch(error => showToast(error.message, "error"));
+        }else if(event.ctrlKey && (event.key === "s" || event.key === "S") && selectedTarget.kind === "file"){
           event.preventDefault();
           startDownload(selectedTarget.file).catch(error => showToast(error.message, "error"));
         }
@@ -3564,6 +3775,9 @@ ${file.name}`)) return;
           toggleShare(selectedTarget.file).catch(error => showToast(error.message, "error"));
         }
       });
+
+      webEditorSaveButton?.addEventListener("click", () => saveWebEditor().catch(error => showToast(error.message, "error")));
+      webEditorBrowserButton?.addEventListener("click", () => { if(currentWebEditorFile) openWebFileInBrowser(currentWebEditorFile); });
 
       browserForm?.addEventListener("submit", event => {
         event.preventDefault();

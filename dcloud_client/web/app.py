@@ -75,6 +75,15 @@ class PeerConnector(Protocol):
     def prune_stale_peers(self) -> list[str]: ...
 
 
+WEB_EXPLORER_FOLDER = "web"
+WEB_EDITABLE_SUFFIXES = {
+    ".html", ".htm", ".php", ".css", ".js", ".mjs", ".json", ".txt",
+    ".md", ".xml", ".svg", ".csv", ".yml", ".yaml", ".ini", ".env",
+    ".py", ".sh", ".bat", ".ps1", ".sql", ".rss", ".atom",
+}
+WEB_EDIT_MAX_BYTES = 2 * 1024 * 1024
+
+
 def human_bytes(value: int) -> str:
     units = ["B", "KiB", "MiB", "GiB", "TiB"]
     amount = float(value)
@@ -244,8 +253,12 @@ def create_app(
                 "dcloud Web-Ordner\n\n"
                 "Dateien in diesem Ordner werden vom lokalen dcloud-Node ausgeliefert.\n"
                 f"Startseite im internen Browser: http://{_primary_web_hostname()}/\n\n"
+                "Dieser Ordner erscheint im dcloud Datei-Explorer als Spezialordner 'web'.\n"
+                "Dort kannst du HTML-, PHP-, CSS-, JavaScript- und Asset-Dateien hochladen,\n"
+                "Unterordner anlegen und bearbeitbare Textdateien im integrierten Web-Texteditor speichern.\n\n"
                 "Unterstuetzt werden statische HTML/CSS/JS-Dateien und PHP-Dateien, "
-                "wenn php-cgi oder php auf dem System installiert ist.\n",
+                "wenn php-cgi oder php auf dem System installiert ist. PHP ist eine System-Abhaengigkeit "
+                "und kann nicht per pip requirements.txt installiert werden.\n",
                 encoding="utf-8",
             )
 
@@ -347,6 +360,81 @@ def create_app(
         if file_path.suffix.lower() == ".php":
             return _render_php_file(file_path, rel_path, query_string=query_string)
         return send_file(file_path, conditional=True)
+
+    def _normalize_web_relative(raw_path: str | None, *, allow_empty: bool = False) -> str:
+        clean = url_parse.unquote(str(raw_path or "")).split("?", 1)[0].replace("\\", "/").strip("/")
+        if clean == WEB_EXPLORER_FOLDER:
+            clean = ""
+        elif clean.startswith(f"{WEB_EXPLORER_FOLDER}/"):
+            clean = clean[len(WEB_EXPLORER_FOLDER) + 1:]
+        parts = []
+        for part in clean.split("/"):
+            part = part.strip()
+            if not part or part in {".", ".."}:
+                continue
+            if "\0" in part:
+                raise StorageError("Web-Pfad ist ungültig")
+            parts.append(part)
+        relative = "/".join(parts)
+        if not relative and not allow_empty:
+            raise StorageError("Web-Pfad fehlt")
+        return relative
+
+    def _safe_web_file_path(raw_path: str | None, *, allow_directory: bool = False, allow_empty: bool = False) -> Path:
+        relative = _normalize_web_relative(raw_path, allow_empty=allow_empty)
+        candidate = (web_root / relative).resolve()
+        root = web_root.resolve()
+        if candidate != root and root not in candidate.parents:
+            raise StorageError("Web-Pfad ist ungültig")
+        if not allow_directory and candidate.exists() and candidate.is_dir():
+            raise StorageError("Der angegebene Web-Pfad ist ein Ordner")
+        return candidate
+
+    def _is_web_text_editable(path: Path) -> bool:
+        return path.suffix.lower() in WEB_EDITABLE_SUFFIXES or path.name.lower() in {"readme", "license", "htaccess", ".htaccess"}
+
+    def web_files_payload() -> dict[str, Any]:
+        _ensure_web_root()
+        root = web_root.resolve()
+        folders: list[str] = []
+        files: list[dict[str, Any]] = []
+        for path in sorted(root.rglob("*"), key=lambda item: item.relative_to(root).as_posix().lower()):
+            try:
+                rel = path.relative_to(root).as_posix()
+            except ValueError:
+                continue
+            if path.is_dir():
+                folders.append(rel)
+                continue
+            if not path.is_file():
+                continue
+            stat = path.stat()
+            parent = path.parent.relative_to(root).as_posix() if path.parent != root else ""
+            files.append({
+                "path": rel,
+                "name": path.name,
+                "folder": parent,
+                "size": stat.st_size,
+                "modifiedAt": datetime.fromtimestamp(stat.st_mtime, timezone.utc).isoformat(),
+                "editable": _is_web_text_editable(path) and stat.st_size <= WEB_EDIT_MAX_BYTES,
+                "tooLargeToEdit": _is_web_text_editable(path) and stat.st_size > WEB_EDIT_MAX_BYTES,
+                "mimeType": mimetypes.guess_type(path.name)[0] or "application/octet-stream",
+                "siteUrl": "/dcloud-site/" + url_parse.quote(rel),
+                "readUrl": url_for("api_web_file") + "?path=" + url_parse.quote(rel),
+                "deleteUrl": url_for("api_web_delete"),
+            })
+        return {
+            "rootFolder": WEB_EXPLORER_FOLDER,
+            "rootPath": str(root),
+            "folders": folders,
+            "files": files,
+            "editMaxBytes": WEB_EDIT_MAX_BYTES,
+        }
+
+    def _web_json_state(message: str, *, ok: bool = True, status: int = 200) -> tuple[Response, int] | Response:
+        payload = {"ok": ok, "message": message, "webFiles": web_files_payload(), "state": state_payload()}
+        response = jsonify(payload)
+        return (response, status) if status != 200 else response
 
     def _browser_url(value: str | None) -> str:
         raw = str(value or "").strip()
@@ -1744,6 +1832,7 @@ def create_app(
             "network": network_payload(),
             "networkCapacity": _network_storage_capacity(stats, peers),
             "webHosting": web_hosting_payload(peers),
+            "webFiles": web_files_payload(),
             "peers": [peer.to_dict() for peer in peers],
             "disabledPeers": _disabled_peers_payload(),
             "fileCount": len(manifests),
@@ -1891,6 +1980,7 @@ def create_app(
             settings_json=settings_payload(stats, peers),
             network_json=network_payload(),
             web_hosting_json=web_hosting_payload(peers),
+            web_files_json=web_files_payload(),
             manifests=manifests,
             folder_tree=tree,
             folder_tree_json=folder_tree_json(tree),
@@ -2216,6 +2306,98 @@ def create_app(
             storage_peers=storage_peers,
         )
         return True, {"manifest": manifest, "upload_result": upload_result, "message": message}, file_size
+
+    @app.get("/api/web/files")
+    def api_web_files() -> Response:
+        return jsonify({"ok": True, "webFiles": web_files_payload()})
+
+    @app.get("/api/web/file")
+    def api_web_file() -> Response:
+        try:
+            path = _safe_web_file_path(request.args.get("path"))
+            if not path.exists() or not path.is_file():
+                raise StorageError("Web-Datei nicht gefunden")
+            if not _is_web_text_editable(path):
+                raise StorageError("Diese Datei ist kein bearbeitbarer Texttyp")
+            if path.stat().st_size > WEB_EDIT_MAX_BYTES:
+                raise StorageError("Diese Datei ist zu groß für den integrierten Texteditor")
+            return jsonify({
+                "ok": True,
+                "path": path.relative_to(web_root.resolve()).as_posix(),
+                "name": path.name,
+                "content": path.read_text(encoding="utf-8"),
+                "modifiedAt": datetime.fromtimestamp(path.stat().st_mtime, timezone.utc).isoformat(),
+            })
+        except UnicodeDecodeError:
+            return jsonify({"ok": False, "message": "Datei ist nicht als UTF-8-Text lesbar"}), 400
+        except StorageError as exc:
+            return jsonify({"ok": False, "message": str(exc)}), 400
+
+    @app.post("/api/web/file")
+    def api_web_save_file() -> Response:
+        payload = request.get_json(silent=True) or {}
+        try:
+            path = _safe_web_file_path(payload.get("path"))
+            if not path.exists() or not path.is_file():
+                raise StorageError("Web-Datei nicht gefunden")
+            if not _is_web_text_editable(path):
+                raise StorageError("Diese Datei ist kein bearbeitbarer Texttyp")
+            content = str(payload.get("content", ""))
+            if len(content.encode("utf-8")) > WEB_EDIT_MAX_BYTES:
+                raise StorageError("Datei ist zu groß für den integrierten Texteditor")
+            path.write_text(content, encoding="utf-8")
+            return _web_json_state(f"Web-Datei gespeichert: {path.name}")
+        except StorageError as exc:
+            return jsonify({"ok": False, "message": str(exc), "webFiles": web_files_payload()}), 400
+
+    @app.post("/api/web/upload")
+    def api_web_upload() -> Response:
+        uploaded = request.files.get("file")
+        if uploaded is None or uploaded.filename == "":
+            return jsonify({"ok": False, "message": "Keine Datei ausgewählt", "webFiles": web_files_payload()}), 400
+        try:
+            folder = _normalize_web_relative(request.form.get("folder", ""), allow_empty=True)
+            target_dir = _safe_web_file_path(folder, allow_directory=True, allow_empty=True)
+            target_dir.mkdir(parents=True, exist_ok=True)
+            safe_name = secure_filename(uploaded.filename) or "upload.bin"
+            target_path = (target_dir / safe_name).resolve()
+            root = web_root.resolve()
+            if root not in target_path.parents:
+                raise StorageError("Web-Pfad ist ungültig")
+            uploaded.save(target_path)
+            return _web_json_state(f"Web-Datei hochgeladen: {safe_name}")
+        except StorageError as exc:
+            return jsonify({"ok": False, "message": str(exc), "webFiles": web_files_payload()}), 400
+
+    @app.post("/api/web/folders")
+    def api_web_create_folder() -> Response:
+        payload = request.get_json(silent=True) or request.form
+        try:
+            folder = _normalize_web_relative(payload.get("folder"), allow_empty=False)
+            target = _safe_web_file_path(folder, allow_directory=True)
+            target.mkdir(parents=True, exist_ok=True)
+            return _web_json_state(f"Web-Ordner erstellt: {folder}")
+        except StorageError as exc:
+            return jsonify({"ok": False, "message": str(exc), "webFiles": web_files_payload()}), 400
+
+    @app.post("/api/web/delete")
+    def api_web_delete() -> Response:
+        payload = request.get_json(silent=True) or request.form
+        try:
+            target = _safe_web_file_path(payload.get("path"), allow_directory=True)
+            if target == web_root.resolve():
+                raise StorageError("Der Web-Hauptordner kann nicht gelöscht werden")
+            if not target.exists():
+                raise StorageError("Web-Datei oder Web-Ordner nicht gefunden")
+            if target.is_dir():
+                shutil.rmtree(target)
+                message = f"Web-Ordner gelöscht: {target.name}"
+            else:
+                target.unlink()
+                message = f"Web-Datei gelöscht: {target.name}"
+            return _web_json_state(message)
+        except StorageError as exc:
+            return jsonify({"ok": False, "message": str(exc), "webFiles": web_files_payload()}), 400
 
     @app.post("/upload/smb")
     def upload_from_smb() -> Response:

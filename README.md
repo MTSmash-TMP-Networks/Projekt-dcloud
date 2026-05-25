@@ -23,7 +23,7 @@ dcloud ist ein Python-basierter Storage-Client mit Web-Dashboard im Desktop-Stil
 - Reverse-Mailbox-Download über Relay, wenn der Node von außen nicht direkt erreichbar ist
 - Peer-Chat mit ungelesen-Badge, Emojis, Bildversand und Datei-Teilen
 - Neuer interner Browser mit `peername.dcloud`-Auflösung, normalem Webzugriff und lokalem `storage/web`-Hosting
-- Lokaler Web-Ordner `storage/web` mit HTML/CSS/JS-Auslieferung und optionaler PHP-Ausführung über `php-cgi`/`php`
+- Lokaler Web-Ordner `storage/web` als Datei-Explorer-Spezialordner `web`, inkl. Upload, Unterordnern, Texteditor und optionaler PHP-Ausführung über `php-cgi`/`php`
 - Optionaler eingebetteter SMB-Server
 - OpenWrt-, Linux-, macOS-, Windows- und Windows-Docker-Installationspfade
 - Auto-Update-Skripte für systemd, launchd und OpenWrt-Cron
@@ -84,7 +84,9 @@ Das Dashboard enthält jetzt ein neues Desktop-Icon **Browser**. Der interne Bro
 storage/web
 ```
 
-Die Startseite liegt dort als `index.html`. Eigene Webseiten können direkt in diesem Ordner abgelegt werden. Statische Dateien wie HTML, CSS, JavaScript, Bilder und Downloads werden über `/dcloud-site/...` ausgeliefert. PHP-Dateien mit der Endung `.php` werden ausgeführt, wenn auf dem System `php-cgi` oder alternativ `php` installiert ist. Ohne PHP-Binary bleibt die statische Auslieferung aktiv und PHP-Dateien liefern einen Hinweistext.
+Die Startseite liegt dort als `index.html`. Der Ordner erscheint zusätzlich direkt im dcloud **Datei-Explorer** als Spezialordner **web**. Dort kannst du HTML-, PHP-, CSS-, JavaScript- und Asset-Dateien direkt hochladen, Unterordner anlegen, löschen und bearbeitbare Textdateien mit dem integrierten **Web-Texteditor** öffnen und speichern. Änderungen landen unmittelbar in `storage/web` und sind danach direkt im internen Browser sichtbar.
+
+Statische Dateien wie HTML, CSS, JavaScript, Bilder und Downloads werden über `/dcloud-site/...` ausgeliefert. PHP-Dateien mit der Endung `.php` werden ausgeführt, wenn auf dem System `php-cgi` oder alternativ `php` installiert ist. Ohne PHP-Binary bleibt die statische Auslieferung aktiv und PHP-Dateien liefern einen Hinweistext. `requirements.txt` enthält dazu einen Hinweis als System-Abhängigkeit; `php`/`php-cgi` ist kein Python-Paket und muss über das Betriebssystem installiert werden.
 
 Im internen Browser ist die eigene Seite unter dem angezeigten Hostnamen erreichbar, zum Beispiel:
 
@@ -1003,7 +1005,7 @@ Die Codebasis ist modular aufgebaut, damit spätere Transport-, Index- und Versc
 | `dcloud_client/network/p2p_storage.py` | Peer-Transfers, Batch-/Pack-Upload und Download |
 | `dcloud_client/network/smb_server.py` | optionaler eingebetteter SMB-Server |
 | `dcloud_client/network/peers.py` | Peer-Liste, Deduplizierung, Deaktivierung |
-| `dcloud_client/web/app.py` | Flask-Routen für Dashboard, Dateien, Chat, Benutzerverwaltung, P2P-API |
+| `dcloud_client/web/app.py` | Flask-Routen für Dashboard, Dateien, Webhosting, Web-Dateien, Chat, Benutzerverwaltung, P2P-API |
 | `dcloud_client/web/auth.py` | Lokale Benutzerverwaltung mit Passwort-Hashing und JSON-Store |
 | `dcloud_client/web/templates/dashboard.html` | Desktop-Dashboard, JavaScript und UI |
 | `dcloud_client/web/templates/login.html` | Login-Seite für das Dashboard |
