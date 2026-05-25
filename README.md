@@ -61,7 +61,7 @@ Die Dateiübertragung nutzt nach Möglichkeit direkte Peer-Verbindungen. Wenn da
 
 Das Dashboard ist als Desktop-Oberfläche aufgebaut. Wichtige Bereiche sind über Icons erreichbar:
 
-- **Dateien** – Explorer für Upload, Download, Ordner, Löschen, Verschieben, Freigaben, Auslagern und externe Links
+- **Dateien** – Explorer für Upload, Download, Ordner, Löschen, Verschieben, Freigaben, Auslagern, externe Links und umschaltbare Ansichten
 - **Transfer-Center** – Hintergrundstatus für Upload, Download, Replikation und Auslagerung
 - **Netzwerk** – aktive Peers, deaktivierte Peers, Relay-Status, Peer-Suche und manuelles Hinzufügen
 - **Peer-Chat** – Nachrichten, Emojis, Bilder und Datei-Karten
@@ -98,6 +98,24 @@ Schutzgrenzen:
 - `/api/p2p/...` bleibt offen für Peers/Relay-Transporte; diese Endpunkte dürfen nicht an eine Browser-Session gebunden werden, sonst würden Peer-Replikation, Chat und externe Relay-Streams nicht funktionieren.
 
 Wenn das Admin-Passwort verloren geht, kann bei gestopptem Dienst die Datei `storage/users.json` gesichert und entfernt werden. Beim nächsten Start erscheint wieder die Ersteinrichtung.
+
+
+### Datei-Explorer, Ansichten und Peer-Freigaben
+
+Der Datei-Explorer trennt lokale Dateien und eingehende Peer-Freigaben klar voneinander:
+
+- **Meine Dateien** ist der lokale Standardordner für eigene Uploads.
+- **Freigaben von Peers** ist ein Systemordner für Dateien, die andere Knoten mit diesem Node geteilt haben. Eingehende Manifeste werden dort angezeigt, auch wenn sie auf dem Quellknoten in einem anderen Ordner lagen.
+- Eigene Dateien bleiben in ihrer gewählten Ordnerstruktur und zeigen nur per Status, ob sie an Peers freigegeben wurden.
+- Der Systemordner **Freigaben von Peers** kann nicht gelöscht werden; verschwindet eine Freigabe, wird sie durch Revocation/Privatsetzen des Eigentümers entfernt.
+
+Die Ansicht kann wie im Windows-Explorer umgeschaltet werden:
+
+- **Kacheln** für eine große Desktop-artige Darstellung
+- **Liste** für kompakte Dateizeilen
+- **Details** für eine tabellarischere Übersicht mit Größe/Status
+
+Die gewählte Ansicht wird im Browser lokal gespeichert.
 
 ### Datei-Upload
 

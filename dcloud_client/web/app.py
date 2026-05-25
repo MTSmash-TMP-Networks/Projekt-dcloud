@@ -40,7 +40,7 @@ from ..config import (
     update_runtime_settings,
 )
 from ..identity import NodeIdentity
-from ..manifests import DEFAULT_FOLDER, FileManifest, ManifestStore, sanitize_folder_path
+from ..manifests import DEFAULT_FOLDER, INCOMING_SHARES_FOLDER, FileManifest, ManifestStore, sanitize_folder_path
 from ..network.http_relay import HttpRelayClient, HttpRelayTransport, RelayHttpResponse, RELAY_HOST
 from ..network.p2p_storage import (
     CHUNK_UPLOAD_PACK_MAGIC,
@@ -96,11 +96,23 @@ def _tail_text_file(path: Path, *, max_lines: int = 120, max_chars: int = 12000)
         return ""
 
 
-def build_folder_tree(manifests: list[FileManifest], folders: list[str] | None = None) -> list[dict[str, object]]:
-    """Group manifests into user-created virtual folders."""
-    grouped: dict[str, list[FileManifest]] = {folder: [] for folder in (folders or [DEFAULT_FOLDER])}
+def display_folder_for_node(manifest: FileManifest, node_id: str) -> str:
+    """Return the UI folder for a manifest from the current node's perspective."""
+    return sanitize_folder_path(manifest.folder_path) if manifest.owner_node_id == node_id else INCOMING_SHARES_FOLDER
+
+
+def build_folder_tree(
+    manifests: list[FileManifest],
+    folders: list[str] | None = None,
+    current_node_id: str | None = None,
+) -> list[dict[str, object]]:
+    """Group manifests into virtual folders for the Dashboard explorer."""
+    grouped: dict[str, list[FileManifest]] = {sanitize_folder_path(folder): [] for folder in (folders or [DEFAULT_FOLDER, INCOMING_SHARES_FOLDER])}
     for manifest in manifests:
-        grouped.setdefault(manifest.folder_path, []).append(manifest)
+        folder = display_folder_for_node(manifest, current_node_id or manifest.owner_node_id)
+        grouped.setdefault(folder, []).append(manifest)
+    grouped.setdefault(DEFAULT_FOLDER, [])
+    grouped.setdefault(INCOMING_SHARES_FOLDER, [])
     return [
         {"name": folder, "files": sorted(files, key=lambda item: item.file_name.lower())}
         for folder, files in sorted(grouped.items(), key=lambda item: item[0].lower())
@@ -1345,7 +1357,10 @@ def create_app(
             "file_size": manifest.file_size,
             "chunk_count": len(manifest.chunks),
             "folder_path": manifest.folder_path,
+            "display_folder_path": display_folder_for_node(manifest, identity.node_id),
+            "incoming_share": manifest.owner_node_id != identity.node_id,
             "owner_node_id": manifest.owner_node_id,
+            "created_at": manifest.created_at,
             "access": manifest.access or {"visibility": "private", "shared_with": []},
             "placement": manifest.placement or {},
             "storage_locations": locations,
@@ -1376,7 +1391,7 @@ def create_app(
         _deliver_pending_file_deletions(peers)
         manifests = manifest_store.list_visible_for_node(identity.node_id)
         folders = manifest_store.list_folders_for_node(identity.node_id)
-        tree = build_folder_tree(manifests, folders)
+        tree = build_folder_tree(manifests, folders, identity.node_id)
         return {
             "stateVersion": time.time_ns(),
             "nodeId": identity.node_id,
@@ -1517,7 +1532,7 @@ def create_app(
         stats = chunk_store.stats()
         manifests = manifest_store.list_visible_for_node(identity.node_id)
         folders = manifest_store.list_folders_for_node(identity.node_id)
-        tree = build_folder_tree(manifests, folders)
+        tree = build_folder_tree(manifests, folders, identity.node_id)
         return render_template(
             "dashboard.html",
             config=config,
@@ -1534,6 +1549,7 @@ def create_app(
             folder_tree_json=folder_tree_json(tree),
             folders=folders,
             default_folder=DEFAULT_FOLDER,
+            shared_folder=INCOMING_SHARES_FOLDER,
             git_revision=current_git_revision(),
             current_user=_current_user(),
         )
@@ -1545,10 +1561,11 @@ def create_app(
         return render_template(
             "files.html",
             manifests=manifests,
-            folder_tree=build_folder_tree(manifests, folders),
+            folder_tree=build_folder_tree(manifests, folders, identity.node_id),
             folders=folders,
             identity=identity,
             default_folder=DEFAULT_FOLDER,
+            shared_folder=INCOMING_SHARES_FOLDER,
         )
 
     @app.get("/api/state")
@@ -1948,7 +1965,14 @@ def create_app(
                 return jsonify({"ok": False, "message": message, "state": state_payload()}), 400
             flash(message, "error")
             return redirect(redirect_target)
-        created = manifest_store.create_folder(folder_path, identity.node_id)
+        normalized_folder = sanitize_folder_path(folder_path)
+        if normalized_folder == INCOMING_SHARES_FOLDER or normalized_folder.startswith(f"{INCOMING_SHARES_FOLDER}/"):
+            message = "Der Systemordner für Peer-Freigaben kann nicht manuell verändert werden"
+            if _is_ajax_request():
+                return jsonify({"ok": False, "message": message, "state": state_payload()}), 400
+            flash(message, "error")
+            return redirect(redirect_target)
+        created = manifest_store.create_folder(normalized_folder, identity.node_id)
         message = f"Ordner erstellt: {created}"
         if _is_ajax_request():
             return jsonify({"ok": True, "message": message, "folder": created, "state": state_payload()})
@@ -1962,8 +1986,8 @@ def create_app(
         try:
             if not folder_path:
                 raise StorageError("Ordnername darf nicht leer sein")
-            if folder_path == DEFAULT_FOLDER:
-                raise StorageError("Der Standardordner kann nicht gelöscht werden")
+            if folder_path in {DEFAULT_FOLDER, INCOMING_SHARES_FOLDER}:
+                raise StorageError("Dieser Systemordner kann nicht gelöscht werden")
             visible_folders = manifest_store.list_folders_for_node(identity.node_id)
             exists = folder_path in visible_folders or any(folder.startswith(f"{folder_path}/") for folder in visible_folders)
             if not exists:
@@ -2224,6 +2248,8 @@ def create_app(
         redirect_target = _safe_next(request.form.get("next"), url_for("dashboard"))
         target_folder = sanitize_folder_path(request.form.get("folder", DEFAULT_FOLDER))
         try:
+            if target_folder == INCOMING_SHARES_FOLDER or target_folder.startswith(f"{INCOMING_SHARES_FOLDER}/"):
+                raise StorageError("Der Systemordner für Peer-Freigaben ist nur für eingehende Freigaben vorgesehen")
             manifest = manifest_store.move_to_folder(manifest_id, target_folder, identity)
             message = f"Datei verschoben: {manifest.file_name} → {manifest.folder_path}"
             if _is_ajax_request():

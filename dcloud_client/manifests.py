@@ -18,6 +18,7 @@ from .storage import ChunkInfo, ChunkStore, StorageError
 
 MANIFEST_VERSION = 1
 DEFAULT_FOLDER = "Meine Dateien"
+INCOMING_SHARES_FOLDER = "Freigaben von Peers"
 MANIFEST_TRASH_RETENTION = 20
 MANIFEST_LOCK_TIMEOUT_SECONDS = 10
 MANIFEST_LOCK_POLL_SECONDS = 0.1
@@ -254,10 +255,19 @@ class ManifestStore:
         """Return manifests visible to a node: own files plus explicit shares."""
         return [manifest for manifest in self.list_manifests() if self.may_access(manifest, node_id)]
 
+    def display_folder_for_node(self, manifest: FileManifest, node_id: str) -> str:
+        """Return the virtual folder that should be shown to a specific node.
+
+        Own files keep their real virtual folder. Incoming peer shares are always
+        grouped into a dedicated inbox-like folder so they do not clutter
+        "Meine Dateien" or user-created local folders.
+        """
+        return sanitize_folder_path(manifest.folder_path) if str(manifest.owner_node_id) == str(node_id) else INCOMING_SHARES_FOLDER
+
     def list_folders_for_node(self, node_id: str) -> list[str]:
-        folders = {DEFAULT_FOLDER}
+        folders = {DEFAULT_FOLDER, INCOMING_SHARES_FOLDER}
         for manifest in self.list_visible_for_node(node_id):
-            folders.add(manifest.folder_path)
+            folders.add(self.display_folder_for_node(manifest, node_id))
         folders.update(self._load_saved_folders(node_id))
         return sorted(folders, key=str.lower)
 

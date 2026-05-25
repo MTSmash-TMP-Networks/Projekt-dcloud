@@ -275,6 +275,10 @@
     .explorer-btn:hover, .button-like:hover{ border-color:rgba(8,102,232,.72); box-shadow:0 10px 24px rgba(8,102,232,.18), inset 0 1px 0 rgba(255,255,255,.92); transform:translateY(-1px); }
     .explorer-btn:active, .button-like:active{ transform:translateY(0) scale(.985); }
     .explorer-btn:disabled{ opacity:.48; cursor:not-allowed; transform:none; box-shadow:none; }
+    .explorer-view-controls{ display:flex; align-items:center; gap:.28rem; padding:.18rem; border:1px solid rgba(123,151,195,.32); border-radius:13px; background:rgba(255,255,255,.58); box-shadow:inset 0 1px 0 rgba(255,255,255,.70); }
+    .explorer-view-btn{ min-width:34px; border:0; border-radius:10px; padding:.42rem .5rem; background:transparent; color:#26466b; cursor:pointer; font-weight:800; transition:background .14s ease, transform .12s ease, color .14s ease; }
+    .explorer-view-btn:hover{ background:rgba(232,242,255,.95); color:var(--accent); transform:translateY(-1px); }
+    .explorer-view-btn.active{ background:linear-gradient(180deg, #ffffff, #ddecff); color:#075fcb; box-shadow:0 6px 14px rgba(8,102,232,.16), inset 0 1px 0 rgba(255,255,255,.90); }
     .explorer-breadcrumbs{
       min-width:0;
       flex:1;
@@ -296,6 +300,17 @@
     .explorer-heading{ display:flex; align-items:center; justify-content:space-between; gap:12px; margin:0 0 14px; color:#1f3555; }
     .explorer-heading h2{ margin:0; font-size:1.12rem; letter-spacing:-.02em; }
     .explorer-grid{ display:grid; grid-template-columns:repeat(auto-fill, minmax(146px, 1fr)); gap:14px; align-items:start; }
+    .explorer-grid.explorer-view-list, .explorer-grid.explorer-view-details{ display:flex; flex-direction:column; gap:8px; }
+    .explorer-grid.explorer-view-list .explorer-tile{ min-height:64px; display:grid; grid-template-columns:42px minmax(0,1fr) minmax(150px, auto); text-align:left; align-items:center; gap:10px; padding:10px 12px; }
+    .explorer-grid.explorer-view-list .explorer-tile .icon{ font-size:1.65rem; }
+    .explorer-grid.explorer-view-list .explorer-tile .tile-name{ justify-self:start; }
+    .explorer-grid.explorer-view-list .explorer-tile .tile-meta{ justify-self:end; text-align:right; }
+    .explorer-grid.explorer-view-list .explorer-tile .tile-access{ grid-column:3; justify-self:end; }
+    .explorer-grid.explorer-view-details::before{ content:"Name                                    Größe / Inhalt                         Status"; display:block; padding:.52rem .72rem; border:1px solid rgba(136,166,212,.24); border-radius:12px; background:rgba(232,242,255,.72); color:#506984; font-size:.78rem; font-weight:800; letter-spacing:.02em; }
+    .explorer-grid.explorer-view-details .explorer-tile{ min-height:48px; display:grid; grid-template-columns:34px minmax(0,1.25fr) minmax(150px,.9fr) minmax(140px,.8fr); text-align:left; align-items:center; gap:10px; padding:8px 12px; border-radius:13px; }
+    .explorer-grid.explorer-view-details .explorer-tile .icon{ font-size:1.35rem; filter:none; }
+    .explorer-grid.explorer-view-details .explorer-tile .tile-name{ justify-self:start; font-weight:750; }
+    .explorer-grid.explorer-view-details .explorer-tile .tile-meta, .explorer-grid.explorer-view-details .explorer-tile .tile-access{ justify-self:start; text-align:left; }
     .explorer-tile{
       min-height:122px;
       display:flex;
@@ -323,6 +338,8 @@
     .explorer-tile .icon{ font-size:2.45rem; line-height:1; filter:drop-shadow(0 4px 7px rgba(20,49,88,.18)); }
     .tile-name{ font-weight:700; overflow-wrap:anywhere; max-width:100%; }
     .tile-meta{ color:var(--muted); font-size:.82rem; line-height:1.26; }
+    .tile-access{ color:#406285; font-size:.82rem; line-height:1.26; }
+    .incoming-share-pill{ color:#075fcb; font-weight:800; }
     .empty{ padding:2.2rem; border:1px dashed rgba(98,135,190,.54); border-radius:18px; background:rgba(255,255,255,.72); color:var(--muted); text-align:center; }
 
     .dummy-app{ padding:1.7rem; color:#22314b; font-size:1.03rem; }
@@ -583,6 +600,11 @@
             <button class="explorer-btn" id="explorer-upload" type="button">⬆ Datei hochladen</button>
             <button class="explorer-btn" id="explorer-upload-smb" type="button">🌐 SMB-Import</button>
             <button class="explorer-btn" id="explorer-newfolder" type="button">＋ Neuer Ordner</button>
+            <div class="explorer-view-controls" aria-label="Ansicht umschalten">
+              <button class="explorer-view-btn" data-view="tiles" type="button" title="Kachelansicht">▦</button>
+              <button class="explorer-view-btn" data-view="list" type="button" title="Listenansicht">☰</button>
+              <button class="explorer-view-btn" data-view="details" type="button" title="Detailansicht">≡</button>
+            </div>
           </div>
           <main class="explorer-main" id="explorer-main"></main>
         </div>
@@ -1001,6 +1023,7 @@
       auth: {{ auth | tojson }}
     };
     const DEFAULT_FOLDER = {{ default_folder | tojson }};
+    const SHARED_FOLDER = {{ shared_folder | tojson }};
 
     (function(){
       "use strict";
@@ -1009,6 +1032,9 @@
       let latestStateVersion = Number(appState.stateVersion || 0);
       let fsMap = new Map();
       let explorerPath = VROOT;
+      const explorerViewKey = `dcloud.explorerView.${appState.nodeId || "local"}`;
+      let explorerViewMode = localStorage.getItem(explorerViewKey) || "tiles";
+      if(!["tiles", "list", "details"].includes(explorerViewMode)) explorerViewMode = "tiles";
       let selectedTarget = { kind:"desktop" };
       let folderDialogBasePath = VROOT;
       let pendingUploadTarget = DEFAULT_FOLDER;
@@ -1117,6 +1143,10 @@
         const parts = raw.split("/").map(part => part.trim()).filter(part => part && part !== "." && part !== "..");
         return parts.join("/") || DEFAULT_FOLDER;
       }
+      function isSharedSystemPath(path){
+        const normalized = normalizeFolderPath(path);
+        return normalized === SHARED_FOLDER || normalized.startsWith(`${SHARED_FOLDER}/`);
+      }
       function pathJoin(parent, child){
         const clean = String(child || "").trim().replace(/\\/g, "/");
         if(!clean) return parent || DEFAULT_FOLDER;
@@ -1158,12 +1188,16 @@
             name: file.file_name,
             size: Number(file.file_size || 0),
             chunks: Number(file.chunk_count || 0),
-            folder: normalizeFolderPath(file.folder_path || folderPath),
+            folder: normalizeFolderPath(file.display_folder_path || file.folder_path || folderPath),
+            originalFolder: normalizeFolderPath(file.folder_path || folderPath),
+            incomingShare: !!file.incoming_share,
             shared: !!(file.access && file.access.visibility === "shared"),
             sharedWith: (file.access && Array.isArray(file.access.shared_with)) ? file.access.shared_with : [],
             placement: file.placement || {},
             remoteStorageCount: Number(file.remote_storage_count || 0),
             owner: file.owner_node_id === appState.nodeId,
+            ownerNodeId: file.owner_node_id || "",
+            createdAt: file.created_at || "",
             downloadUrl: file.download_url || `/download/${file.manifest_id}`,
             deleteUrl: file.delete_url || `/files/${file.manifest_id}/delete`,
             shareUrl: file.share_url || `/files/${file.manifest_id}/share`,
@@ -1214,8 +1248,11 @@
             id: file.manifest_id,
             name: file.file_name || "Datei",
             size: Number(file.file_size || 0),
-            folder: normalizeFolderPath(file.folder_path || folder.name || DEFAULT_FOLDER),
+            folder: normalizeFolderPath(file.display_folder_path || file.folder_path || folder.name || DEFAULT_FOLDER),
+            incomingShare: !!file.incoming_share,
             owner: file.owner_node_id === appState.nodeId,
+            ownerNodeId: file.owner_node_id || "",
+            createdAt: file.created_at || "",
             downloadUrl: file.download_url || `/download/${file.manifest_id}`
           }));
         });
@@ -1714,7 +1751,8 @@
         const root = ensureNode(VROOT);
         root.folders.forEach(folderName => {
           const fullPath = pathJoin(VROOT, folderName);
-          desktopArea.appendChild(makeDesktopItem({ glyph:"📁", label:folderName, folder:fullPath }));
+          const glyph = normalizeFolderPath(fullPath) === SHARED_FOLDER ? "🤝" : "📁";
+          desktopArea.appendChild(makeDesktopItem({ glyph, label:folderName, folder:fullPath }));
         });
       }
 
@@ -1732,11 +1770,23 @@
           button.type = "button";
           button.className = "nav-item" + (explorerPath === path ? " active" : "");
           const level = Math.max(0, path.split("/").length - 1);
-          button.textContent = `${"  ".repeat(level)}📁 ${path.split("/").pop()}`;
+          const navIcon = normalizeFolderPath(path) === SHARED_FOLDER ? "🤝" : "📁";
+          button.textContent = `${"  ".repeat(level)}${navIcon} ${path.split("/").pop()}`;
           button.title = path;
           button.onclick = () => openExplorerAt(path);
           nav.appendChild(button);
         });
+      }
+      function updateExplorerViewButtons(){
+        document.querySelectorAll(".explorer-view-btn").forEach(btn => {
+          btn.classList.toggle("active", btn.dataset.view === explorerViewMode);
+        });
+      }
+      function setExplorerViewMode(mode){
+        if(!["tiles", "list", "details"].includes(mode)) return;
+        explorerViewMode = mode;
+        try{ localStorage.setItem(explorerViewKey, mode); }catch(error){}
+        renderExplorer();
       }
       function renderBreadcrumbs(){
         const bc = document.getElementById("explorer-breadcrumbs");
@@ -1767,6 +1817,13 @@
         const main = document.getElementById("explorer-main");
         const data = ensureNode(explorerPath);
         document.getElementById("explorer-back").disabled = explorerPath === VROOT;
+        const readOnlySharedPath = isSharedSystemPath(explorerPath);
+        const uploadBtn = document.getElementById("explorer-upload");
+        const smbBtn = document.getElementById("explorer-upload-smb");
+        const newFolderBtn = document.getElementById("explorer-newfolder");
+        if(uploadBtn) uploadBtn.disabled = readOnlySharedPath;
+        if(smbBtn) smbBtn.disabled = readOnlySharedPath;
+        if(newFolderBtn) newFolderBtn.disabled = readOnlySharedPath;
         renderBreadcrumbs();
         renderExplorerNav();
         main.innerHTML = "";
@@ -1778,16 +1835,18 @@
         hint.className = "tile-meta";
         hint.textContent = "Doppelklick öffnet, Rechtsklick zeigt Aktionen";
         head.append(title, hint);
+        updateExplorerViewButtons();
         const grid = document.createElement("div");
-        grid.className = "explorer-grid";
+        grid.className = `explorer-grid explorer-view-${explorerViewMode}`;
         data.folders.forEach(folder => {
           const fullPath = pathJoin(explorerPath, folder);
           const tile = document.createElement("button");
           tile.type = "button";
-          tile.className = "explorer-tile";
+          tile.className = "explorer-tile folder-tile";
           tile.dataset.kind = "folder";
           tile.dataset.folder = fullPath;
-          tile.innerHTML = "<span class=\"icon\">📁</span>";
+          const folderIcon = normalizeFolderPath(fullPath) === SHARED_FOLDER ? "🤝" : "📁";
+          tile.innerHTML = `<span class=\"icon\">${folderIcon}</span>`;
           const name = document.createElement("span");
           name.className = "tile-name";
           name.textContent = folder;
@@ -1795,7 +1854,10 @@
           meta.className = "tile-meta";
           const childNode = ensureNode(fullPath);
           meta.textContent = `${childNode.folders.length} Ordner · ${childNode.files.length} Datei(en)`;
-          tile.append(name, meta);
+          const kind = document.createElement("span");
+          kind.className = "tile-access";
+          kind.textContent = normalizeFolderPath(fullPath) === SHARED_FOLDER ? "Eingehende Freigaben" : "Ordner";
+          tile.append(name, meta, kind);
           tile.addEventListener("dblclick", () => openExplorerAt(fullPath));
           tile.addEventListener("click", () => selectExplorerTile(tile, { kind:"folder", path:fullPath }));
           tile.addEventListener("contextmenu", event => {
@@ -1808,9 +1870,9 @@
         data.files.forEach(file => {
           const tile = document.createElement("button");
           tile.type = "button";
-          tile.className = "explorer-tile";
+          tile.className = "explorer-tile file-tile";
           tile.dataset.kind = "file";
-          tile.innerHTML = "<span class=\"icon\">📄</span>";
+          tile.innerHTML = `<span class=\"icon\">${file.incomingShare ? "🤝" : "📄"}</span>`;
           const name = document.createElement("span");
           name.className = "tile-name";
           name.textContent = file.name;
@@ -1821,8 +1883,12 @@
           const raidInfo = desiredMirrors > 1 ? ` · RAID‑1 ${desiredMirrors}x` : "";
           meta.textContent = `${formatBytes(file.size)} · ${file.chunks} Chunk(s)${distribution}${raidInfo}`;
           const access = document.createElement("span");
-          access.className = "tile-meta";
-          access.textContent = file.shared ? "🌐 freigegeben" : "🔒 privat";
+          access.className = "tile-access";
+          if(file.incomingShare){
+            access.innerHTML = `<span class="incoming-share-pill">🤝 Freigabe von Peer</span>`;
+          }else{
+            access.textContent = file.shared ? "🌐 an Peer freigegeben" : "🔒 privat";
+          }
           tile.append(name, meta, access);
           tile.addEventListener("dblclick", () => { startDownload(file).catch(error => showToast(error.message, "error")); });
           tile.addEventListener("click", () => selectExplorerTile(tile, { kind:"file", file }));
@@ -1951,7 +2017,8 @@
         const isFile = selectedTarget.kind === "file";
         const isFolder = selectedTarget.kind === "folder";
         const isOwnerFile = isFile && selectedTarget.file.owner;
-        const isDeletableFolder = isFolder && normalizeFolderPath(selectedTarget.path) !== DEFAULT_FOLDER;
+        const selectedFolderPath = isFolder ? normalizeFolderPath(selectedTarget.path) : "";
+        const isDeletableFolder = isFolder && ![DEFAULT_FOLDER, SHARED_FOLDER].includes(selectedFolderPath) && !isSharedSystemPath(selectedFolderPath);
         document.getElementById("ctxOpen").hidden = !(isFile || isFolder);
         document.getElementById("ctxDownload").hidden = !isFile;
         document.getElementById("ctxExternalLink").hidden = !isOwnerFile;
@@ -1961,7 +2028,10 @@
         if(moveFolderBtn) moveFolderBtn.hidden = !isOwnerFile;
         document.getElementById("ctxMovePeer").hidden = !isOwnerFile;
         document.getElementById("ctxDelete").hidden = !(isOwnerFile || isDeletableFolder);
-        document.getElementById("ctxUpload").hidden = false;
+        const activeFolderForActions = isFolder ? selectedFolderPath : (windows.explorer.hidden ? DEFAULT_FOLDER : explorerPath);
+        const writeIntoSharedSystemFolder = isSharedSystemPath(activeFolderForActions);
+        document.getElementById("ctxUpload").hidden = writeIntoSharedSystemFolder;
+        document.getElementById("ctxNewFolder").hidden = writeIntoSharedSystemFolder;
         const share = document.getElementById("ctxShare").querySelector("span");
         if(isOwnerFile) share.textContent = selectedTarget.file.shared ? "Freigabe deaktivieren" : "Freigeben an Peer…";
         const deleteLabel = document.getElementById("ctxDelete").querySelector("span");
@@ -1992,6 +2062,7 @@
         const cleanName = String(name || "").trim();
         if(!cleanName){ showToast("Ordnername darf nicht leer sein", "error"); return; }
         const targetPath = pathJoin(basePath || VROOT, cleanName);
+        if(isSharedSystemPath(targetPath)){ showToast("Der Ordner für Peer-Freigaben ist ein Systemordner", "warning"); return; }
         const body = new URLSearchParams({ folder: targetPath, next: "/" });
         const response = await fetch("/folders", {
           method:"POST",
@@ -2007,12 +2078,16 @@
       }
 
       function chooseUploadTarget(){
-        if(selectedTarget.kind === "folder") return selectedTarget.path;
-        if(!windows.explorer.hidden) return explorerPath || DEFAULT_FOLDER;
+        if(selectedTarget.kind === "folder" && !isSharedSystemPath(selectedTarget.path)) return selectedTarget.path;
+        if(!windows.explorer.hidden && !isSharedSystemPath(explorerPath)) return explorerPath || DEFAULT_FOLDER;
         return DEFAULT_FOLDER;
       }
       function openUploadPicker(targetPath){
         pendingUploadTarget = normalizeFolderPath(targetPath || DEFAULT_FOLDER);
+        if(isSharedSystemPath(pendingUploadTarget)){
+          showToast("In den Ordner für Peer-Freigaben kann nicht hochgeladen werden", "warning");
+          pendingUploadTarget = DEFAULT_FOLDER;
+        }
         uploadInput.value = "";
         uploadInput.click();
       }
@@ -2786,7 +2861,7 @@ ${file.name}`)) return;
         moveFolderSelect.innerHTML = "";
         (appState.folders || []).forEach(folder => {
           const normalized = normalizeFolderPath(folder || DEFAULT_FOLDER);
-          if(normalized === normalizeFolderPath(file.folder)) return;
+          if(normalized === normalizeFolderPath(file.folder) || isSharedSystemPath(normalized)) return;
           const option = document.createElement("option");
           option.value = normalized;
           option.textContent = normalized;
@@ -2926,7 +3001,10 @@ ${file.name}`)) return;
       document.getElementById("explorer-back").onclick = () => openExplorerAt(parentPath(explorerPath));
       document.getElementById("explorer-newfolder").onclick = () => openFolderDialog(explorerPath);
       document.getElementById("explorer-upload").onclick = () => openUploadPicker(explorerPath || DEFAULT_FOLDER);
-      document.getElementById("explorer-upload-smb").onclick = () => uploadFromSmb(explorerPath || DEFAULT_FOLDER);
+      document.getElementById("explorer-upload-smb").onclick = () => {
+        if(isSharedSystemPath(explorerPath)){ showToast("SMB-Import in den Ordner für Peer-Freigaben ist nicht möglich", "warning"); return; }
+        uploadFromSmb(explorerPath || DEFAULT_FOLDER);
+      };
       document.getElementById("startBtn").onclick = () => openWindow("explorer");
       async function triggerDiscoveryRefresh(){
         try{
@@ -3205,6 +3283,11 @@ ${file.name}`)) return;
           .then(() => closeMovePeerDialog())
           .catch(error => showToast(error.message, "error"));
       });
+      document.querySelectorAll(".explorer-view-btn").forEach(btn => {
+        btn.addEventListener("click", () => setExplorerViewMode(btn.dataset.view || "tiles"));
+      });
+      updateExplorerViewButtons();
+
       document.getElementById("folderDialogForm").addEventListener("submit", event => {
         event.preventDefault();
         createFolder(folderDialogBasePath, folderNameInput.value).catch(error => showToast(error.message, "error"));
@@ -3253,7 +3336,7 @@ ${file.name}`)) return;
           event.preventDefault();
           deleteFile(selectedTarget.file).catch(error => showToast(error.message, "error"));
         }
-        if(event.key === "Delete" && selectedTarget.kind === "folder" && normalizeFolderPath(selectedTarget.path) !== DEFAULT_FOLDER){
+        if(event.key === "Delete" && selectedTarget.kind === "folder" && ![DEFAULT_FOLDER, SHARED_FOLDER].includes(normalizeFolderPath(selectedTarget.path))){
           event.preventDefault();
           deleteFolder(selectedTarget.path).catch(error => showToast(error.message, "error"));
         }
