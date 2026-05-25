@@ -533,6 +533,14 @@
     .browser-chip{ display:inline-flex; align-items:center; gap:5px; border:1px solid rgba(112,142,190,.26); border-radius:999px; padding:.25rem .55rem; background:rgba(255,255,255,.70); }
     .browser-stage{ flex:1; min-height:0; background:#fff; display:flex; flex-direction:column; position:relative; }
     .browser-frame{ flex:1; width:100%; min-height:0; border:0; background:#fff; }
+    .browser-loading-indicator{ position:absolute; right:16px; bottom:48px; z-index:6; width:min(330px, calc(100% - 32px)); padding:12px 13px; border:1px solid rgba(112,142,190,.28); border-radius:18px; background:rgba(248,251,255,.94); box-shadow:0 18px 46px rgba(20,50,95,.18); color:#173153; backdrop-filter:blur(16px) saturate(1.2); pointer-events:none; }
+    .browser-loading-indicator[hidden]{ display:none; }
+    .browser-loading-title{ display:flex; align-items:center; gap:8px; font-size:.86rem; font-weight:760; margin-bottom:8px; }
+    .browser-loading-dot{ width:9px; height:9px; border-radius:999px; background:#0b65d8; box-shadow:0 0 0 5px rgba(11,101,216,.13); animation:browserPulse 1s ease-in-out infinite; }
+    .browser-loading-track{ height:7px; border-radius:999px; overflow:hidden; background:#dce9fb; border:1px solid rgba(136,166,212,.36); }
+    .browser-loading-track span{ display:block; width:45%; height:100%; border-radius:inherit; background:linear-gradient(90deg, #19c7ff, #0866e8, #7f5cff); animation:browserLoadBar 1.05s ease-in-out infinite; }
+    @keyframes browserLoadBar{ 0%{ transform:translateX(-105%); } 55%{ transform:translateX(90%); } 100%{ transform:translateX(245%); } }
+    @keyframes browserPulse{ 0%,100%{ transform:scale(.82); opacity:.7; } 50%{ transform:scale(1.12); opacity:1; } }
     .browser-statusbar{ display:flex; flex-wrap:wrap; align-items:center; gap:8px; padding:7px 12px; border-top:1px solid rgba(133,162,207,.22); color:#35506f; background:rgba(255,255,255,.72); font-size:.84rem; }
     .browser-statusbar strong{ color:#163251; }
     #win-web-editor{ left:250px; top:92px; width:min(980px, calc(100vw - 290px)); height:min(700px, calc(100vh - 150px)); }
@@ -698,6 +706,10 @@
         </div>
         <div class="browser-stage">
           <iframe class="browser-frame" id="browser-frame" title="dcloud Browser" referrerpolicy="no-referrer" sandbox="allow-scripts allow-same-origin allow-forms allow-popups allow-popups-to-escape-sandbox allow-downloads allow-modals allow-top-navigation-by-user-activation"></iframe>
+          <div class="browser-loading-indicator" id="browser-loading" hidden aria-live="polite">
+            <div class="browser-loading-title"><span class="browser-loading-dot"></span><span id="browser-loading-label">Webseite wird geladen…</span></div>
+            <div class="browser-loading-track"><span></span></div>
+          </div>
           <div class="browser-statusbar">
             <strong>Server-Webmodus</strong>
             <span id="browser-status">Bereit.</span>
@@ -1238,6 +1250,9 @@
       const browserCopyUrlButton = document.getElementById("browser-copy-url");
       const browserStatus = document.getElementById("browser-status");
       const browserFrame = document.getElementById("browser-frame");
+      const browserLoading = document.getElementById("browser-loading");
+      const browserLoadingLabel = document.getElementById("browser-loading-label");
+      let browserLoadingTimer = null;
       const webEditorTitle = document.getElementById("web-editor-title");
       const webEditorPath = document.getElementById("web-editor-path");
       const webEditorTextarea = document.getElementById("web-editor-textarea");
@@ -1663,14 +1678,75 @@
         browserStatus.textContent = message;
         browserStatus.dataset.type = type;
       }
+      function browserUrlTitle(url){
+        try{
+          const parsed = new URL(url);
+          return parsed.hostname ? `${parsed.hostname}${parsed.pathname && parsed.pathname !== "/" ? parsed.pathname : ""}` : url;
+        }catch(error){ return String(url || "Webseite"); }
+      }
+      function setBrowserLoading(active, label){
+        if(browserLoadingTimer){ clearTimeout(browserLoadingTimer); browserLoadingTimer = null; }
+        if(!browserLoading) return;
+        if(active){
+          if(browserLoadingLabel) browserLoadingLabel.textContent = label || "Webseite wird geladen…";
+          browserLoading.hidden = false;
+          browserLoadingTimer = setTimeout(() => {
+            if(browserLoading && !browserLoading.hidden && browserLoadingLabel) browserLoadingLabel.textContent = "Webseite lädt weiter…";
+          }, 9000);
+        }else{
+          browserLoading.hidden = true;
+        }
+      }
+      function remoteUrlFromProxyLocation(value){
+        try{
+          const parsed = new URL(String(value || ""), window.location.href);
+          if(parsed.pathname === "/browser/view" && parsed.searchParams.has("url")) return parsed.searchParams.get("url") || "";
+          if(parsed.pathname === "/browser/search" && parsed.searchParams.has("q")) return `search: ${parsed.searchParams.get("q") || ""}`;
+        }catch(error){}
+        return "";
+      }
+      function updateBrowserUrlFromFrame(){
+        if(!browserFrame) return "";
+        let remote = "";
+        try{ remote = remoteUrlFromProxyLocation(browserFrame.contentWindow?.location?.href || ""); }catch(error){}
+        if(!remote) remote = remoteUrlFromProxyLocation(browserFrame.src || "");
+        if(remote && browserUrlInput) browserUrlInput.value = remote;
+        return remote;
+      }
       window.addEventListener("message", event => {
         const data = event && event.data ? event.data : null;
-        if(!data || data.type !== "dcloud-browser-download-saved") return;
+        if(!data || typeof data !== "object") return;
+        if(data.type === "dcloud-browser-url-changed"){
+          const remoteUrl = String(data.url || "").trim();
+          if(remoteUrl && browserUrlInput) browserUrlInput.value = remoteUrl;
+          if(data.loading === false){
+            setBrowserLoading(false);
+            if(remoteUrl) setBrowserStatus(`Geladen: ${remoteUrl}`);
+          }else{
+            setBrowserLoading(true, `Lade ${browserUrlTitle(remoteUrl)}…`);
+            if(remoteUrl) setBrowserStatus(`Lade über Server-Proxy: ${remoteUrl}`);
+          }
+          return;
+        }
+        if(data.type !== "dcloud-browser-download-saved") return;
+        setBrowserLoading(false);
         refreshState().then(() => {
           showToast(`Download gespeichert: ${data.fileName || "Datei"}`, "success");
           if(!windows.explorer.hidden && isDownloadsPath(explorerPath)) renderExplorer();
         }).catch(() => {});
       });
+      if(browserFrame){
+        browserFrame.addEventListener("load", () => {
+          const remote = updateBrowserUrlFromFrame() || (browserUrlInput ? browserUrlInput.value : "");
+          setBrowserLoading(false);
+          if(remote) setBrowserStatus(`Geladen: ${remote}`);
+          else setBrowserStatus("Bereit.");
+        });
+        browserFrame.addEventListener("error", () => {
+          setBrowserLoading(false);
+          setBrowserStatus("Seite konnte nicht geladen werden.", "error");
+        });
+      }
       function updateBrowserMeta(){
         const hosting = appState.webHosting || {};
         const localHost = document.getElementById("browser-local-host");
@@ -1693,6 +1769,7 @@
         const target = normalizeBrowserUrl(raw);
         if(browserUrlInput) browserUrlInput.value = target;
         updateBrowserMeta();
+        setBrowserLoading(true, `Lade ${browserUrlTitle(target)}…`);
         if(browserFrame){
           browserFrame.src = browserProxyUrl(target);
           browserFrame.dataset.loaded = "1";
@@ -1701,6 +1778,7 @@
       }
       function reloadBrowser(){
         if(browserFrame && browserFrame.dataset.loaded === "1"){
+          setBrowserLoading(true, `Lade ${browserUrlTitle(browserUrlInput?.value || "")}…`);
           try{ browserFrame.contentWindow.location.reload(); return; }catch(error){}
         }
         navigateBrowser(browserUrlInput?.value || (appState.webHosting || {}).localUrl || "");

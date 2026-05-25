@@ -813,6 +813,17 @@ def create_app(
     }} catch(error) {{}}
     return value || DCLOUD_BASE_URL;
   }};
+  const notifyParentUrl = (url, loading = true) => {{
+    try {{
+      const remote = remoteFromProxy(url || DCLOUD_BASE_URL);
+      if(window.parent && window.parent !== window) window.parent.postMessage({{type:'dcloud-browser-url-changed', url: remote, loading: !!loading}}, '*');
+    }} catch(error) {{}}
+  }};
+  const navigateViaProxy = value => {{
+    const remote = remoteFromProxy(value || DCLOUD_BASE_URL);
+    notifyParentUrl(remote, true);
+    window.location.href = proxify(remote);
+  }};
   const proxifySrcset = value => String(value || '').split(',').map(candidate => {{
     const trimmed = candidate.trim();
     if(!trimmed) return trimmed;
@@ -843,7 +854,7 @@ def create_app(
         const target = new URL(remoteAction || DCLOUD_BASE_URL, DCLOUD_BASE_URL);
         const data = new FormData(form);
         for(const [key, value] of data.entries()) target.searchParams.append(key, value);
-        window.location.href = proxify(target.href);
+        navigateViaProxy(target.href);
         return true;
       }}
       form.setAttribute('action', proxify(remoteAction));
@@ -888,7 +899,7 @@ def create_app(
     if(skip(href)) return;
     event.preventDefault();
     event.stopPropagation();
-    window.location.href = proxify(remoteFromProxy(href));
+    navigateViaProxy(href);
   }}, true);
   document.addEventListener('submit', event => {{
     const form = event.target;
@@ -905,7 +916,9 @@ def create_app(
   }} catch(error) {{}}
   const originalOpenWindow = window.open;
   if(originalOpenWindow) window.open = function(url, name, features) {{
-    return originalOpenWindow.call(window, proxify(remoteFromProxy(url || DCLOUD_BASE_URL)), name || '_self', features);
+    const remote = remoteFromProxy(url || DCLOUD_BASE_URL);
+    notifyParentUrl(remote, true);
+    return originalOpenWindow.call(window, proxify(remote), name || '_self', features);
   }};
   const originalFetch = window.fetch;
   if(originalFetch) window.fetch = function(input, init) {{
@@ -923,13 +936,14 @@ def create_app(
   try {{
     const originalAssign = window.location.assign.bind(window.location);
     const originalReplace = window.location.replace.bind(window.location);
-    window.location.assign = value => originalAssign(proxify(remoteFromProxy(value)));
-    window.location.replace = value => originalReplace(proxify(remoteFromProxy(value)));
+    window.location.assign = value => {{ const remote = remoteFromProxy(value); notifyParentUrl(remote, true); return originalAssign(proxify(remote)); }};
+    window.location.replace = value => {{ const remote = remoteFromProxy(value); notifyParentUrl(remote, true); return originalReplace(proxify(remote)); }};
   }} catch(error) {{}}
   const observer = new MutationObserver(mutations => mutations.forEach(m => m.addedNodes && m.addedNodes.forEach(node => {{
     if(node.nodeType === 1) {{ rewriteElement(node); rewriteAll(node); }}
   }})));
   try {{ observer.observe(document.documentElement, {{ childList:true, subtree:true }}); }} catch(error) {{}}
+  notifyParentUrl(DCLOUD_BASE_URL, false);
   setTimeout(() => rewriteAll(document), 80);
   setInterval(() => rewriteAll(document), 1500);
 }})();
