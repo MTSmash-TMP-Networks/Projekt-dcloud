@@ -77,8 +77,9 @@ BROWSER_DOWNLOADS_FOLDER = "Downloads"
 BROWSER_DOWNLOAD_CONTENT_EXTENSIONS = {
     ".7z", ".apk", ".bin", ".bz2", ".dmg", ".doc", ".docx", ".exe", ".gz",
     ".iso", ".msi", ".odt", ".ods", ".pdf", ".ppt", ".pptx", ".rar",
-    ".tar", ".tgz", ".txt", ".xls", ".xlsx", ".zip", ".zst",
+    ".tar", ".tgz", ".xls", ".xlsx", ".zip", ".zst",
 }
+BROWSER_DOWNLOAD_INTERNAL_ARTIFACT_RE = re.compile(r"^f(?:-\d+)?\.txt$", re.IGNORECASE)
 WEB_EDITABLE_SUFFIXES = {
     ".html", ".htm", ".php", ".css", ".js", ".mjs", ".json", ".txt",
     ".md", ".xml", ".svg", ".csv", ".yml", ".yaml", ".ini", ".env",
@@ -510,23 +511,42 @@ def create_app(
             raise StorageError("Der angegebene Download-Pfad ist ein Ordner")
         return candidate
 
+    def _is_internal_browser_download_artifact(path: Path, root: Path) -> bool:
+        try:
+            rel_parts = path.relative_to(root).parts
+        except ValueError:
+            return True
+        if any(part.startswith(".") for part in rel_parts):
+            return True
+        name = path.name.strip()
+        if name.endswith(('.tmp', '.part', '.crdownload')):
+            return True
+        if BROWSER_DOWNLOAD_INTERNAL_ARTIFACT_RE.match(name):
+            return True
+        return False
+
     def browser_downloads_payload() -> dict[str, Any]:
         _ensure_browser_downloads_root()
         root = browser_downloads_root.resolve()
         folders: list[str] = []
         files: list[dict[str, Any]] = []
+        visible_folders: set[str] = set()
         for path in sorted(root.rglob("*"), key=lambda item: item.relative_to(root).as_posix().lower()):
             try:
                 rel = path.relative_to(root).as_posix()
             except ValueError:
+                continue
+            if _is_internal_browser_download_artifact(path, root):
                 continue
             if path.is_dir():
                 folders.append(rel)
                 continue
             if not path.is_file():
                 continue
-            stat = path.stat()
             parent = path.parent.relative_to(root).as_posix() if path.parent != root else ""
+            if parent:
+                visible_folders.add(parent)
+            stat = path.stat()
             quoted = url_parse.quote(rel)
             files.append({
                 "path": rel,
@@ -539,10 +559,15 @@ def create_app(
                 "previewUrl": url_for("api_browser_download_file") + "?inline=1&path=" + quoted,
                 "deleteUrl": url_for("api_browser_download_delete"),
             })
+        for folder in list(visible_folders):
+            parts = Path(folder).parts
+            for index in range(1, len(parts) + 1):
+                visible_folders.add("/".join(parts[:index]))
+        visible_folder_set = set(folders) | visible_folders
         return {
             "rootFolder": BROWSER_DOWNLOADS_FOLDER,
             "rootPath": str(root),
-            "folders": folders,
+            "folders": sorted(visible_folder_set),
             "files": files,
         }
 
@@ -988,14 +1013,12 @@ def create_app(
             return True
         if not _browser_request_is_navigation():
             return False
-        if ("filename=" in disposition or "filename*=" in disposition) and "inline" not in disposition:
-            return True
         content_type = _browser_header_value(headers, "Content-Type").split(";", 1)[0].strip().lower()
         inline_types = {
             "text/html", "text/plain", "text/css", "text/javascript", "application/javascript",
             "application/json", "application/xml", "image/svg+xml", "application/xhtml+xml",
         }
-        if content_type in inline_types or content_type.startswith("image/") or content_type.startswith("audio/") or content_type.startswith("video/") or content_type.startswith("font/"):
+        if content_type in inline_types or content_type.startswith("text/") or content_type.startswith("image/") or content_type.startswith("audio/") or content_type.startswith("video/") or content_type.startswith("font/"):
             return False
         extension = Path(url_parse.unquote(url_parse.urlsplit(final_url).path)).suffix.lower()
         if extension in BROWSER_DOWNLOAD_CONTENT_EXTENSIONS:
