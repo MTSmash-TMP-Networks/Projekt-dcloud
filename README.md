@@ -94,7 +94,9 @@ Im Dashboard-Browser ist die eigene Seite unter dem angezeigten Hostnamen erreic
 http://peername.dcloud/
 ```
 
-Aktive Peers werden ebenfalls über ihre dcloud-Namen aufgelöst. Bei direkten LAN-Peers lädt der Browser deren `/dcloud-site`-Route direkt; bei Relay-Peers wird zuerst der schnelle Relay-Forwarder und danach die Relay-Mailbox verwendet. Dafür muss auf dem Relay-Server die aktuelle `relay/dcloud_relay.php` aus diesem Paket liegen, weil ältere Relay-Dateien `/dcloud-site` blockieren. Das Betriebssystem-DNS wird dadurch nicht verändert: Die `.dcloud`-Namen sind bewusst im dcloud-Browser der App aufgelöst.
+Aktive Peers werden ebenfalls über ihre dcloud-Namen aufgelöst. Bei direkten LAN-Peers lädt der Browser deren `/dcloud-site`-Route direkt; bei Relay-Peers wird zuerst der schnelle Relay-Forwarder und danach die Relay-Mailbox verwendet. Wenn der schnelle Relay-Forwarder eine generische Server-Fehlerseite liefert, fällt dcloud jetzt automatisch auf die Mailbox-Variante zurück. Dafür muss auf dem Relay-Server die aktuelle `relay/dcloud_relay.php` aus diesem Paket liegen, weil ältere Relay-Dateien `/dcloud-site` blockieren. Das Betriebssystem-DNS wird dadurch nicht verändert: Die `.dcloud`-Namen sind bewusst im dcloud-Browser der App aufgelöst.
+
+Die Webspace-Route `/dcloud-site` wird ohne Weiterleitung und mit automatischer Initialisierung von `storage/web/index.html` ausgeliefert. Interne Fehler werden als Klartext mit Ursache zurückgegeben, damit im Browser nicht nur eine generische Flask-Seite wie „Internal Server Error“ erscheint.
 
 Der Button **Nativ** bleibt als optionale lokale Desktop-Funktion erhalten. Dafür muss `PySide6` bei Bedarf separat installiert werden (`pip install PySide6`). Auf headless Servern oder bei externem Dashboard-Zugriff ist der neue Server-Proxy-Modus der passende Standard, weil er komplett im Web-Dashboard sichtbar bleibt. Hinweis: Ein serverseitig übersetzter Webmodus kann sehr viele moderne Webseiten gut anzeigen, ist aber kein vollständiger Ersatz für Chrome/Firefox. Seiten mit starkem Bot-Schutz, komplexen Service-Workern oder hart codierten Origin-Prüfungen können weiterhin eingeschränkt sein.
 

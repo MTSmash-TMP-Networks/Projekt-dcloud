@@ -373,15 +373,29 @@ def create_app(
 
     def _serve_local_web_path(path: str | None = None, *, query_string: str | None = None) -> Response:
         try:
+            _ensure_web_root()
             file_path = _safe_web_path(path)
         except StorageError as exc:
             return Response(str(exc), status=400, content_type="text/plain; charset=utf-8")
+        except Exception as exc:
+            return Response(
+                f"dcloud Webspace konnte nicht vorbereitet werden: {type(exc).__name__}: {exc}",
+                status=500,
+                content_type="text/plain; charset=utf-8",
+            )
         if not file_path.exists() or not file_path.is_file():
             return Response("Web-Datei nicht gefunden", status=404, content_type="text/plain; charset=utf-8")
-        rel_path = file_path.relative_to(web_root.resolve()).as_posix()
-        if file_path.suffix.lower() == ".php":
-            return _render_php_file(file_path, rel_path, query_string=query_string)
-        return send_file(file_path, conditional=True)
+        try:
+            rel_path = file_path.relative_to(web_root.resolve()).as_posix()
+            if file_path.suffix.lower() == ".php":
+                return _render_php_file(file_path, rel_path, query_string=query_string)
+            return send_file(file_path, conditional=True)
+        except Exception as exc:
+            return Response(
+                f"dcloud Webspace-Datei konnte nicht ausgeliefert werden: {type(exc).__name__}: {exc}",
+                status=500,
+                content_type="text/plain; charset=utf-8",
+            )
 
     def _normalize_web_relative(raw_path: str | None, *, allow_empty: bool = False) -> str:
         clean = url_parse.unquote(str(raw_path or "")).split("?", 1)[0].replace("\\", "/").strip("/")
@@ -646,10 +660,13 @@ def create_app(
 
         text = re.sub(r"(<style[^>]*>)(.*?)(</style>)", style_repl, text, flags=re.IGNORECASE | re.DOTALL)
         injection = _browser_injection_script(base_url, native_mode=native_mode)
+        # Important: use a callable replacement here. The injected JavaScript contains
+        # backslash sequences such as /\s+/; passing it as a plain replacement string
+        # makes re.sub treat them as replacement escapes and raises "bad escape \s".
         if re.search(r"</head\s*>", text, flags=re.IGNORECASE):
-            text = re.sub(r"</head\s*>", injection + "</head>", text, count=1, flags=re.IGNORECASE)
+            text = re.sub(r"</head\s*>", lambda _match: injection + "</head>", text, count=1, flags=re.IGNORECASE)
         elif re.search(r"</body\s*>", text, flags=re.IGNORECASE):
-            text = re.sub(r"</body\s*>", injection + "</body>", text, count=1, flags=re.IGNORECASE)
+            text = re.sub(r"</body\s*>", lambda _match: injection + "</body>", text, count=1, flags=re.IGNORECASE)
         else:
             text += injection
         return text.encode("utf-8")
@@ -754,13 +771,16 @@ def create_app(
                     body=body,
                     timeout=20,
                 )
-                return _proxy_response_from_bytes(
-                    relay_response.body,
-                    status=relay_response.status_code,
-                    headers=relay_response.headers,
-                    base_url=original_url,
-                    native_mode=native_mode,
-                )
+                if int(relay_response.status_code) < 500:
+                    return _proxy_response_from_bytes(
+                        relay_response.body,
+                        status=relay_response.status_code,
+                        headers=relay_response.headers,
+                        base_url=original_url,
+                        native_mode=native_mode,
+                    )
+                preview = relay_response.body.decode("utf-8", errors="replace").strip().replace("\n", " ")[:240]
+                last_relay_error = f"direkter Relay-Forward lieferte HTTP {relay_response.status_code}: {preview or 'keine Details'}"
             except Exception as exc:
                 last_relay_error = str(exc)
             try:
@@ -1861,13 +1881,21 @@ def create_app(
                 headers={"Content-Type": "application/json"},
                 body=b'{"ok":false,"message":"Relay-Nutzdaten sind ungueltig"}',
             )
-        with app.test_client() as relay_client_for_app:
-            response = relay_client_for_app.open(path, method=method, headers=allowed_headers, data=body)
-            try:
-                body_bytes = response.get_data()
-            except RuntimeError:
-                response.direct_passthrough = False
-                body_bytes = response.get_data()
+        try:
+            with app.test_client() as relay_client_for_app:
+                response = relay_client_for_app.open(path, method=method, headers=allowed_headers, data=body)
+                try:
+                    body_bytes = response.get_data()
+                except RuntimeError:
+                    response.direct_passthrough = False
+                    body_bytes = response.get_data()
+        except Exception as exc:
+            detail = f"Relay-lokaler Aufruf fehlgeschlagen fuer {path}: {type(exc).__name__}: {exc}"
+            return RelayHttpResponse(
+                status_code=500,
+                headers={"Content-Type": "text/plain; charset=utf-8", "X-DCloud-Error": type(exc).__name__},
+                body=detail.encode("utf-8", errors="replace"),
+            )
         response_headers = {"Content-Type": response.content_type or "application/octet-stream"}
         for header_name in ("Content-Disposition", "Content-Length"):
             if header_name in response.headers:
@@ -2323,11 +2351,17 @@ def create_app(
             }
         )
 
-    @app.route("/dcloud-site", defaults={"path": ""}, methods=["GET", "POST", "HEAD"])
-    @app.route("/dcloud-site/", defaults={"path": ""}, methods=["GET", "POST", "HEAD"])
-    @app.route("/dcloud-site/<path:path>", methods=["GET", "POST", "HEAD"])
+    @app.route("/dcloud-site", defaults={"path": ""}, methods=["GET", "POST", "HEAD"], strict_slashes=False)
+    @app.route("/dcloud-site/<path:path>", methods=["GET", "POST", "HEAD"], strict_slashes=False)
     def dcloud_site(path: str = "") -> Response:
-        return _serve_local_web_path(path or "/")
+        try:
+            return _serve_local_web_path(path or "/")
+        except Exception as exc:
+            return Response(
+                f"dcloud Webspace-Route fehlgeschlagen: {type(exc).__name__}: {exc}",
+                status=500,
+                content_type="text/plain; charset=utf-8",
+            )
 
     @app.get("/api/browser/hosts")
     def api_browser_hosts() -> Response:
@@ -2364,9 +2398,16 @@ def create_app(
         parsed = url_parse.urlsplit(target_url)
         hostname = (parsed.hostname or "").lower()
         native_mode = str(request.args.get("native") or "").lower() in {"1", "true", "yes"}
-        if hostname.endswith(".dcloud"):
-            return _fetch_dcloud_browser_url(target_url, native_mode=native_mode)
-        return _fetch_external_browser_url(target_url, native_mode=native_mode)
+        try:
+            if hostname.endswith(".dcloud"):
+                return _fetch_dcloud_browser_url(target_url, native_mode=native_mode)
+            return _fetch_external_browser_url(target_url, native_mode=native_mode)
+        except Exception as exc:
+            return Response(
+                f"dcloud Browser konnte die Seite nicht laden: {type(exc).__name__}: {exc}",
+                status=502,
+                content_type="text/plain; charset=utf-8",
+            )
 
     @app.get("/api/uploads/<upload_id>")
     def api_upload_progress(upload_id: str) -> Response:
