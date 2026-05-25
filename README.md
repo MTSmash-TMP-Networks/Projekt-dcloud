@@ -309,7 +309,6 @@ Pflichtpakete aus `requirements.txt`:
 - `Flask`
 - `PyYAML`
 - `cryptography`
-- `pysmb`
 - `impacket`
 
 Optional:

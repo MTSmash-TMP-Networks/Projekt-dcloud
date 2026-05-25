@@ -635,7 +635,6 @@
             <button class="explorer-btn" id="explorer-back" type="button">← Zurück</button>
             <div class="explorer-breadcrumbs" id="explorer-breadcrumbs" aria-label="Pfad"></div>
             <button class="explorer-btn" id="explorer-upload" type="button">⬆ Datei hochladen</button>
-            <button class="explorer-btn" id="explorer-upload-smb" type="button">🌐 SMB-Import</button>
             <button class="explorer-btn" id="explorer-newfolder" type="button">＋ Neuer Ordner</button>
             <div class="explorer-view-controls" aria-label="Ansicht umschalten">
               <button class="explorer-view-btn" data-view="tiles" type="button" title="Kachelansicht">▦</button>
@@ -2176,10 +2175,8 @@
         const readOnlySharedPath = isSharedSystemPath(explorerPath);
         const webPath = isWebPath(explorerPath);
         const uploadBtn = document.getElementById("explorer-upload");
-        const smbBtn = document.getElementById("explorer-upload-smb");
         const newFolderBtn = document.getElementById("explorer-newfolder");
         if(uploadBtn) uploadBtn.disabled = readOnlySharedPath;
-        if(smbBtn) smbBtn.disabled = readOnlySharedPath || webPath;
         if(newFolderBtn) newFolderBtn.disabled = readOnlySharedPath;
         renderBreadcrumbs();
         renderExplorerNav();
@@ -2961,44 +2958,6 @@
       }
 
 
-      async function uploadFromSmb(folder){
-        const smbHost = prompt("SMB-Server/IP (z.B. 192.168.1.20)");
-        if(!smbHost) return;
-        const smbShare = prompt("SMB-Freigabe / Share-Name");
-        if(!smbShare) return;
-        const smbPath = prompt("Dateipfad im Share (z.B. /daten/test.pdf)");
-        if(!smbPath) return;
-        const smbUsername = prompt("SMB-Benutzername (leer = Gast)") || "";
-        const smbPassword = prompt("SMB-Passwort (optional)") || "";
-        const targetFolder = normalizeFolderPath(folder || DEFAULT_FOLDER);
-        const uploadId = makeUploadId();
-        trackUploadId(uploadId);
-        showTransfer({name: smbPath.split('/').pop() || 'smb-file', size:0}, targetFolder);
-        document.getElementById("transfer-status").textContent = "SMB-Import wird vorbereitet…";
-        startUploadPolling(uploadId);
-        const data = new FormData();
-        data.append("upload_id", uploadId);
-        data.append("folder", targetFolder);
-        data.append("smb_host", smbHost);
-        data.append("smb_share", smbShare);
-        data.append("smb_path", smbPath);
-        data.append("smb_username", smbUsername);
-        data.append("smb_password", smbPassword);
-        data.append("storage_peer_selection_mode", storagePeerSelectionTouched ? "manual" : "auto");
-        Array.from(selectedStoragePeerIds).forEach(peerId => data.append("storage_peer_node_ids", peerId));
-        try{
-          const response = await fetch('/upload/smb', { method:'POST', headers:{ 'X-Requested-With':'XMLHttpRequest', 'Accept':'application/json' }, body:data });
-          const payload = await response.json();
-          if(!response.ok || !payload.ok) throw new Error(payload.message || 'SMB-Import fehlgeschlagen');
-          applyState(payload.state);
-          finishTransfer(payload.message || 'SMB-Import abgeschlossen', true, payload.uploadProgress || null);
-          showToast(payload.message || 'SMB-Import abgeschlossen', 'success');
-          openExplorerAt(targetFolder);
-        }catch(error){
-          finishTransfer(error.message, false);
-          showToast(error.message, 'error');
-        }
-      }
       async function restorePersistedUploads(){
         const ids = readPersistedUploadIds();
         try{
@@ -3399,10 +3358,6 @@ ${file.name}`)) return;
       document.getElementById("explorer-back").onclick = () => openExplorerAt(parentPath(explorerPath));
       document.getElementById("explorer-newfolder").onclick = () => openFolderDialog(explorerPath);
       document.getElementById("explorer-upload").onclick = () => openUploadPicker(explorerPath || DEFAULT_FOLDER);
-      document.getElementById("explorer-upload-smb").onclick = () => {
-        if(isSharedSystemPath(explorerPath)){ showToast("SMB-Import in den Ordner für Peer-Freigaben ist nicht möglich", "warning"); return; }
-        uploadFromSmb(explorerPath || DEFAULT_FOLDER);
-      };
       document.getElementById("startBtn").onclick = () => openWindow("explorer");
       async function triggerDiscoveryRefresh(){
         try{
