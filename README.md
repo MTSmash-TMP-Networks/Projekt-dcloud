@@ -22,7 +22,7 @@ dcloud ist ein Python-basierter Storage-Client mit Web-Dashboard im Desktop-Stil
 - Temporäre externe Download-Links mit maximal 60 Minuten Laufzeit
 - Reverse-Mailbox-Download über Relay, wenn der Node von außen nicht direkt erreichbar ist
 - Peer-Chat mit ungelesen-Badge, Emojis, Bildversand und Datei-Teilen
-- Interner Dashboard-Browser mit Server-Proxy, `peername.dcloud`-Auflösung, normalem Webzugriff, JavaScript-Unterstützung, lokalem `storage/web`-Hosting und Download-Ablage in `storage/Downloads`
+- Interner Dashboard-Browser mit Server-Proxy, `peername.dcloud`-Auflösung, normalem Webzugriff, JavaScript-Unterstützung, proxy-tauglicher Suchfunktion, lokalem `storage/web`-Hosting und Download-Ablage in `storage/Downloads`
 - Lokaler Web-Ordner `storage/web` als Datei-Explorer-Spezialordner `web`, inkl. Upload, Unterordnern, Texteditor und optionaler PHP-Ausführung über `php-cgi`/`php`
 - Standardordner `storage/Downloads` als Datei-Explorer-Spezialordner **Downloads**; Downloads aus dem Dashboard-Browser werden dort serverseitig gespeichert
 - Optionaler eingebetteter SMB-Server
@@ -103,7 +103,7 @@ Die Webspace-Route `/dcloud-site` wird ohne Weiterleitung und mit automatischer 
 
 Der Dashboard-Browser speichert echte Datei-Downloads serverseitig in `storage/Downloads`. Der Ordner wird beim Start automatisch erstellt und erscheint von Anfang an im dcloud Datei-Explorer als **Downloads**. Dateien aus diesem Ordner können über den Datei-Explorer geöffnet, heruntergeladen oder gelöscht werden.
 
-Der Browser läuft vollständig im Web-Dashboard. Der frühere native Qt-Button wurde entfernt, damit die Funktion auch auf Servern mit externem Dashboard-Zugriff nutzbar bleibt. Der Server-Proxy übersetzt Links, Formulare, `fetch`, `XMLHttpRequest`, dynamische URL-Attribute und einfache JavaScript-Import-/Worker-Pfade auf `/browser/view`. Hinweis: Ein serverseitig übersetzter Webmodus kann viele moderne Webseiten anzeigen, ist aber kein vollständiger Ersatz für Chrome/Firefox. Seiten mit starkem Bot-Schutz, komplexen Service-Workern oder hart codierten Origin-Prüfungen können weiterhin eingeschränkt sein.
+Der Browser läuft vollständig im Web-Dashboard. Der frühere native Qt-Button wurde entfernt, damit die Funktion auch auf Servern mit externem Dashboard-Zugriff nutzbar bleibt. Der Server-Proxy übersetzt Links, Formulare, `fetch`, `XMLHttpRequest`, dynamische URL-Attribute und einfache JavaScript-Import-/Worker-Pfade auf `/browser/view`. Hinweis: Ein serverseitig übersetzter Webmodus kann viele moderne Webseiten anzeigen, ist aber kein vollständiger Ersatz für Chrome/Firefox. Seiten mit starkem Bot-Schutz, komplexen Service-Workern oder hart codierten Origin-Prüfungen können weiterhin eingeschränkt sein. Google/reCAPTCHA ist ein solcher Fall: Die CAPTCHA-Sitekeys sind nur für Google-Domains gültig und funktionieren nicht unter `localhost`, deiner Dashboard-Domain oder einer proxied `.dcloud`-Ansicht. dcloud erkennt diese Sperre und bietet stattdessen eine proxy-taugliche Suchansicht an; CAPTCHA-/Bot-Schutz wird nicht umgangen.
 
 ### Login und Benutzerverwaltung
 

@@ -551,15 +551,95 @@ def create_app(
         response = jsonify(payload)
         return (response, status) if status != 200 else response
 
+    def _safe_search_url(query: str) -> str:
+        cleaned = str(query or "").strip()
+        return "https://duckduckgo.com/html/?q=" + url_parse.quote_plus(cleaned)
+
     def _browser_url(value: str | None) -> str:
         raw = str(value or "").strip()
         if not raw:
             return f"http://{_primary_web_hostname()}/"
+        if raw.lower().startswith(("g:", "google:")):
+            return _safe_search_url(raw.split(":", 1)[1])
         if raw.startswith("//"):
             return "https:" + raw
         if "://" not in raw:
+            # Plain text with spaces is treated as a search query. This keeps the
+            # server-side dashboard browser usable without depending on Google,
+            # whose reCAPTCHA/site-key checks intentionally reject proxied origins.
+            if any(ch.isspace() for ch in raw):
+                return _safe_search_url(raw)
             raw = ("http://" if raw.lower().endswith(".dcloud") or ".dcloud/" in raw.lower() else "https://") + raw
         return raw
+
+    def _is_google_host(hostname: str) -> bool:
+        host = (hostname or "").lower().strip(".")
+        return host == "google.com" or host.endswith(".google.com") or host.startswith("google.") or ".google." in host
+
+    def _browser_proxy_url_for(target_url: str, *, native_mode: bool = False) -> str:
+        proxied = url_for("browser_view") + "?url=" + url_parse.quote(target_url, safe="")
+        if native_mode:
+            proxied += "&native=1"
+        token = str(request.args.get("browser_token") or "")
+        if token and secrets.compare_digest(token, browser_access_token):
+            proxied += "&browser_token=" + url_parse.quote(token, safe="")
+        return proxied
+
+    def _google_proxy_notice_response(original_url: str, *, query: str = "", details: str = "") -> Response:
+        q = html.escape(query or "", quote=True)
+        target = html.escape(original_url or "https://www.google.com/", quote=True)
+        ddg_url = _safe_search_url(query) if query else "https://duckduckgo.com/html/"
+        ddg_proxy = html.escape(_browser_proxy_url_for(ddg_url), quote=True)
+        details_html = f"<p class='muted'>{html.escape(details)}</p>" if details else ""
+        body = f"""<!doctype html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Google im dcloud-Proxy</title>
+<style>
+  body{{margin:0;min-height:100vh;display:grid;place-items:center;background:#eef4ff;color:#162033;font-family:system-ui,-apple-system,Segoe UI,sans-serif}}
+  main{{max-width:760px;margin:24px;background:#fff;border:1px solid #d9e5f5;border-radius:24px;padding:30px;box-shadow:0 20px 60px rgba(20,40,80,.14)}}
+  h1{{margin:0 0 12px;font-size:1.55rem}}
+  p{{line-height:1.55}}
+  code{{background:#edf2ff;border-radius:7px;padding:.13rem .35rem}}
+  form{{display:flex;gap:10px;margin:20px 0 12px;flex-wrap:wrap}}
+  input{{flex:1;min-width:260px;border:1px solid #b8c7df;border-radius:13px;padding:.75rem .9rem;font-size:1rem}}
+  button,a.button{{border:0;border-radius:13px;background:#0b63ce;color:#fff;font-weight:800;padding:.78rem 1rem;text-decoration:none;display:inline-flex;align-items:center}}
+  .muted{{color:#5d6f87;font-size:.94rem}}
+  .actions{{display:flex;gap:10px;flex-wrap:wrap;margin-top:16px}}
+</style>
+</head>
+<body><main>
+<h1>Google blockiert die Proxy-Ansicht</h1>
+<p>Google/reCAPTCHA erlaubt seine Sicherheitsprüfung nur auf freigegebenen Google-Domains. Im dcloud-Dashboard läuft die Seite aber technisch über deinen dcloud-Server, zum Beispiel <code>localhost</code> oder deine eigene Dashboard-Domain. Deshalb erscheint die Meldung, dass die Domain für den Websiteschlüssel nicht unterstützt wird.</p>
+{details_html}
+<form method="get" action="/browser/search">
+  <input type="search" name="q" value="{q}" placeholder="Suchbegriff eingeben" autofocus>
+  <button type="submit">Mit Proxy-Suche suchen</button>
+</form>
+<div class="actions">
+  <a class="button" href="{ddg_proxy}">Proxy-Suche öffnen</a>
+</div>
+<p class="muted">Angefragte Adresse: <code>{target}</code></p>
+<p class="muted">dcloud umgeht keine CAPTCHA- oder Bot-Schutzmechanismen. Für echte Google-Suche muss Google außerhalb des Server-Proxys im normalen Browser geöffnet werden.</p>
+</main></body></html>"""
+        response = Response(body, status=200, content_type="text/html; charset=utf-8")
+        response.headers["Cache-Control"] = "no-store"
+        return response
+
+    def _is_google_captcha_body(body: bytes) -> bool:
+        snippet = body[:512000].decode("utf-8", errors="ignore").lower()
+        needles = (
+            "localhost befindet sich nicht in der liste der unterstützten domains",
+            "not in the list of supported domains",
+            "invalid domain for site key",
+            "unusual traffic from your computer network",
+            "sorry/index",
+            "g-recaptcha",
+            "www.google.com/recaptcha",
+        )
+        return any(needle in snippet for needle in needles)
 
     def _resolve_dcloud_peer(hostname: str) -> tuple[str, Any | None]:
         label = hostname.lower().removesuffix(".dcloud").strip(".")
@@ -593,13 +673,7 @@ def create_app(
             return target
         if native_mode and not host.endswith(".dcloud"):
             return absolute
-        proxied = url_for("browser_view") + "?url=" + url_parse.quote(absolute, safe="")
-        token = str(request.args.get("browser_token") or "")
-        if native_mode:
-            proxied += "&native=1"
-        if token and secrets.compare_digest(token, browser_access_token):
-            proxied += "&browser_token=" + url_parse.quote(token, safe="")
-        return proxied
+        return _browser_proxy_url_for(absolute, native_mode=native_mode)
 
     def _rewrite_browser_css(text: str, base_url: str, *, native_mode: bool = False) -> str:
         def url_repl(match: re.Match[str]) -> str:
@@ -992,6 +1066,10 @@ def create_app(
         if base_url and _browser_response_should_save_download(source_headers, base_url):
             output = _save_browser_download_bytes(body, source_headers, base_url)
             return _browser_download_saved_response(output, base_url)
+        if base_url and "text/html" in lower_content_type and _is_google_host(url_parse.urlsplit(base_url).hostname or "") and _is_google_captcha_body(body):
+            parsed_google = url_parse.urlsplit(base_url)
+            google_query = url_parse.parse_qs(parsed_google.query).get("q", [""])[0]
+            return _google_proxy_notice_response(base_url, query=google_query, details="Google hat eine CAPTCHA-/Domain-Prüfung ausgeliefert, die im serverseitigen Proxy nicht gültig abgeschlossen werden kann.")
         if "text/html" in lower_content_type and base_url:
             out_body = _rewrite_browser_html(body, base_url, native_mode=native_mode)
             content_type = "text/html; charset=utf-8"
@@ -1037,6 +1115,16 @@ def create_app(
         parsed = url_parse.urlsplit(url)
         if parsed.scheme.lower() not in {"http", "https"}:
             return Response("Der interne Browser erlaubt nur http:// und https:// URLs.", status=400, content_type="text/plain; charset=utf-8")
+        hostname = (parsed.hostname or "").lower()
+        if _is_google_host(hostname):
+            params = url_parse.parse_qs(parsed.query, keep_blank_values=True)
+            google_result_target = (params.get("q") or params.get("url") or [""])[0]
+            if parsed.path.rstrip("/") == "/url" and google_result_target.startswith(("http://", "https://")):
+                return redirect(_browser_proxy_url_for(google_result_target, native_mode=native_mode), code=302)
+            if parsed.path.rstrip("/") in {"", "/search"} and params.get("q"):
+                return redirect(_browser_proxy_url_for(_safe_search_url(params.get("q", [""])[0]), native_mode=native_mode), code=302)
+            if parsed.path in {"", "/"} or parsed.path.startswith(("/sorry", "/recaptcha")):
+                return _google_proxy_notice_response(url, query=(params.get("q") or [""])[0])
         method, body, headers = _browser_forward_request_parts()
         req = url_request.Request(
             url,
@@ -2686,6 +2774,13 @@ def create_app(
                     parsed_target.fragment,
                 ))
         return target_url
+
+    @app.get("/browser/search")
+    def browser_search() -> Response:
+        query = str(request.args.get("q") or "").strip()
+        if not query:
+            return redirect(_browser_proxy_url_for("https://duckduckgo.com/html/"), code=302)
+        return redirect(_browser_proxy_url_for(_safe_search_url(query)), code=302)
 
     @app.route("/browser/view", methods=["GET", "POST", "HEAD", "OPTIONS"])
     def browser_view() -> Response:

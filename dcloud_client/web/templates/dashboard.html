@@ -686,7 +686,7 @@
         <form class="browser-toolbar" id="browser-form">
           <button type="button" id="browser-home" title="Lokale dcloud-Webseite öffnen">🏠</button>
           <button type="button" id="browser-reload" title="Aktuelle Seite neu laden">↻</button>
-          <input id="browser-url" type="text" spellcheck="false" autocomplete="off" placeholder="peername.dcloud oder https://example.com" />
+          <input id="browser-url" type="text" spellcheck="false" autocomplete="off" placeholder="Suchbegriff, peername.dcloud oder https://example.com" />
           <button type="submit">Los</button>
           <button type="button" id="browser-copy-url" title="Adresse kopieren">Kopieren</button>
         </form>
@@ -1643,12 +1643,17 @@
         if(output) output.textContent = String(data.manifestAuditLog || "Keine Logs verfügbar.");
       }
 
+      function browserSearchUrl(query){
+        return `https://duckduckgo.com/html/?q=${encodeURIComponent(String(query || "").trim())}`;
+      }
       function normalizeBrowserUrl(raw){
         let value = String(raw || "").trim();
         const hosting = appState.webHosting || {};
         if(!value) value = hosting.localUrl || `http://${hosting.primaryHost || "peer.dcloud"}/`;
+        if(/^\s*(g|google):/i.test(value)) return browserSearchUrl(value.replace(/^\s*(g|google):/i, ""));
         if(value.startsWith("//")) value = "https:" + value;
         if(!/^[a-z][a-z0-9+.-]*:\/\//i.test(value)){
+          if(/\s/.test(value)) return browserSearchUrl(value);
           value = (value.toLowerCase().includes(".dcloud") ? "http://" : "https://") + value;
         }
         return value;
@@ -1675,7 +1680,7 @@
         if(localHost) localHost.textContent = hosting.primaryHost || "peer.dcloud";
         if(webRoot) webRoot.textContent = hosting.webRoot || "storage/web";
         if(phpStatus) phpStatus.textContent = hosting.phpAvailable ? `PHP aktiv${hosting.phpBinary ? ": " + hosting.phpBinary : ""}` : "PHP optional: php-cgi/php nicht gefunden";
-        if(engineStatus) engineStatus.textContent = "Modus: Server-Proxy im Dashboard · JavaScript aktiv";
+        if(engineStatus) engineStatus.textContent = "Modus: Server-Proxy · JS aktiv · Google-CAPTCHA wird nicht umgangen";
       }
       function browserProxyUrl(raw){
         const target = normalizeBrowserUrl(raw);
