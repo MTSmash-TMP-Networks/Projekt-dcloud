@@ -29,6 +29,7 @@ import shutil
 import importlib.util
 import unicodedata
 from urllib import error as url_error, parse as url_parse, request as url_request
+import http.cookiejar
 
 from flask import Flask, Response, abort, flash, jsonify, redirect, render_template, request, send_file, session, url_for
 from werkzeug.utils import secure_filename
@@ -168,6 +169,8 @@ def create_app(
     app.config["DCLOUD_APP_CONFIG"] = config
     app.jinja_env.filters["human_bytes"] = human_bytes
     browser_access_token = secrets.token_urlsafe(32)
+    browser_cookie_jar = http.cookiejar.CookieJar()
+    browser_http_opener = url_request.build_opener(url_request.HTTPCookieProcessor(browser_cookie_jar))
     relay_clients: dict[str, HttpRelayClient] = {}
     relay_transports: dict[str, HttpRelayTransport] = {}
     relay_lock = threading.RLock()
@@ -480,43 +483,200 @@ def create_app(
                 return "peer", peer
         raise StorageError(f"Kein aktiver dcloud-Peer für {hostname} gefunden")
 
+    def _browser_skip_rewrite(target: str) -> bool:
+        value = (target or "").strip()
+        if not value:
+            return True
+        lower = value.lower()
+        return lower.startswith(("#", "mailto:", "tel:", "javascript:", "data:", "blob:", "about:"))
+
+    def _browser_proxy_target(target: str, base_url: str, *, native_mode: bool = False) -> str:
+        if _browser_skip_rewrite(target):
+            return target
+        absolute = url_parse.urljoin(base_url, html.unescape(target.strip()))
+        parsed = url_parse.urlsplit(absolute)
+        host = (parsed.hostname or "").lower()
+        if parsed.scheme.lower() not in {"http", "https"}:
+            return target
+        if native_mode and not host.endswith(".dcloud"):
+            return absolute
+        proxied = url_for("browser_view") + "?url=" + url_parse.quote(absolute, safe="")
+        token = str(request.args.get("browser_token") or "")
+        if native_mode:
+            proxied += "&native=1"
+        if token and secrets.compare_digest(token, browser_access_token):
+            proxied += "&browser_token=" + url_parse.quote(token, safe="")
+        return proxied
+
+    def _rewrite_browser_css(text: str, base_url: str, *, native_mode: bool = False) -> str:
+        def url_repl(match: re.Match[str]) -> str:
+            quote = match.group(1) or ""
+            target = match.group(2).strip()
+            if _browser_skip_rewrite(target):
+                return match.group(0)
+            proxied = _browser_proxy_target(target, base_url, native_mode=native_mode)
+            return f"url({quote}{proxied}{quote})"
+
+        text = re.sub(r"url\(\s*(['\"]?)([^)'\"]+)\1\s*\)", url_repl, text, flags=re.IGNORECASE)
+
+        def import_repl(match: re.Match[str]) -> str:
+            quote = match.group(1)
+            target = match.group(2).strip()
+            proxied = _browser_proxy_target(target, base_url, native_mode=native_mode)
+            return f"@import {quote}{proxied}{quote}"
+
+        return re.sub(r"@import\s+(['\"])(.*?)\1", import_repl, text, flags=re.IGNORECASE)
+
+    def _rewrite_browser_srcset(value: str, base_url: str, *, native_mode: bool = False) -> str:
+        parts: list[str] = []
+        for raw_candidate in value.split(","):
+            candidate = raw_candidate.strip()
+            if not candidate:
+                continue
+            bits = candidate.split(None, 1)
+            target = bits[0]
+            descriptor = (" " + bits[1]) if len(bits) > 1 else ""
+            parts.append(_browser_proxy_target(target, base_url, native_mode=native_mode) + descriptor)
+        return ", ".join(parts) if parts else value
+
+    def _browser_injection_script(base_url: str, *, native_mode: bool = False) -> str:
+        base_json = json.dumps(base_url)
+        native_json = "true" if native_mode else "false"
+        token = str(request.args.get("browser_token") or "")
+        token_part = "&browser_token=" + url_parse.quote(token, safe="") if token and secrets.compare_digest(token, browser_access_token) else ""
+        token_json = json.dumps(token_part)
+        return f'''
+<script data-dcloud-browser-proxy="1">
+(() => {{
+  const DCLOUD_BASE_URL = {base_json};
+  const DCLOUD_NATIVE_MODE = {native_json};
+  const DCLOUD_TOKEN_PART = {token_json};
+  const skip = value => /^(#|mailto:|tel:|javascript:|data:|blob:|about:)/i.test(String(value || '').trim());
+  const proxify = value => {{
+    try {{
+      if(skip(value)) return value;
+      const absolute = new URL(String(value || ''), DCLOUD_BASE_URL).href;
+      const parsed = new URL(absolute);
+      if(!/^https?:$/i.test(parsed.protocol)) return value;
+      if(DCLOUD_NATIVE_MODE && !parsed.hostname.toLowerCase().endsWith('.dcloud')) return absolute;
+      return '/browser/view?url=' + encodeURIComponent(absolute) + (DCLOUD_NATIVE_MODE ? '&native=1' : '') + DCLOUD_TOKEN_PART;
+    }} catch(error) {{ return value; }}
+  }};
+  const rewriteElement = element => {{
+    if(!element || element.dataset?.dcloudRewritten === '1') return;
+    for(const attr of ['href','src','action','formaction','poster','data-src','data-href']) {{
+      if(element.hasAttribute && element.hasAttribute(attr)) element.setAttribute(attr, proxify(element.getAttribute(attr)));
+    }}
+    if(element.hasAttribute && element.hasAttribute('srcset')) {{
+      const next = String(element.getAttribute('srcset') || '').split(',').map(candidate => {{
+        const trimmed = candidate.trim();
+        if(!trimmed) return trimmed;
+        const parts = trimmed.split(/\\s+/, 2);
+        const rest = trimmed.slice(parts[0].length);
+        return proxify(parts[0]) + rest;
+      }}).join(', ');
+      element.setAttribute('srcset', next);
+    }}
+    if(element.dataset) element.dataset.dcloudRewritten = '1';
+  }};
+  const rewriteAll = root => {{
+    try {{ (root || document).querySelectorAll?.('[href],[src],[action],[formaction],[poster],[srcset],[data-src],[data-href]').forEach(rewriteElement); }} catch(error) {{}}
+  }};
+  rewriteAll(document);
+  document.addEventListener('click', event => {{
+    const link = event.target && event.target.closest ? event.target.closest('a[href]') : null;
+    if(!link) return;
+    const href = link.getAttribute('href');
+    if(skip(href)) return;
+    event.preventDefault();
+    window.location.href = proxify(href);
+  }}, true);
+  document.addEventListener('submit', event => {{
+    const form = event.target;
+    if(form && form.getAttribute) form.setAttribute('action', proxify(form.getAttribute('action') || window.location.href));
+  }}, true);
+  const originalFetch = window.fetch;
+  if(originalFetch) window.fetch = function(input, init) {{
+    try {{
+      if(typeof input === 'string') input = proxify(input);
+      else if(input && input.url) input = new Request(proxify(input.url), input);
+    }} catch(error) {{}}
+    return originalFetch.call(this, input, init);
+  }};
+  const originalOpen = XMLHttpRequest.prototype.open;
+  XMLHttpRequest.prototype.open = function(method, url) {{
+    try {{ arguments[1] = proxify(url); }} catch(error) {{}}
+    return originalOpen.apply(this, arguments);
+  }};
+  const observer = new MutationObserver(mutations => mutations.forEach(m => m.addedNodes && m.addedNodes.forEach(node => {{
+    if(node.nodeType === 1) {{ rewriteElement(node); rewriteAll(node); }}
+  }})));
+  try {{ observer.observe(document.documentElement, {{ childList:true, subtree:true }}); }} catch(error) {{}}
+}})();
+</script>
+'''
+
     def _rewrite_browser_html(body: bytes, base_url: str, *, native_mode: bool = False) -> bytes:
         text = body.decode("utf-8", errors="replace")
+        text = re.sub(r"<meta[^>]+http-equiv\s*=\s*(['\"]?)Content-Security-Policy\1[^>]*>", "", text, flags=re.IGNORECASE | re.DOTALL)
+        attr_names = "href|src|action|formaction|poster|data-src|data-href"
+
         def repl(match: re.Match[str]) -> str:
             attr = match.group(1)
             quote = match.group(2)
             target = html.unescape(match.group(3).strip())
-            if not target or target.startswith(("#", "mailto:", "tel:", "javascript:", "data:")):
+            if _browser_skip_rewrite(target):
                 return match.group(0)
-            absolute = url_parse.urljoin(base_url, target)
-            if native_mode:
-                absolute_parsed = url_parse.urlsplit(absolute)
-                absolute_host = (absolute_parsed.hostname or "").lower()
-                if absolute_parsed.scheme.lower() in {"http", "https"} and not absolute_host.endswith(".dcloud"):
-                    return f'{attr}={quote}{html.escape(absolute, quote=True)}{quote}'
-            proxied = url_for("browser_view") + "?url=" + url_parse.quote(absolute, safe="")
-            if native_mode:
-                proxied += "&native=1"
-                token = str(request.args.get("browser_token") or "")
-                if token and secrets.compare_digest(token, browser_access_token):
-                    proxied += "&browser_token=" + url_parse.quote(token, safe="")
+            proxied = _browser_proxy_target(target, base_url, native_mode=native_mode)
             return f'{attr}={quote}{html.escape(proxied, quote=True)}{quote}'
-        text = re.sub(r'\b(href|src|action)=(["\'])(.*?)(\2)', lambda m: repl(m), text, flags=re.IGNORECASE | re.DOTALL)
+
+        text = re.sub(rf"\b({attr_names})\s*=\s*([\"'])(.*?)\2", repl, text, flags=re.IGNORECASE | re.DOTALL)
+
+        def srcset_repl(match: re.Match[str]) -> str:
+            attr = match.group(1)
+            quote = match.group(2)
+            value = html.unescape(match.group(3).strip())
+            rewritten = _rewrite_browser_srcset(value, base_url, native_mode=native_mode)
+            return f'{attr}={quote}{html.escape(rewritten, quote=True)}{quote}'
+
+        text = re.sub(r"\b(srcset)\s*=\s*([\"'])(.*?)\2", srcset_repl, text, flags=re.IGNORECASE | re.DOTALL)
+
+        def style_repl(match: re.Match[str]) -> str:
+            return match.group(1) + _rewrite_browser_css(match.group(2), base_url, native_mode=native_mode) + match.group(3)
+
+        text = re.sub(r"(<style[^>]*>)(.*?)(</style>)", style_repl, text, flags=re.IGNORECASE | re.DOTALL)
+        injection = _browser_injection_script(base_url, native_mode=native_mode)
+        if re.search(r"</head\s*>", text, flags=re.IGNORECASE):
+            text = re.sub(r"</head\s*>", injection + "</head>", text, count=1, flags=re.IGNORECASE)
+        elif re.search(r"</body\s*>", text, flags=re.IGNORECASE):
+            text = re.sub(r"</body\s*>", injection + "</body>", text, count=1, flags=re.IGNORECASE)
+        else:
+            text += injection
         return text.encode("utf-8")
 
     def _proxy_response_from_bytes(body: bytes, *, status: int = 200, headers: dict[str, str] | None = None, base_url: str = "", native_mode: bool = False) -> Response:
         source_headers = headers or {}
         content_type = source_headers.get("Content-Type") or source_headers.get("content-type") or "application/octet-stream"
         out_body = body
-        if "text/html" in content_type.lower() and base_url:
+        lower_content_type = content_type.lower()
+        if "text/html" in lower_content_type and base_url:
             out_body = _rewrite_browser_html(body, base_url, native_mode=native_mode)
             content_type = "text/html; charset=utf-8"
+        elif "text/css" in lower_content_type and base_url:
+            text = body.decode("utf-8", errors="replace")
+            out_body = _rewrite_browser_css(text, base_url, native_mode=native_mode).encode("utf-8")
+            content_type = "text/css; charset=utf-8"
         response = Response(out_body, status=status, content_type=content_type)
         for key, value in source_headers.items():
             lower = key.lower()
             if lower in {"cache-control", "expires", "last-modified", "etag"}:
                 response.headers[key] = value
         response.headers["Cache-Control"] = "no-store"
+        response.headers["X-Frame-Options"] = "SAMEORIGIN"
+        response.headers["Access-Control-Allow-Origin"] = "null"
+        response.headers["Access-Control-Allow-Methods"] = "GET, POST, HEAD, OPTIONS"
+        response.headers["Access-Control-Allow-Headers"] = "Content-Type, Accept"
+        response.headers["Access-Control-Allow-Credentials"] = "true"
         return response
 
     def _browser_forward_request_parts() -> tuple[str, bytes, dict[str, str]]:
@@ -525,8 +685,10 @@ def create_app(
             method = "GET"
         body = request.get_data() if method == "POST" else b""
         headers = {
-            "User-Agent": "dcloud-internal-browser/1.0",
+            "User-Agent": request.headers.get("User-Agent") or "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36 dcloud-server-browser/1.0",
             "Accept": request.headers.get("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"),
+            "Accept-Language": request.headers.get("Accept-Language", "de-DE,de;q=0.9,en;q=0.8"),
+            "Accept-Encoding": "identity",
         }
         if method == "POST":
             if request.headers.get("Content-Type"):
@@ -546,13 +708,18 @@ def create_app(
             method=method,
         )
         try:
-            with url_request.urlopen(req, timeout=18) as remote:
-                body = remote.read(8 * 1024 * 1024)
+            with browser_http_opener.open(req, timeout=18) as remote:
+                body = remote.read(16 * 1024 * 1024)
                 headers = {str(k): str(v) for k, v in remote.headers.items()}
-                return _proxy_response_from_bytes(body, status=int(remote.status), headers=headers, base_url=url, native_mode=native_mode)
+                final_url = str(remote.geturl() or url)
+                return _proxy_response_from_bytes(body, status=int(remote.status), headers=headers, base_url=final_url, native_mode=native_mode)
         except url_error.HTTPError as exc:
-            body = exc.read(1024 * 1024)
+            body = exc.read(2 * 1024 * 1024)
             headers = {str(k): str(v) for k, v in exc.headers.items()}
+            location = headers.get("Location") or headers.get("location")
+            if location and 300 <= int(exc.code) < 400:
+                redirected = _browser_proxy_target(location, url, native_mode=native_mode)
+                return redirect(redirected, code=302)
             return _proxy_response_from_bytes(body, status=int(exc.code), headers=headers, base_url=url, native_mode=native_mode)
         except Exception as exc:
             return Response(f"Seite konnte nicht geladen werden: {exc}", status=502, content_type="text/plain; charset=utf-8")
@@ -702,6 +869,8 @@ def create_app(
             "localUrl": f"http://{local_names[0] if local_names else _primary_web_hostname()}/",
             "phpAvailable": bool(_php_binary()),
             "phpBinary": _php_binary(),
+            "serverProxyAvailable": True,
+            "browserProxyToken": browser_access_token,
             "nativeBrowserAvailable": _native_browser_available(),
             "nativeBrowserEngine": "Qt WebEngine / PySide6" if _native_browser_available() else "PySide6 fehlt",
             "peers": peer_items,
@@ -2173,7 +2342,7 @@ def create_app(
         if not _native_browser_available():
             return jsonify({
                 "ok": False,
-                "message": "Der vollwertige Browser benötigt PySide6/Qt WebEngine. Bitte `pip install -r requirements.txt` ausführen und dcloud neu starten.",
+                "message": "Der native Browser benötigt PySide6/Qt WebEngine. Bitte bei Bedarf `pip install PySide6` ausführen und dcloud neu starten. Der Server-Proxy-Browser funktioniert ohne PySide6.",
                 "targetUrl": target_url,
             }), 503
         try:
@@ -2182,8 +2351,15 @@ def create_app(
             return jsonify({"ok": False, "message": f"Browser konnte nicht gestartet werden: {exc}", "targetUrl": target_url}), 500
         return jsonify({"ok": True, "message": "Vollwertiger dcloud Browser wurde gestartet", "targetUrl": target_url})
 
-    @app.route("/browser/view", methods=["GET", "POST", "HEAD"])
+    @app.route("/browser/view", methods=["GET", "POST", "HEAD", "OPTIONS"])
     def browser_view() -> Response:
+        if request.method == "OPTIONS":
+            response = Response("", status=204)
+            response.headers["Access-Control-Allow-Origin"] = "null"
+            response.headers["Access-Control-Allow-Methods"] = "GET, POST, HEAD, OPTIONS"
+            response.headers["Access-Control-Allow-Headers"] = "Content-Type, Accept"
+            response.headers["Access-Control-Allow-Credentials"] = "true"
+            return response
         target_url = _browser_url(request.args.get("url"))
         parsed = url_parse.urlsplit(target_url)
         hostname = (parsed.hostname or "").lower()

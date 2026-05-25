@@ -22,7 +22,7 @@ dcloud ist ein Python-basierter Storage-Client mit Web-Dashboard im Desktop-Stil
 - Temporäre externe Download-Links mit maximal 60 Minuten Laufzeit
 - Reverse-Mailbox-Download über Relay, wenn der Node von außen nicht direkt erreichbar ist
 - Peer-Chat mit ungelesen-Badge, Emojis, Bildversand und Datei-Teilen
-- Vollwertiger nativer Browser mit Qt WebEngine, `peername.dcloud`-Auflösung, normalem Webzugriff und lokalem `storage/web`-Hosting
+- Interner Dashboard-Browser mit Server-Proxy, `peername.dcloud`-Auflösung, normalem Webzugriff und lokalem `storage/web`-Hosting; optional nativer Qt-WebEngine-Browser für lokale Desktop-Nutzung
 - Lokaler Web-Ordner `storage/web` als Datei-Explorer-Spezialordner `web`, inkl. Upload, Unterordnern, Texteditor und optionaler PHP-Ausführung über `php-cgi`/`php`
 - Optionaler eingebetteter SMB-Server
 - OpenWrt-, Linux-, macOS-, Windows- und Windows-Docker-Installationspfade
@@ -78,25 +78,25 @@ Das Dashboard ist als Desktop-Oberfläche aufgebaut. Wichtige Bereiche sind übe
 
 ### Interner Browser und dcloud-Webhosting
 
-Das Dashboard enthält ein Desktop-Icon **Browser**. Der Browser ist jetzt kein iframe mehr, sondern wird als nativer Qt-WebEngine-Browser aus dem Dashboard gestartet. Dadurch laufen moderne Webseiten wie Google, Cookies, JavaScript, Weiterleitungen und Downloads in einer echten Browser-Engine. Normale `http://`- und `https://`-Adressen werden direkt geladen; dcloud-interne Hostnamen wie `peername.dcloud` werden über den lokalen dcloud-Resolver geöffnet. Für den eigenen Node wird beim Start automatisch ein neuer Ordner angelegt:
+Das Dashboard enthält ein Desktop-Icon **Browser**. Standardmäßig läuft der Browser jetzt wieder **direkt im Dashboard**, aber nicht mehr als einfache iframe-Einbettung fremder Seiten. Stattdessen nutzt dcloud einen serverseitigen Browser-Proxy: Der dcloud-Server ruft externe Webseiten ab, schreibt Links, Formulare, Stylesheets und häufige dynamische Requests auf `/browser/view?...` um und zeigt die Seite im Dashboard an. Dadurch funktioniert der Browser auch dann, wenn dcloud auf einem Server läuft und du extern über das Web-Dashboard zugreifst. Normale `http://`- und `https://`-Adressen sowie dcloud-interne Hostnamen wie `peername.dcloud` werden über diesen Server-Proxy geöffnet. Für den eigenen Node wird beim Start automatisch ein neuer Ordner angelegt:
 
 ```text
 storage/web
 ```
 
-Die Startseite liegt dort als `index.html`. Der Ordner erscheint zusätzlich direkt im dcloud **Datei-Explorer** als Spezialordner **web**. Dort kannst du HTML-, PHP-, CSS-, JavaScript- und Asset-Dateien direkt hochladen, Unterordner anlegen, löschen und bearbeitbare Textdateien mit dem integrierten **Web-Texteditor** öffnen und speichern. Änderungen landen unmittelbar in `storage/web` und sind danach direkt im nativen dcloud-Browser sichtbar.
+Die Startseite liegt dort als `index.html`. Der Ordner erscheint zusätzlich direkt im dcloud **Datei-Explorer** als Spezialordner **web**. Dort kannst du HTML-, PHP-, CSS-, JavaScript- und Asset-Dateien direkt hochladen, Unterordner anlegen, löschen und bearbeitbare Textdateien mit dem integrierten **Web-Texteditor** öffnen und speichern. Änderungen landen unmittelbar in `storage/web` und sind danach direkt im Dashboard-Browser sichtbar.
 
 Statische Dateien wie HTML, CSS, JavaScript, Bilder und Downloads werden über `/dcloud-site/...` ausgeliefert. PHP-Dateien mit der Endung `.php` werden ausgeführt, wenn auf dem System `php-cgi` oder alternativ `php` installiert ist. Ohne PHP-Binary bleibt die statische Auslieferung aktiv und PHP-Dateien liefern einen Hinweistext. `requirements.txt` enthält dazu einen Hinweis als System-Abhängigkeit; `php`/`php-cgi` ist kein Python-Paket und muss über das Betriebssystem installiert werden.
 
-Im nativen dcloud-Browser ist die eigene Seite unter dem angezeigten Hostnamen erreichbar, zum Beispiel:
+Im Dashboard-Browser ist die eigene Seite unter dem angezeigten Hostnamen erreichbar, zum Beispiel:
 
 ```text
 http://peername.dcloud/
 ```
 
-Aktive Peers werden ebenfalls über ihre dcloud-Namen aufgelöst. Bei direkten LAN-Peers lädt der Browser deren `/dcloud-site`-Route direkt; bei Relay-Peers wird zuerst der schnelle Relay-Forwarder und danach die Relay-Mailbox verwendet. Dafür muss auf dem Relay-Server die aktuelle `relay/dcloud_relay.php` aus diesem Paket liegen, weil ältere Relay-Dateien `/dcloud-site` blockieren. Das Betriebssystem-DNS wird dadurch nicht verändert: Die `.dcloud`-Namen sind bewusst im nativen dcloud-Browser der App aufgelöst.
+Aktive Peers werden ebenfalls über ihre dcloud-Namen aufgelöst. Bei direkten LAN-Peers lädt der Browser deren `/dcloud-site`-Route direkt; bei Relay-Peers wird zuerst der schnelle Relay-Forwarder und danach die Relay-Mailbox verwendet. Dafür muss auf dem Relay-Server die aktuelle `relay/dcloud_relay.php` aus diesem Paket liegen, weil ältere Relay-Dateien `/dcloud-site` blockieren. Das Betriebssystem-DNS wird dadurch nicht verändert: Die `.dcloud`-Namen sind bewusst im dcloud-Browser der App aufgelöst.
 
-Für den vollwertigen Browser wird `PySide6` aus `requirements.txt` benötigt. Wenn im Dashboard „Engine fehlt: PySide6 installieren“ erscheint, einmal `pip install -r requirements.txt` ausführen und dcloud neu starten. Auf headless Servern ohne grafische Desktop-Session kann der native Browser nicht angezeigt werden; das Dashboard und Webhosting funktionieren trotzdem.
+Der Button **Nativ** bleibt als optionale lokale Desktop-Funktion erhalten. Dafür muss `PySide6` bei Bedarf separat installiert werden (`pip install PySide6`). Auf headless Servern oder bei externem Dashboard-Zugriff ist der neue Server-Proxy-Modus der passende Standard, weil er komplett im Web-Dashboard sichtbar bleibt. Hinweis: Ein serverseitig übersetzter Webmodus kann sehr viele moderne Webseiten gut anzeigen, ist aber kein vollständiger Ersatz für Chrome/Firefox. Seiten mit starkem Bot-Schutz, komplexen Service-Workern oder hart codierten Origin-Prüfungen können weiterhin eingeschränkt sein.
 
 ### Login und Benutzerverwaltung
 
@@ -308,15 +308,14 @@ Windows PowerShell:
 
 Pflichtpakete aus `requirements.txt`:
 
-- `PySide6` für den nativen Qt-WebEngine-Browser
-
 - `Flask`
 - `PyYAML`
 - `cryptography`
+
+Optionale Python-/System-Erweiterungen:
+
+- `PySide6` für den optionalen nativen Qt-WebEngine-Browser (in `requirements.txt` nur als Kommentar dokumentiert)
 - `impacket`
-
-Optional:
-
 - `zstandard` für zstd-Komprimierung
 
 ## Manuelle Installation
@@ -1009,9 +1008,9 @@ Die Codebasis ist modular aufgebaut, damit spätere Transport-, Index- und Versc
 | `dcloud_client/network/p2p_storage.py` | Peer-Transfers, Batch-/Pack-Upload und Download |
 | `dcloud_client/network/smb_server.py` | optionaler eingebetteter SMB-Server |
 | `dcloud_client/network/peers.py` | Peer-Liste, Deduplizierung, Deaktivierung |
-| `dcloud_client/web/app.py` | Flask-Routen für Dashboard, Dateien, Webhosting, Web-Dateien, nativen Browser-Launcher, Chat, Benutzerverwaltung, P2P-API |
+| `dcloud_client/web/app.py` | Flask-Routen für Dashboard, Dateien, Webhosting, Web-Dateien, Server-Browser-Proxy, optionalen nativen Browser-Launcher, Chat, Benutzerverwaltung, P2P-API |
 | `dcloud_client/web/auth.py` | Lokale Benutzerverwaltung mit Passwort-Hashing und JSON-Store |
-| `dcloud_client/web/native_browser.py` | Vollwertiger Qt-WebEngine-Browser mit `.dcloud`-Auflösung |
+| `dcloud_client/web/native_browser.py` | Optionaler lokaler Qt-WebEngine-Browser mit `.dcloud`-Auflösung |
 | `dcloud_client/web/templates/dashboard.html` | Desktop-Dashboard, JavaScript und UI |
 | `dcloud_client/web/templates/login.html` | Login-Seite für das Dashboard |
 | `dcloud_client/web/templates/setup.html` | Ersteinrichtung für den ersten Admin-Benutzer |
