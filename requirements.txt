@@ -3,10 +3,6 @@ PyYAML>=6.0,<7.0
 cryptography>=42.0,<46.0
 impacket>=0.12.0,<1.0
 
-# Optional Python dependency for the local/native Qt WebEngine browser:
-# PySide6>=6.7,<7.0
-# Not required for the dashboard Server-Proxy browser mode.
-
 
 # Optional system dependency for dcloud Web/PHP hosting:
 # Install php-cgi or php and make it available on PATH.

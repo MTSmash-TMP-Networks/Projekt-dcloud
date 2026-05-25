@@ -26,7 +26,6 @@ import time
 import subprocess
 import re
 import shutil
-import importlib.util
 import unicodedata
 from urllib import error as url_error, parse as url_parse, request as url_request
 import http.cookiejar
@@ -621,6 +620,47 @@ def create_app(
 
         return re.sub(r"@import\s+(['\"])(.*?)\1", import_repl, text, flags=re.IGNORECASE)
 
+    def _rewrite_browser_js(text: str, base_url: str, *, native_mode: bool = False) -> str:
+        """Conservatively rewrite JavaScript module/worker/import URLs for the dashboard proxy."""
+
+        def likely_url_literal(target: str) -> bool:
+            value = html.unescape((target or "").strip())
+            if _browser_skip_rewrite(value):
+                return False
+            lower = value.lower()
+            return (
+                lower.startswith(("http://", "https://", "//", "/", "./", "../"))
+                or lower.endswith(".dcloud")
+                or ".dcloud/" in lower
+            )
+
+        def quoted_repl(match: re.Match[str]) -> str:
+            prefix = match.group(1)
+            quote = match.group(2)
+            target = match.group(3)
+            suffix = match.group(4) if match.lastindex and match.lastindex >= 4 else ""
+            if not likely_url_literal(target):
+                return match.group(0)
+            proxied = _browser_proxy_target(target, base_url, native_mode=native_mode)
+            return f"{prefix}{quote}{proxied}{suffix}"
+
+        text = re.sub(
+            r"(\b(?:import|export)\s+(?:[^'\"]*?\s+from\s+)?)(['\"])([^'\"]+)(\2)",
+            lambda m: quoted_repl(m),
+            text,
+        )
+        text = re.sub(
+            r"(\b(?:import|importScripts|Worker|SharedWorker)\s*\(\s*)(['\"])([^'\"]+)(\2)",
+            lambda m: quoted_repl(m),
+            text,
+        )
+        text = re.sub(
+            r"(\bserviceWorker\.register\s*\(\s*)(['\"])([^'\"]+)(\2)",
+            lambda m: quoted_repl(m),
+            text,
+        )
+        return text
+
     def _rewrite_browser_srcset(value: str, base_url: str, *, native_mode: bool = False) -> str:
         parts: list[str] = []
         for raw_candidate in value.split(","):
@@ -642,40 +682,105 @@ def create_app(
         return f'''
 <script data-dcloud-browser-proxy="1">
 (() => {{
+  if(window.__dcloudBrowserProxyInstalled) return;
+  window.__dcloudBrowserProxyInstalled = true;
   const DCLOUD_BASE_URL = {base_json};
   const DCLOUD_NATIVE_MODE = {native_json};
   const DCLOUD_TOKEN_PART = {token_json};
+  const PROXY_PATH = '/browser/view';
+  const URL_ATTRS = new Set(['href','src','action','formaction','poster','data-src','data-href']);
   const skip = value => /^(#|mailto:|tel:|javascript:|data:|blob:|about:)/i.test(String(value || '').trim());
-  const proxify = value => {{
+  const isProxyUrl = value => {{
     try {{
-      if(skip(value)) return value;
-      const absolute = new URL(String(value || ''), DCLOUD_BASE_URL).href;
+      const parsed = new URL(String(value || ''), window.location.href);
+      return parsed.origin === window.location.origin && parsed.pathname === PROXY_PATH && parsed.searchParams.has('url');
+    }} catch(error) {{ return false; }}
+  }};
+  const absoluteUrl = (value, base = DCLOUD_BASE_URL) => new URL(String(value || ''), base).href;
+  const proxify = (value, base = DCLOUD_BASE_URL) => {{
+    try {{
+      if(skip(value) || isProxyUrl(value)) return value;
+      const absolute = absoluteUrl(value, base);
       const parsed = new URL(absolute);
       if(!/^https?:$/i.test(parsed.protocol)) return value;
       if(DCLOUD_NATIVE_MODE && !parsed.hostname.toLowerCase().endsWith('.dcloud')) return absolute;
-      return '/browser/view?url=' + encodeURIComponent(absolute) + (DCLOUD_NATIVE_MODE ? '&native=1' : '') + DCLOUD_TOKEN_PART;
+      return PROXY_PATH + '?url=' + encodeURIComponent(absolute) + (DCLOUD_NATIVE_MODE ? '&native=1' : '') + DCLOUD_TOKEN_PART;
     }} catch(error) {{ return value; }}
   }};
+  const remoteFromProxy = value => {{
+    try {{
+      const parsed = new URL(String(value || ''), window.location.href);
+      if(parsed.origin === window.location.origin && parsed.pathname === PROXY_PATH && parsed.searchParams.has('url')) return parsed.searchParams.get('url') || DCLOUD_BASE_URL;
+    }} catch(error) {{}}
+    return value || DCLOUD_BASE_URL;
+  }};
+  const proxifySrcset = value => String(value || '').split(',').map(candidate => {{
+    const trimmed = candidate.trim();
+    if(!trimmed) return trimmed;
+    const parts = trimmed.split(/\\s+/, 2);
+    const rest = trimmed.slice(parts[0].length);
+    return proxify(parts[0]) + rest;
+  }}).join(', ');
   const rewriteElement = element => {{
-    if(!element || element.dataset?.dcloudRewritten === '1') return;
-    for(const attr of ['href','src','action','formaction','poster','data-src','data-href']) {{
-      if(element.hasAttribute && element.hasAttribute(attr)) element.setAttribute(attr, proxify(element.getAttribute(attr)));
-    }}
-    if(element.hasAttribute && element.hasAttribute('srcset')) {{
-      const next = String(element.getAttribute('srcset') || '').split(',').map(candidate => {{
-        const trimmed = candidate.trim();
-        if(!trimmed) return trimmed;
-        const parts = trimmed.split(/\\s+/, 2);
-        const rest = trimmed.slice(parts[0].length);
-        return proxify(parts[0]) + rest;
-      }}).join(', ');
-      element.setAttribute('srcset', next);
-    }}
-    if(element.dataset) element.dataset.dcloudRewritten = '1';
+    if(!element || element.nodeType !== 1 || element.dataset?.dcloudRewritten === '1') return;
+    try {{
+      for(const attr of URL_ATTRS) {{
+        if(element.hasAttribute?.(attr)) element.setAttribute(attr, proxify(element.getAttribute(attr)));
+      }}
+      if(element.hasAttribute?.('srcset')) element.setAttribute('srcset', proxifySrcset(element.getAttribute('srcset')));
+      if((element.tagName === 'A' || element.tagName === 'FORM') && element.hasAttribute?.('target')) element.removeAttribute('target');
+      if(element.dataset) element.dataset.dcloudRewritten = '1';
+    }} catch(error) {{}}
   }};
   const rewriteAll = root => {{
     try {{ (root || document).querySelectorAll?.('[href],[src],[action],[formaction],[poster],[srcset],[data-src],[data-href]').forEach(rewriteElement); }} catch(error) {{}}
   }};
+  const submitFormThroughProxy = form => {{
+    try {{
+      const method = String(form.getAttribute('method') || form.method || 'GET').toUpperCase();
+      const rawAction = form.getAttribute('action') || window.location.href || DCLOUD_BASE_URL;
+      const remoteAction = remoteFromProxy(rawAction);
+      if(method === 'GET') {{
+        const target = new URL(remoteAction || DCLOUD_BASE_URL, DCLOUD_BASE_URL);
+        const data = new FormData(form);
+        for(const [key, value] of data.entries()) target.searchParams.append(key, value);
+        window.location.href = proxify(target.href);
+        return true;
+      }}
+      form.setAttribute('action', proxify(remoteAction));
+    }} catch(error) {{}}
+    return false;
+  }};
+  try {{
+    const originalSetAttribute = Element.prototype.setAttribute;
+    Element.prototype.setAttribute = function(name, value) {{
+      try {{
+        const lower = String(name || '').toLowerCase();
+        if(URL_ATTRS.has(lower)) value = proxify(value);
+        else if(lower === 'srcset') value = proxifySrcset(value);
+      }} catch(error) {{}}
+      return originalSetAttribute.call(this, name, value);
+    }};
+  }} catch(error) {{}}
+  const patchUrlProperty = (proto, prop) => {{
+    try {{
+      const descriptor = Object.getOwnPropertyDescriptor(proto, prop);
+      if(!descriptor || !descriptor.set || !descriptor.get) return;
+      Object.defineProperty(proto, prop, {{
+        configurable: true,
+        enumerable: descriptor.enumerable,
+        get() {{ return descriptor.get.call(this); }},
+        set(value) {{ return descriptor.set.call(this, proxify(value)); }}
+      }});
+    }} catch(error) {{}}
+  }};
+  patchUrlProperty(HTMLAnchorElement.prototype, 'href');
+  patchUrlProperty(HTMLLinkElement.prototype, 'href');
+  patchUrlProperty(HTMLImageElement.prototype, 'src');
+  patchUrlProperty(HTMLScriptElement.prototype, 'src');
+  patchUrlProperty(HTMLFormElement.prototype, 'action');
+  if(window.HTMLIFrameElement) patchUrlProperty(HTMLIFrameElement.prototype, 'src');
+  if(window.HTMLSourceElement) patchUrlProperty(HTMLSourceElement.prototype, 'src');
   rewriteAll(document);
   document.addEventListener('click', event => {{
     const link = event.target && event.target.closest ? event.target.closest('a[href]') : null;
@@ -683,16 +788,30 @@ def create_app(
     const href = link.getAttribute('href');
     if(skip(href)) return;
     event.preventDefault();
-    window.location.href = proxify(href);
+    event.stopPropagation();
+    window.location.href = proxify(remoteFromProxy(href));
   }}, true);
   document.addEventListener('submit', event => {{
     const form = event.target;
-    if(form && form.getAttribute) form.setAttribute('action', proxify(form.getAttribute('action') || window.location.href));
+    if(form && form.getAttribute && submitFormThroughProxy(form)) {{
+      event.preventDefault();
+      event.stopPropagation();
+    }}
   }}, true);
+  try {{
+    const originalSubmit = HTMLFormElement.prototype.submit;
+    HTMLFormElement.prototype.submit = function() {{ if(submitFormThroughProxy(this)) return; return originalSubmit.call(this); }};
+    const originalRequestSubmit = HTMLFormElement.prototype.requestSubmit;
+    if(originalRequestSubmit) HTMLFormElement.prototype.requestSubmit = function(submitter) {{ if(submitFormThroughProxy(this)) return; return originalRequestSubmit.call(this, submitter); }};
+  }} catch(error) {{}}
+  const originalOpenWindow = window.open;
+  if(originalOpenWindow) window.open = function(url, name, features) {{
+    return originalOpenWindow.call(window, proxify(remoteFromProxy(url || DCLOUD_BASE_URL)), name || '_self', features);
+  }};
   const originalFetch = window.fetch;
   if(originalFetch) window.fetch = function(input, init) {{
     try {{
-      if(typeof input === 'string') input = proxify(input);
+      if(typeof input === 'string' || input instanceof URL) input = proxify(input.toString());
       else if(input && input.url) input = new Request(proxify(input.url), input);
     }} catch(error) {{}}
     return originalFetch.call(this, input, init);
@@ -702,10 +821,18 @@ def create_app(
     try {{ arguments[1] = proxify(url); }} catch(error) {{}}
     return originalOpen.apply(this, arguments);
   }};
+  try {{
+    const originalAssign = window.location.assign.bind(window.location);
+    const originalReplace = window.location.replace.bind(window.location);
+    window.location.assign = value => originalAssign(proxify(remoteFromProxy(value)));
+    window.location.replace = value => originalReplace(proxify(remoteFromProxy(value)));
+  }} catch(error) {{}}
   const observer = new MutationObserver(mutations => mutations.forEach(m => m.addedNodes && m.addedNodes.forEach(node => {{
     if(node.nodeType === 1) {{ rewriteElement(node); rewriteAll(node); }}
   }})));
   try {{ observer.observe(document.documentElement, {{ childList:true, subtree:true }}); }} catch(error) {{}}
+  setTimeout(() => rewriteAll(document), 80);
+  setInterval(() => rewriteAll(document), 1500);
 }})();
 </script>
 '''
@@ -872,6 +999,10 @@ def create_app(
             text = body.decode("utf-8", errors="replace")
             out_body = _rewrite_browser_css(text, base_url, native_mode=native_mode).encode("utf-8")
             content_type = "text/css; charset=utf-8"
+        elif base_url and ("javascript" in lower_content_type or "ecmascript" in lower_content_type or url_parse.urlsplit(base_url).path.lower().endswith((".js", ".mjs"))):
+            text = body.decode("utf-8", errors="replace")
+            out_body = _rewrite_browser_js(text, base_url, native_mode=native_mode).encode("utf-8")
+            content_type = "application/javascript; charset=utf-8"
         response = Response(out_body, status=status, content_type=content_type)
         for key, value in source_headers.items():
             lower = key.lower()
@@ -1029,44 +1160,6 @@ def create_app(
             host = f"[{host}]"
         return f"http://{host}:{int(config.web.port)}"
 
-    def _native_browser_available() -> bool:
-        return importlib.util.find_spec("PySide6") is not None
-
-    def _launch_native_browser(target_url: str) -> None:
-        project_root = Path(__file__).resolve().parents[2]
-        profile_dir = config.storage.path / "browser_profile"
-        profile_dir.mkdir(parents=True, exist_ok=True)
-        env = os.environ.copy()
-        env["PYTHONPATH"] = str(project_root) + (os.pathsep + env["PYTHONPATH"] if env.get("PYTHONPATH") else "")
-        if os.name != "nt" and hasattr(os, "geteuid") and os.geteuid() == 0:
-            env.setdefault("QTWEBENGINE_DISABLE_SANDBOX", "1")
-        command = [
-            sys.executable,
-            "-m",
-            "dcloud_client.web.native_browser",
-            "--app-url",
-            _local_dashboard_base_url(),
-            "--url",
-            target_url,
-            "--profile-dir",
-            str(profile_dir),
-            "--browser-token",
-            browser_access_token,
-            "--download-dir",
-            str(browser_downloads_root),
-        ]
-        kwargs: dict[str, Any] = {
-            "cwd": str(project_root),
-            "env": env,
-            "stdin": subprocess.DEVNULL,
-            "stdout": subprocess.DEVNULL,
-            "stderr": subprocess.DEVNULL,
-            "close_fds": os.name != "nt",
-        }
-        if os.name == "nt":
-            kwargs["creationflags"] = getattr(subprocess, "DETACHED_PROCESS", 0) | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
-        subprocess.Popen(command, **kwargs)
-
     def web_hosting_payload(peers: list[Any] | None = None) -> dict[str, Any]:
         peer_items = []
         for peer in (peers if peers is not None else _list_active_peers()):
@@ -1090,8 +1183,6 @@ def create_app(
             "phpBinary": _php_binary(),
             "serverProxyAvailable": True,
             "browserProxyToken": browser_access_token,
-            "nativeBrowserAvailable": _native_browser_available(),
-            "nativeBrowserEngine": "Qt WebEngine / PySide6" if _native_browser_available() else "PySide6 fehlt",
             "peers": peer_items,
         }
 
@@ -2571,21 +2662,30 @@ def create_app(
         return jsonify({"ok": True, "webHosting": web_hosting_payload(peers)})
 
 
-    @app.post("/api/browser/native/open")
-    def api_open_native_browser() -> Response:
-        payload = request.get_json(silent=True) or {}
-        target_url = _browser_url(str(payload.get("url") or ""))
-        if not _native_browser_available():
-            return jsonify({
-                "ok": False,
-                "message": "Der native Browser benötigt PySide6/Qt WebEngine. Bitte bei Bedarf `pip install PySide6` ausführen und dcloud neu starten. Der Server-Proxy-Browser funktioniert ohne PySide6.",
-                "targetUrl": target_url,
-            }), 503
-        try:
-            _launch_native_browser(target_url)
-        except Exception as exc:
-            return jsonify({"ok": False, "message": f"Browser konnte nicht gestartet werden: {exc}", "targetUrl": target_url}), 500
-        return jsonify({"ok": True, "message": "Vollwertiger dcloud Browser wurde gestartet", "targetUrl": target_url})
+    def _browser_target_url_from_request() -> str:
+        target_url = _browser_url(request.args.get("url"))
+        if request.method.upper() == "GET":
+            passthrough: list[tuple[str, str]] = []
+            reserved = {"url", "browser_token", "native", "browser_download"}
+            for key in request.args.keys():
+                if key in reserved:
+                    continue
+                for value in request.args.getlist(key):
+                    passthrough.append((key, value))
+            if passthrough:
+                parsed_target = url_parse.urlsplit(target_url)
+                merged_query = url_parse.urlencode(
+                    url_parse.parse_qsl(parsed_target.query, keep_blank_values=True) + passthrough,
+                    doseq=True,
+                )
+                target_url = url_parse.urlunsplit((
+                    parsed_target.scheme,
+                    parsed_target.netloc,
+                    parsed_target.path,
+                    merged_query,
+                    parsed_target.fragment,
+                ))
+        return target_url
 
     @app.route("/browser/view", methods=["GET", "POST", "HEAD", "OPTIONS"])
     def browser_view() -> Response:
@@ -2596,7 +2696,7 @@ def create_app(
             response.headers["Access-Control-Allow-Headers"] = "Content-Type, Accept"
             response.headers["Access-Control-Allow-Credentials"] = "true"
             return response
-        target_url = _browser_url(request.args.get("url"))
+        target_url = _browser_target_url_from_request()
         parsed = url_parse.urlsplit(target_url)
         hostname = (parsed.hostname or "").lower()
         native_mode = str(request.args.get("native") or "").lower() in {"1", "true", "yes"}

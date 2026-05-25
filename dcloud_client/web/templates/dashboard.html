@@ -524,7 +524,7 @@
     .kbd{ font-size:.77rem; opacity:.72; border:1px solid rgba(0,0,0,.12); padding:1px 7px; border-radius:999px; background:rgba(255,255,255,.72); }
 
     .browser-shell{ display:flex; flex-direction:column; min-height:0; background:rgba(239,247,255,.82); }
-    .browser-toolbar{ display:grid; grid-template-columns:auto auto minmax(220px,1fr) auto auto auto; gap:8px; align-items:center; padding:10px 12px; border-bottom:1px solid var(--line); background:linear-gradient(180deg, rgba(255,255,255,.82), rgba(227,240,255,.70)); }
+    .browser-toolbar{ display:grid; grid-template-columns:auto auto minmax(220px,1fr) auto auto; gap:8px; align-items:center; padding:10px 12px; border-bottom:1px solid var(--line); background:linear-gradient(180deg, rgba(255,255,255,.82), rgba(227,240,255,.70)); }
     .browser-toolbar button, .browser-toolbar input{ border:1px solid rgba(112,142,190,.42); border-radius:13px; background:#fff; color:var(--text); }
     .browser-toolbar button{ padding:.58rem .78rem; font-weight:750; }
     .browser-toolbar button:hover{ border-color:rgba(8,102,232,.42); box-shadow:0 8px 18px rgba(32,74,140,.10); }
@@ -535,14 +535,6 @@
     .browser-frame{ flex:1; width:100%; min-height:0; border:0; background:#fff; }
     .browser-statusbar{ display:flex; flex-wrap:wrap; align-items:center; gap:8px; padding:7px 12px; border-top:1px solid rgba(133,162,207,.22); color:#35506f; background:rgba(255,255,255,.72); font-size:.84rem; }
     .browser-statusbar strong{ color:#163251; }
-    .browser-native-stage{ display:grid; place-items:center; padding:22px; background:radial-gradient(circle at 20% 15%, rgba(25,199,255,.16), transparent 32%), radial-gradient(circle at 80% 20%, rgba(8,102,232,.13), transparent 30%), #f7fbff; }
-    .browser-native-card{ width:min(680px, 100%); border:1px solid rgba(112,142,190,.28); border-radius:26px; background:rgba(255,255,255,.88); box-shadow:0 18px 46px rgba(21,58,112,.15); padding:28px; text-align:center; }
-    .browser-native-icon{ width:70px; height:70px; margin:0 auto 12px; border-radius:22px; display:grid; place-items:center; font-size:2.25rem; background:linear-gradient(135deg, #e8f4ff, #ffffff); box-shadow:inset 0 1px 0 rgba(255,255,255,.9), 0 12px 28px rgba(8,102,232,.16); }
-    .browser-native-card h2{ margin:.2rem 0 .55rem; color:#163251; letter-spacing:-.02em; }
-    .browser-native-card p{ margin:0 auto 18px; max-width:56ch; color:#42607f; line-height:1.52; }
-    .browser-native-actions{ display:flex; flex-wrap:wrap; align-items:center; justify-content:center; gap:10px; margin-bottom:12px; }
-    .browser-native-actions .primary{ background:linear-gradient(135deg, #0b65d8, #19c7ff); color:#fff; border-color:rgba(8,102,232,.36); }
-    .browser-native-status{ color:#35506f; font-size:.9rem; min-height:1.4em; overflow-wrap:anywhere; }
     #win-web-editor{ left:250px; top:92px; width:min(980px, calc(100vw - 290px)); height:min(700px, calc(100vh - 150px)); }
     .web-editor-shell{ display:flex; flex-direction:column; min-height:0; background:rgba(239,247,255,.86); }
     .web-editor-toolbar{ display:flex; flex-wrap:wrap; align-items:center; gap:8px; padding:10px 12px; border-bottom:1px solid var(--line); background:linear-gradient(180deg, rgba(255,255,255,.86), rgba(227,240,255,.72)); }
@@ -696,7 +688,6 @@
           <button type="button" id="browser-reload" title="Aktuelle Seite neu laden">↻</button>
           <input id="browser-url" type="text" spellcheck="false" autocomplete="off" placeholder="peername.dcloud oder https://example.com" />
           <button type="submit">Los</button>
-          <button type="button" id="browser-open-native" title="Optional lokal mit Qt-WebEngine öffnen">Nativ</button>
           <button type="button" id="browser-copy-url" title="Adresse kopieren">Kopieren</button>
         </form>
         <div class="browser-meta">
@@ -706,10 +697,10 @@
           <span class="browser-chip" id="browser-engine-status">Modus: Server-Proxy</span>
         </div>
         <div class="browser-stage">
-          <iframe class="browser-frame" id="browser-frame" title="dcloud Browser" referrerpolicy="no-referrer" sandbox="allow-scripts allow-forms allow-popups allow-popups-to-escape-sandbox allow-downloads"></iframe>
+          <iframe class="browser-frame" id="browser-frame" title="dcloud Browser" referrerpolicy="no-referrer" sandbox="allow-scripts allow-same-origin allow-forms allow-popups allow-popups-to-escape-sandbox allow-downloads allow-modals allow-top-navigation-by-user-activation"></iframe>
           <div class="browser-statusbar">
             <strong>Server-Webmodus</strong>
-            <span id="browser-native-status">Bereit.</span>
+            <span id="browser-status">Bereit.</span>
           </div>
         </div>
       </div>
@@ -1244,11 +1235,9 @@
       const browserUrlInput = document.getElementById("browser-url");
       const browserHomeButton = document.getElementById("browser-home");
       const browserReloadButton = document.getElementById("browser-reload");
-      const browserOpenNativeButton = document.getElementById("browser-open-native");
       const browserCopyUrlButton = document.getElementById("browser-copy-url");
-      const browserNativeStatus = document.getElementById("browser-native-status");
+      const browserStatus = document.getElementById("browser-status");
       const browserFrame = document.getElementById("browser-frame");
-      let browserNativeOpened = false;
       const webEditorTitle = document.getElementById("web-editor-title");
       const webEditorPath = document.getElementById("web-editor-path");
       const webEditorTextarea = document.getElementById("web-editor-textarea");
@@ -1664,10 +1653,10 @@
         }
         return value;
       }
-      function setBrowserNativeStatus(message, type="info"){
-        if(!browserNativeStatus) return;
-        browserNativeStatus.textContent = message;
-        browserNativeStatus.dataset.type = type;
+      function setBrowserStatus(message, type="info"){
+        if(!browserStatus) return;
+        browserStatus.textContent = message;
+        browserStatus.dataset.type = type;
       }
       window.addEventListener("message", event => {
         const data = event && event.data ? event.data : null;
@@ -1686,8 +1675,7 @@
         if(localHost) localHost.textContent = hosting.primaryHost || "peer.dcloud";
         if(webRoot) webRoot.textContent = hosting.webRoot || "storage/web";
         if(phpStatus) phpStatus.textContent = hosting.phpAvailable ? `PHP aktiv${hosting.phpBinary ? ": " + hosting.phpBinary : ""}` : "PHP optional: php-cgi/php nicht gefunden";
-        if(engineStatus) engineStatus.textContent = hosting.nativeBrowserAvailable ? `Modus: Server-Proxy · Nativ optional: ${hosting.nativeBrowserEngine || "Qt WebEngine"}` : "Modus: Server-Proxy im Dashboard";
-        if(browserOpenNativeButton) browserOpenNativeButton.disabled = hosting.nativeBrowserAvailable === false;
+        if(engineStatus) engineStatus.textContent = "Modus: Server-Proxy im Dashboard · JavaScript aktiv";
       }
       function browserProxyUrl(raw){
         const target = normalizeBrowserUrl(raw);
@@ -1695,29 +1683,6 @@
         const token = (appState.webHosting || {}).browserProxyToken || "";
         if(token) params.set("browser_token", token);
         return `/browser/view?${params.toString()}`;
-      }
-      async function launchNativeBrowser(raw){
-        const target = normalizeBrowserUrl(raw);
-        if(browserUrlInput) browserUrlInput.value = target;
-        updateBrowserMeta();
-        setBrowserNativeStatus(`Starte nativen Browser für ${target} …`);
-        try{
-          const response = await fetch("/api/browser/native/open", {
-            method:"POST",
-            headers:{ "Content-Type":"application/json", "Accept":"application/json" },
-            body:JSON.stringify({ url: target })
-          });
-          const data = await response.json().catch(() => ({}));
-          if(!response.ok || data.ok === false){
-            throw new Error(data.message || "Browser konnte nicht gestartet werden");
-          }
-          browserNativeOpened = true;
-          setBrowserNativeStatus(data.message || "Vollwertiger Browser wurde gestartet.", "success");
-          showToast("Vollwertiger Browser gestartet");
-        }catch(error){
-          setBrowserNativeStatus(error.message || String(error), "error");
-          showToast(error.message || "Browser konnte nicht gestartet werden", "error");
-        }
       }
       function navigateBrowser(raw){
         const target = normalizeBrowserUrl(raw);
@@ -1727,7 +1692,7 @@
           browserFrame.src = browserProxyUrl(target);
           browserFrame.dataset.loaded = "1";
         }
-        setBrowserNativeStatus(`Lade über Server-Proxy: ${target}`);
+        setBrowserStatus(`Lade über Server-Proxy: ${target}`);
       }
       function reloadBrowser(){
         if(browserFrame && browserFrame.dataset.loaded === "1"){
@@ -3958,17 +3923,16 @@ ${file.name}`)) return;
       });
       browserHomeButton?.addEventListener("click", () => navigateBrowser((appState.webHosting || {}).localUrl || ""));
       browserReloadButton?.addEventListener("click", () => reloadBrowser());
-      browserOpenNativeButton?.addEventListener("click", () => launchNativeBrowser(browserUrlInput?.value || (appState.webHosting || {}).localUrl || ""));
-      browserFrame?.addEventListener("load", () => setBrowserNativeStatus(`Geladen: ${browserUrlInput?.value || ""}`, "success"));
+      browserFrame?.addEventListener("load", () => setBrowserStatus(`Geladen: ${browserUrlInput?.value || ""}`, "success"));
       browserCopyUrlButton?.addEventListener("click", async () => {
         const target = normalizeBrowserUrl(browserUrlInput?.value || (appState.webHosting || {}).localUrl || "");
         if(browserUrlInput) browserUrlInput.value = target;
         try{
           await navigator.clipboard.writeText(target);
-          setBrowserNativeStatus("Adresse kopiert.", "success");
+          setBrowserStatus("Adresse kopiert.", "success");
           showToast("Browser-Adresse kopiert");
         }catch(error){
-          setBrowserNativeStatus(target);
+          setBrowserStatus(target);
         }
       });
 

@@ -22,7 +22,7 @@ dcloud ist ein Python-basierter Storage-Client mit Web-Dashboard im Desktop-Stil
 - Temporäre externe Download-Links mit maximal 60 Minuten Laufzeit
 - Reverse-Mailbox-Download über Relay, wenn der Node von außen nicht direkt erreichbar ist
 - Peer-Chat mit ungelesen-Badge, Emojis, Bildversand und Datei-Teilen
-- Interner Dashboard-Browser mit Server-Proxy, `peername.dcloud`-Auflösung, normalem Webzugriff, lokalem `storage/web`-Hosting und Download-Ablage in `storage/Downloads`; optional nativer Qt-WebEngine-Browser für lokale Desktop-Nutzung
+- Interner Dashboard-Browser mit Server-Proxy, `peername.dcloud`-Auflösung, normalem Webzugriff, JavaScript-Unterstützung, lokalem `storage/web`-Hosting und Download-Ablage in `storage/Downloads`
 - Lokaler Web-Ordner `storage/web` als Datei-Explorer-Spezialordner `web`, inkl. Upload, Unterordnern, Texteditor und optionaler PHP-Ausführung über `php-cgi`/`php`
 - Standardordner `storage/Downloads` als Datei-Explorer-Spezialordner **Downloads**; Downloads aus dem Dashboard-Browser werden dort serverseitig gespeichert
 - Optionaler eingebetteter SMB-Server
@@ -103,7 +103,7 @@ Die Webspace-Route `/dcloud-site` wird ohne Weiterleitung und mit automatischer 
 
 Der Dashboard-Browser speichert echte Datei-Downloads serverseitig in `storage/Downloads`. Der Ordner wird beim Start automatisch erstellt und erscheint von Anfang an im dcloud Datei-Explorer als **Downloads**. Dateien aus diesem Ordner können über den Datei-Explorer geöffnet, heruntergeladen oder gelöscht werden.
 
-Der Button **Nativ** bleibt als optionale lokale Desktop-Funktion erhalten. Dafür muss `PySide6` bei Bedarf separat installiert werden (`pip install PySide6`). Auf headless Servern oder bei externem Dashboard-Zugriff ist der neue Server-Proxy-Modus der passende Standard, weil er komplett im Web-Dashboard sichtbar bleibt. Hinweis: Ein serverseitig übersetzter Webmodus kann sehr viele moderne Webseiten gut anzeigen, ist aber kein vollständiger Ersatz für Chrome/Firefox. Seiten mit starkem Bot-Schutz, komplexen Service-Workern oder hart codierten Origin-Prüfungen können weiterhin eingeschränkt sein.
+Der Browser läuft vollständig im Web-Dashboard. Der frühere native Qt-Button wurde entfernt, damit die Funktion auch auf Servern mit externem Dashboard-Zugriff nutzbar bleibt. Der Server-Proxy übersetzt Links, Formulare, `fetch`, `XMLHttpRequest`, dynamische URL-Attribute und einfache JavaScript-Import-/Worker-Pfade auf `/browser/view`. Hinweis: Ein serverseitig übersetzter Webmodus kann viele moderne Webseiten anzeigen, ist aber kein vollständiger Ersatz für Chrome/Firefox. Seiten mit starkem Bot-Schutz, komplexen Service-Workern oder hart codierten Origin-Prüfungen können weiterhin eingeschränkt sein.
 
 ### Login und Benutzerverwaltung
 
@@ -321,7 +321,6 @@ Pflichtpakete aus `requirements.txt`:
 
 Optionale Python-/System-Erweiterungen:
 
-- `PySide6` für den optionalen nativen Qt-WebEngine-Browser (in `requirements.txt` nur als Kommentar dokumentiert)
 - `impacket`
 - `zstandard` für zstd-Komprimierung
 
@@ -1015,9 +1014,8 @@ Die Codebasis ist modular aufgebaut, damit spätere Transport-, Index- und Versc
 | `dcloud_client/network/p2p_storage.py` | Peer-Transfers, Batch-/Pack-Upload und Download |
 | `dcloud_client/network/smb_server.py` | optionaler eingebetteter SMB-Server |
 | `dcloud_client/network/peers.py` | Peer-Liste, Deduplizierung, Deaktivierung |
-| `dcloud_client/web/app.py` | Flask-Routen für Dashboard, Dateien, Webhosting, Web-Dateien, Server-Browser-Proxy, optionalen nativen Browser-Launcher, Chat, Benutzerverwaltung, P2P-API |
+| `dcloud_client/web/app.py` | Flask-Routen für Dashboard, Dateien, Webhosting, Web-Dateien, Server-Browser-Proxy, Chat, Benutzerverwaltung, P2P-API |
 | `dcloud_client/web/auth.py` | Lokale Benutzerverwaltung mit Passwort-Hashing und JSON-Store |
-| `dcloud_client/web/native_browser.py` | Optionaler lokaler Qt-WebEngine-Browser mit `.dcloud`-Auflösung |
 | `dcloud_client/web/templates/dashboard.html` | Desktop-Dashboard, JavaScript und UI |
 | `dcloud_client/web/templates/login.html` | Login-Seite für das Dashboard |
 | `dcloud_client/web/templates/setup.html` | Ersteinrichtung für den ersten Admin-Benutzer |
