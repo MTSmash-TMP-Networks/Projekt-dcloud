@@ -1816,8 +1816,10 @@
           name.textContent = file.name;
           const meta = document.createElement("span");
           meta.className = "tile-meta";
+          const desiredMirrors = Number(file.placement?.desired_replicas || 0);
           const distribution = file.remoteStorageCount > 0 ? ` · verteilt auf ${file.remoteStorageCount + 1} Knoten` : " · lokal";
-          meta.textContent = `${formatBytes(file.size)} · ${file.chunks} Chunk(s)${distribution}`;
+          const raidInfo = desiredMirrors > 1 ? ` · RAID‑1 ${desiredMirrors}x` : "";
+          meta.textContent = `${formatBytes(file.size)} · ${file.chunks} Chunk(s)${distribution}${raidInfo}`;
           const access = document.createElement("span");
           access.className = "tile-meta";
           access.textContent = file.shared ? "🌐 freigegeben" : "🔒 privat";

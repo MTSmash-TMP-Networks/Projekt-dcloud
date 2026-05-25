@@ -9,9 +9,9 @@ dcloud ist ein Python-basierter Storage-Client mit Web-Dashboard im Desktop-Stil
 - Web-Dashboard im Win11-Desktop-Stil unter `http://127.0.0.1:8787`
 - Lokale Benutzerverwaltung mit Ersteinrichtung, Login, Admin-/Benutzer-Rollen und Passwort-Hashing
 - Datei-Upload mit lokaler Sofort-Speicherung
-- Hintergrund-Replikation auf Peers für Ausfallsicherheit
+- Dynamische RAID-1-Mirror-Replikation auf aktive Peers für Ausfallsicherheit
 - „Auf Peers auslagern“, um lokale Chunks nach erfolgreicher Peer-Kopie zu entfernen
-- P2P-Downloads mit Chunk-Wiederherstellung aus lokalen und entfernten Quellen
+- P2P-Downloads mit Chunk-Wiederherstellung von der aktuell schnellsten erreichbaren Quelle
 - Große Batch-/Pack-Transfers statt einzelner Chunk-Anfragen
 - Adaptive Komprimierung mit `zlib`, optional `zstd`, Mindest-Ersparnis und Skip-Regeln für bereits komprimierte Dateien
 - Automatische LAN-Discovery per UDP auf Port `6881`
@@ -103,6 +103,8 @@ Wenn das Admin-Passwort verloren geht, kann bei gestopptem Dienst die Datei `sto
 
 Beim Upload wird die Datei zuerst lokal gespeichert und sofort im Dashboard sichtbar. Die Replikation auf Peers läuft danach im Hintergrund. Dadurch blockieren große Dateien nicht mehr den Browser-Upload.
 
+Die Replikation arbeitet jetzt als dynamischer RAID-1-Mirror: Es werden ganze Chunk-Kopien gespiegelt, keine Parity- oder Stripe-Blöcke. Ohne Peers bleibt eine lokale Kopie. Sobald Peers aktiv sind, wird mindestens eine zweite Kopie angestrebt. Kommen mehr Speicher-Peers hinzu, erhöht sich der Mirror-Faktor automatisch bis zum aktuellen Schutzlimit von vier Kopien pro Chunk.
+
 Ablauf:
 
 1. Browser sendet Datei an den lokalen dcloud-Node.
@@ -115,11 +117,15 @@ Ablauf:
 
 ### Download und Wiederherstellung
 
-Downloads prüfen zuerst, ob alle benötigten Chunks lokal vorhanden sind. Fehlende Chunks werden von Peers geladen. Dabei werden große Pack-/Batch-Requests verwendet, damit nicht jeder Chunk einzeln angefragt wird. Falls ein großer Block über Relay nicht funktioniert, wird der Block automatisch kleiner wiederholt.
+Downloads prüfen zuerst, ob alle benötigten Chunks lokal vorhanden sind. Fehlende Chunks werden von Peers geladen. Vor dem Abruf werden die aktiven Quellen per schneller Health-/Antwortzeit-Prüfung sortiert. dcloud versucht dadurch zuerst den Peer, der aktuell am schnellsten antwortet, statt starr der Manifest-Reihenfolge zu folgen.
+
+Dabei werden große Pack-/Batch-Requests verwendet, damit nicht jeder Chunk einzeln angefragt wird. Falls ein großer Block über Relay nicht funktioniert, wird der Block automatisch kleiner wiederholt.
 
 ### Auf Peers auslagern
 
 Mit „Auf Peers auslagern“ kann eine Datei nach erfolgreicher Peer-Replikation lokal entlastet werden. Lokale Chunk-Dateien werden nur gelöscht, wenn kein aktives Manifest sie lokal noch benötigt. Deduplizierte Chunks bleiben geschützt.
+
+Für ausgelagerte Dateien bleibt das System RAID-1-artig: Wenn Peers verschwinden, zählt dcloud nur aktuell erreichbare Kopien als gesund. Der Hintergrund-Worker versucht fehlende Spiegel auf neue aktive Peers nachzubauen. Falls die lokale Kopie bereits entfernt wurde, kann der Worker einen fehlenden Chunk von der schnellsten noch erreichbaren Quelle holen und anschließend auf neue Ziele spiegeln. Sind alle Quellen offline, bleibt das Manifest erhalten und die Reparatur wird beim nächsten Peer-Signal erneut versucht.
 
 ### Peer-Chat
 

@@ -48,6 +48,8 @@ from ..network.p2p_storage import (
     build_manifest_deletion,
     build_manifest_revocation,
     distribute_file_chunks,
+    dynamic_mirror_replica_count,
+    rank_peers_by_speed,
     replicate_manifest_chunks,
     verify_manifest_deletion,
     verify_manifest_revocation,
@@ -744,7 +746,10 @@ def create_app(
                 "remote_failures": result.remote_failures,
                 "local_chunks": result.local_chunks,
                 "compressed_chunks": result.compressed_chunks,
+                "raid_level": 1,
+                "raid_mode": "dynamic_mirror",
                 "desired_replicas": result.desired_replicas,
+                "dynamic_mirror_cap": 4,
                 "replicated_chunks": result.replicated_chunks,
                 "under_replicated_chunks": result.under_replicated_chunks,
                 "raw_bytes": result.raw_bytes,
@@ -826,14 +831,27 @@ def create_app(
             if not active_peers:
                 return
             peer_ids = [peer.node_id for peer in active_peers]
+            active_peer_ids = set(peer_ids)
+            base_desired_replicas = dynamic_mirror_replica_count(len(active_peers))
             for manifest in manifest_store.list_manifests():
                 if manifest.owner_node_id != identity.node_id:
                     continue
+                manifest_expects_local_copy = any(
+                    identity.node_id in [str(node_id) for node_id in chunk.get("locations", [])]
+                    for chunk in manifest.chunks
+                )
+                desired_replicas = base_desired_replicas
+                if not manifest_expects_local_copy:
+                    desired_replicas = max(1, min(base_desired_replicas, len(active_peers)))
                 needs_replication = False
                 for chunk in manifest.chunks:
+                    digest = str(chunk.get("hash", ""))
                     existing_locations = [str(node_id) for node_id in chunk.get("locations", []) if str(node_id)]
-                    remote_locations = [node_id for node_id in existing_locations if node_id != identity.node_id]
-                    if not remote_locations and identity.node_id in existing_locations:
+                    healthy_locations = []
+                    if identity.node_id in existing_locations and digest and chunk_store.chunk_path(digest).exists():
+                        healthy_locations.append(identity.node_id)
+                    healthy_locations.extend(node_id for node_id in existing_locations if node_id in active_peer_ids and node_id not in healthy_locations)
+                    if len(healthy_locations) < desired_replicas:
                         needs_replication = True
                         break
                 if needs_replication:
@@ -1697,6 +1715,7 @@ def create_app(
         peer_ids = [peer.node_id for peer in storage_peers]
         targets = list(dict.fromkeys([identity.node_id, *peer_ids]))
         background_enabled = bool(storage_peers)
+        desired_replicas = dynamic_mirror_replica_count(len(storage_peers)) if background_enabled else 1
         return {
             "strategy": "local_first_background_replication",
             "target_count": len(targets),
@@ -1706,7 +1725,10 @@ def create_app(
             "remote_failures": 0,
             "local_chunks": upload_result.local_chunks,
             "compressed_chunks": upload_result.compressed_chunks,
-            "desired_replicas": 2 if background_enabled else 1,
+            "raid_level": 1,
+            "raid_mode": "dynamic_mirror",
+            "desired_replicas": desired_replicas,
+            "dynamic_mirror_cap": 4,
             "replicated_chunks": 0,
             "under_replicated_chunks": len(upload_result.chunks) if background_enabled else 0,
             "raw_bytes": upload_result.raw_bytes,
@@ -2083,9 +2105,12 @@ def create_app(
                 "offload_candidate_chunks": len(removal_candidates),
                 "offload_remote_successes": result.remote_successes,
                 "offload_remote_failures": result.remote_failures,
+                "raid_level": 1,
+                "raid_mode": "dynamic_mirror",
                 "replicated_chunks": result.replicated_chunks,
                 "under_replicated_chunks": result.under_replicated_chunks,
                 "desired_replicas": result.desired_replicas,
+                "dynamic_mirror_cap": 4,
                 "local_chunks_kept": local_kept_count,
             })
             updated_manifest = manifest_store.update_placement(
@@ -2393,6 +2418,8 @@ def create_app(
     def _ensure_manifest_chunks_available(manifest: FileManifest, progress_callback: Any | None = None) -> None:
         peers_by_id = {peer.node_id: peer for peer in _list_active_peers()}
         all_peers = list(peers_by_id.values())
+        ranked_download_peers = rank_peers_by_speed(all_peers, p2p_client) if all_peers else []
+        peer_rank = {peer.node_id: index for index, peer in enumerate(ranked_download_peers)}
         chunks = sorted(manifest.chunks, key=lambda item: int(item["index"]))
         total_chunks = len(chunks)
         chunks_by_digest = {str(chunk["hash"]): chunk for chunk in chunks}
@@ -2423,15 +2450,17 @@ def create_app(
         for chunk in missing.values():
             digest = str(chunk["hash"])
             candidate_ids = [str(node_id) for node_id in chunk.get("locations", []) if str(node_id)]
-            candidate_ids.extend(peer.node_id for peer in all_peers)
+            # If the manifest is stale, a chunk may already exist on a newer
+            # mirror that is not listed yet. Try listed mirrors first, then every
+            # active peer, but sort the final peer order by current response time.
+            candidate_ids.extend(peer.node_id for peer in ranked_download_peers)
             seen: set[str] = set()
             for node_id in candidate_ids:
                 if node_id == identity.node_id or node_id in seen or node_id not in peers_by_id:
                     continue
                 seen.add(node_id)
                 peer_candidates[node_id].append(digest)
-                if node_id not in peer_order:
-                    peer_order.append(node_id)
+        peer_order = sorted(peer_candidates, key=lambda node_id: peer_rank.get(node_id, 9999))
 
         def write_restored_chunk(digest: str, stored_data: bytes) -> bool:
             chunk = chunks_by_digest.get(digest)
@@ -2587,7 +2616,8 @@ def create_app(
             tried: set[str] = set()
             restored = False
             candidate_ids = [str(node_id) for node_id in chunk.get("locations", []) if str(node_id)]
-            candidate_ids.extend(peer.node_id for peer in all_peers)
+            candidate_ids.extend(peer.node_id for peer in ranked_download_peers)
+            candidate_ids = sorted(dict.fromkeys(candidate_ids), key=lambda node_id: peer_rank.get(node_id, 9999))
             for node_id in candidate_ids:
                 if node_id == identity.node_id or node_id in tried:
                     continue

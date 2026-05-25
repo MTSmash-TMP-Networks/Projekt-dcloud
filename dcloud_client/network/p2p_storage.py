@@ -26,6 +26,9 @@ LOG = logging.getLogger(__name__)
 REVOCATION_ACTION = "revoke_share"
 FILE_DELETE_ACTION = "delete_file"
 DEFAULT_MIN_REPLICAS_WITH_PEERS = 2
+# RAID-1-style dynamic mirror policy. 1 local/primary copy + up to three
+# active peer mirrors keeps safety high without exploding storage on large meshes.
+DEFAULT_MAX_DYNAMIC_REPLICAS = 4
 DEFAULT_CHUNK_BATCH_SIZE = 32
 # Download pack format.
 CHUNK_PACK_MAGIC = b"DCLOUD-CHUNK-PACK-1\n"
@@ -761,16 +764,39 @@ class P2PStorageClient:
 
 
 
-def _rank_peers_by_speed(peers: list[Peer], p2p_client: P2PStorageClient) -> list[Peer]:
-    """Return storage candidates with fast direct peers first and relay peers kept.
+def dynamic_mirror_replica_count(
+    active_peer_count: int,
+    *,
+    min_replicas_with_peers: int = DEFAULT_MIN_REPLICAS_WITH_PEERS,
+    max_replicas: int = DEFAULT_MAX_DYNAMIC_REPLICAS,
+) -> int:
+    """Return the current RAID-1 mirror factor for active storage peers.
 
-    The previous health probe only tested a direct HTTP ``/healthz`` route. That
-    accidentally removed PHP-relay peers from upload targets because relay peers
-    often have ``host == RELAY_HOST`` and are only reachable through the
-    forwarder/mailbox path. The upload then stored every chunk locally and never
-    created the intended safety replica. Direct peers are still ranked by a cheap
-    health check, but relay-routable peers are kept as valid storage candidates
-    so ``put_chunk``/``put_chunks_batch`` can use the PHP forwarder or mailbox.
+    The system stays RAID-1-like: every chunk is mirrored as whole copies, not
+    striped with parity.  With no peers, one local copy is the only possible
+    target.  With peers, at least two copies are requested.  Additional active
+    peers raise the requested mirror factor automatically, capped by
+    ``DEFAULT_MAX_DYNAMIC_REPLICAS`` so a large mesh does not multiply storage
+    usage without limit.
+    """
+    peer_count = max(0, int(active_peer_count or 0))
+    if peer_count <= 0:
+        return 1
+    desired = max(2, int(min_replicas_with_peers or DEFAULT_MIN_REPLICAS_WITH_PEERS))
+    desired = max(desired, 1 + peer_count)
+    if max_replicas > 0:
+        desired = min(desired, int(max_replicas))
+    return min(desired, 1 + peer_count)
+
+
+def _rank_peers_by_speed(peers: list[Peer], p2p_client: P2PStorageClient) -> list[Peer]:
+    """Return candidates with the fastest currently responding routes first.
+
+    Direct peers are ranked by a cheap ``/healthz`` latency probe. Relay-only
+    peers are kept behind direct peers instead of being discarded, because they
+    can still transfer via PHP forwarder/mailbox. This ranking is used for both
+    writing replicas and reading missing chunks, so downloads prefer the peer
+    that answers fastest instead of blindly following manifest order.
     """
     ranked: list[tuple[float, Peer]] = []
     relay_ranked: list[tuple[float, Peer]] = []
@@ -807,6 +833,11 @@ def _rank_peers_by_speed(peers: list[Peer], p2p_client: P2PStorageClient) -> lis
         seen.add(peer.node_id)
         ordered.append(peer)
     return ordered
+
+def rank_peers_by_speed(peers: list[Peer], p2p_client: P2PStorageClient) -> list[Peer]:
+    """Public wrapper used by the web layer for download source selection."""
+    return _rank_peers_by_speed(peers, p2p_client)
+
 
 def _rotated_targets(targets: list[Peer | None], target_ids: list[str], start_index: int) -> list[tuple[Peer | None, str]]:
     if not targets:
@@ -859,7 +890,7 @@ def distribute_file_chunks(
     ranked_peers = _rank_peers_by_speed(peers, p2p_client) if peers else []
     targets: list[Peer | None] = [*ranked_peers, None] if ranked_peers else [None]
     target_ids = [*[peer.node_id for peer in ranked_peers], local_node_id] if ranked_peers else [local_node_id]
-    desired_replicas = min(max(1, int(min_replicas_with_peers)), 2, len(targets))
+    desired_replicas = dynamic_mirror_replica_count(len(ranked_peers), min_replicas_with_peers=min_replicas_with_peers)
 
     result = DistributedUploadResult(targets=list(dict.fromkeys(target_ids)), desired_replicas=desired_replicas)
     source_size = int(source_path.stat().st_size)
@@ -1051,32 +1082,40 @@ def distribute_file_chunks(
             result.stored_bytes += len(stored_data)
 
             if ranked_peers and len(entry["locations"]) < desired_replicas:
-                peer = ranked_peers[index % len(ranked_peers)]
-                name = peer_label(peer)
-                queue_remote_chunk(
-                    peer,
-                    {
-                        "entry_index": len(result.chunks) - 1,
-                        "digest": digest,
-                        "stored_data": stored_data,
-                        "original_size": len(raw),
-                        "stored_size": len(stored_data),
-                        "index": index,
-                        "compression": compression,
-                    },
-                )
-                notify(
-                    phase="peer_upload_queued",
-                    status=f"Chunk {index + 1}/{max(total_chunks, 1)} für Replikationspaket an {name} vorgemerkt…",
-                    current_chunk=index + 1,
-                    total_chunks=total_chunks,
-                    current_peer=name,
-                    raw_bytes_processed=result.raw_bytes,
-                    stored_bytes=result.stored_bytes,
-                    local_chunks=result.local_chunks,
-                    compressed_chunks=result.compressed_chunks,
-                )
-                flush_bucket_if_needed(peer)
+                missing_copies = max(0, desired_replicas - len(entry["locations"]))
+                queued = 0
+                for peer, _target_id in _rotated_targets(ranked_peers, [p.node_id for p in ranked_peers], index):
+                    if peer is None or peer.node_id in entry["locations"]:
+                        continue
+                    name = peer_label(peer)
+                    queue_remote_chunk(
+                        peer,
+                        {
+                            "entry_index": len(result.chunks) - 1,
+                            "digest": digest,
+                            "stored_data": stored_data,
+                            "original_size": len(raw),
+                            "stored_size": len(stored_data),
+                            "index": index,
+                            "compression": compression,
+                        },
+                    )
+                    queued += 1
+                    notify(
+                        phase="peer_upload_queued",
+                        status=f"Chunk {index + 1}/{max(total_chunks, 1)} für RAID-1-Spiegel an {name} vorgemerkt…",
+                        current_chunk=index + 1,
+                        total_chunks=total_chunks,
+                        current_peer=name,
+                        raw_bytes_processed=result.raw_bytes,
+                        stored_bytes=result.stored_bytes,
+                        local_chunks=result.local_chunks,
+                        compressed_chunks=result.compressed_chunks,
+                        desired_replicas=desired_replicas,
+                    )
+                    flush_bucket_if_needed(peer)
+                    if queued >= missing_copies:
+                        break
 
             notify(
                 phase="chunk_done",
@@ -1140,7 +1179,15 @@ def replicate_manifest_chunks(
     """
     ranked_peers = _rank_peers_by_speed(peers, p2p_client) if peers else []
     target_ids = [*[peer.node_id for peer in ranked_peers], local_node_id] if ranked_peers else [local_node_id]
-    desired_replicas = min(max(1, int(min_replicas_with_peers)), 2, len(target_ids))
+    manifest_expects_local_copy = any(
+        local_node_id in [str(node_id) for node_id in chunk.get("locations", [])]
+        for chunk in manifest.chunks
+    )
+    desired_replicas = dynamic_mirror_replica_count(len(ranked_peers), min_replicas_with_peers=min_replicas_with_peers)
+    if ranked_peers and not manifest_expects_local_copy:
+        # Offloaded manifests intentionally do not keep a local mirror. In that
+        # mode the RAID-1 mirror factor is bounded by the active remote peers.
+        desired_replicas = max(1, min(desired_replicas, len(ranked_peers)))
     required_ids = {str(node_id) for node_id in (required_peer_node_ids or []) if str(node_id)}
 
     result = DistributedUploadResult(
@@ -1154,7 +1201,7 @@ def replicate_manifest_chunks(
         result.stored_bytes += int(entry.get("stored_size", entry.get("size", 0)) or 0)
         if entry.get("compression"):
             result.compressed_chunks += 1
-        if local_node_id in [str(node_id) for node_id in entry.get("locations", [])]:
+        if local_node_id in [str(node_id) for node_id in entry.get("locations", [])] and chunk_store.chunk_path(str(entry.get("hash", ""))).exists():
             result.local_chunks += 1
 
     def notify(**payload: Any) -> None:
@@ -1163,6 +1210,55 @@ def replicate_manifest_chunks(
 
     def peer_label(peer: Peer) -> str:
         return str(peer.to_dict().get("display_name") or peer.name or peer.node_id[:12])
+
+    peers_by_id = {peer.node_id: peer for peer in ranked_peers}
+    active_peer_ids = set(peers_by_id)
+
+    def healthy_locations(entry: dict[str, Any]) -> list[str]:
+        """Locations that are currently usable for the dynamic RAID-1 mirror."""
+        digest = str(entry.get("hash", ""))
+        raw_locations = [str(node_id) for node_id in entry.get("locations", []) if str(node_id)]
+        healthy: list[str] = []
+        if local_node_id in raw_locations and digest and chunk_store.chunk_path(digest).exists():
+            healthy.append(local_node_id)
+        for node_id in raw_locations:
+            if node_id != local_node_id and node_id in active_peer_ids and node_id not in healthy:
+                healthy.append(node_id)
+        return healthy
+
+    def read_or_fetch_stored_data(entry: dict[str, Any]) -> bytes | None:
+        """Read a local chunk, or fetch it from the fastest online mirror.
+
+        This lets an offloaded file heal itself when one peer vanished: if one
+        remaining mirror still has the chunk, this node can pull it once and
+        immediately push it to a new target without requiring the user to
+        download the whole file manually first.
+        """
+        digest = str(entry.get("hash", ""))
+        if not digest:
+            return None
+        try:
+            return chunk_store.read_stored_chunk(digest)
+        except StorageError:
+            pass
+        source_ids = [str(node_id) for node_id in entry.get("locations", []) if str(node_id) in active_peer_ids]
+        source_ids.sort(key=lambda node_id: [peer.node_id for peer in ranked_peers].index(node_id) if node_id in active_peer_ids else 9999)
+        for source_id in source_ids:
+            peer = peers_by_id.get(source_id)
+            if peer is None:
+                continue
+            try:
+                notify(
+                    phase="background_replication_fetch_source",
+                    status=f"RAID-1-Healing holt fehlenden Chunk von {peer_label(peer)}…",
+                    current_chunk=int(entry.get("index", 0)) + 1,
+                    total_chunks=total_chunks,
+                    current_peer=peer_label(peer),
+                )
+                return p2p_client.get_chunk(peer, digest=digest)
+            except StorageError:
+                LOG.debug("Source peer %s did not provide chunk %s for healing", source_id, digest[:12], exc_info=True)
+        return None
 
     pending_by_peer: dict[str, dict[str, Any]] = {}
 
@@ -1298,56 +1394,65 @@ def replicate_manifest_chunks(
 
     if not ranked_peers:
         for entry in result.chunks:
-            if len([node_id for node_id in entry.get("locations", []) if node_id]) < desired_replicas:
+            if len(healthy_locations(entry)) < desired_replicas:
                 result.under_replicated_chunks += 1
         notify(
             phase="background_replication_skipped",
-            status="Keine aktiven Speicher-Peers verfügbar; Datei bleibt lokal gespeichert.",
+            status="Keine aktiven Speicher-Peers verfügbar; RAID-1-Spiegel bleibt beim aktuellen Stand.",
             current_chunk=total_chunks,
             total_chunks=total_chunks,
             remote_successes=0,
             remote_failures=0,
+            desired_replicas=desired_replicas,
         )
         return result
 
+    ranked_ids = [peer.node_id for peer in ranked_peers]
     for entry_index, entry in enumerate(result.chunks):
         locations = [str(node_id) for node_id in entry.get("locations", []) if str(node_id)]
-        missing_required_ids = required_ids.difference(locations)
-        if len(locations) >= desired_replicas and not missing_required_ids:
+        healthy = healthy_locations(entry)
+        missing_required_ids = required_ids.difference(healthy)
+        if len(healthy) >= desired_replicas and not missing_required_ids:
             continue
         digest = str(entry.get("hash", ""))
         if not digest:
             continue
-        try:
-            stored_data = chunk_store.read_stored_chunk(digest)
-        except StorageError as exc:
+        stored_data = read_or_fetch_stored_data(entry)
+        if stored_data is None:
             result.remote_failures += 1
-            LOG.debug("Local chunk %s missing for background replication: %s", digest[:12], exc)
+            LOG.debug("Chunk %s has no currently readable source for RAID healing", digest[:12])
             continue
         candidates = [
             candidate
-            for candidate, _target_id in _rotated_targets(ranked_peers, [peer.node_id for peer in ranked_peers], int(entry.get("index", entry_index)))
-            if candidate is not None and candidate.node_id not in locations
+            for candidate, _target_id in _rotated_targets(ranked_peers, ranked_ids, int(entry.get("index", entry_index)))
+            if candidate is not None and candidate.node_id not in healthy
         ]
         if missing_required_ids:
-            required_candidates = [candidate for candidate in ranked_peers if candidate.node_id in missing_required_ids and candidate.node_id not in locations]
+            required_candidates = [candidate for candidate in ranked_peers if candidate.node_id in missing_required_ids and candidate.node_id not in healthy]
             candidates = [*required_candidates, *[candidate for candidate in candidates if candidate.node_id not in missing_required_ids]]
         if not candidates:
             continue
-        peer = candidates[0]
-        queue_remote_chunk(
-            peer,
-            {
-                "entry_index": entry_index,
-                "digest": digest,
-                "stored_data": stored_data,
-                "original_size": int(entry.get("size", len(stored_data))),
-                "stored_size": int(entry.get("stored_size", len(stored_data))),
-                "index": int(entry.get("index", entry_index)),
-                "compression": entry.get("compression"),
-            },
-        )
-        flush_bucket_if_needed(peer)
+        missing_copies = max(0, desired_replicas - len(healthy))
+        if missing_required_ids:
+            missing_copies = max(missing_copies, len(missing_required_ids))
+        queued = 0
+        for peer in candidates:
+            queue_remote_chunk(
+                peer,
+                {
+                    "entry_index": entry_index,
+                    "digest": digest,
+                    "stored_data": stored_data,
+                    "original_size": int(entry.get("size", len(stored_data))),
+                    "stored_size": int(entry.get("stored_size", len(stored_data))),
+                    "index": int(entry.get("index", entry_index)),
+                    "compression": entry.get("compression"),
+                },
+            )
+            queued += 1
+            flush_bucket_if_needed(peer)
+            if queued >= missing_copies:
+                break
 
     for node_id in list(pending_by_peer):
         flush_peer_bucket(node_id, reason="Hintergrundlauf abgeschlossen")
@@ -1357,9 +1462,10 @@ def replicate_manifest_chunks(
     for entry in result.chunks:
         locations = [str(node_id) for node_id in entry.get("locations", []) if str(node_id)]
         entry["locations"] = list(dict.fromkeys(locations)) or [local_node_id]
-        if len(entry["locations"]) > 1:
+        healthy = healthy_locations(entry)
+        if len(healthy) > 1:
             result.replicated_chunks += 1
-        if len(entry["locations"]) < desired_replicas:
+        if len(healthy) < desired_replicas:
             result.under_replicated_chunks += 1
 
     notify(
