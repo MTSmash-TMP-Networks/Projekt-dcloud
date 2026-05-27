@@ -63,6 +63,37 @@ try {
     Fail "Docker antwortet nicht. Bitte Docker Desktop starten und warten, bis die Engine bereit ist."
 }
 
+function Get-DcloudGitRevision {
+    if ($env:DCLOUD_GIT_REVISION -and $env:DCLOUD_GIT_REVISION -ne "unbekannt") { return $env:DCLOUD_GIT_REVISION }
+    $marker = Join-Path $RepoRoot ".dcloud_git_revision"
+    if (Test-Path $marker) {
+        $value = (Get-Content -Path $marker -TotalCount 1 -ErrorAction SilentlyContinue).Trim()
+        if ($value -and $value -ne "unbekannt") { return $value }
+    }
+    if ((Get-Command git -ErrorAction SilentlyContinue) -and (Test-Path (Join-Path $RepoRoot ".git"))) {
+        $value = (& git -C $RepoRoot rev-parse --short=12 HEAD 2>$null)
+        if ($LASTEXITCODE -eq 0 -and $value) { return $value.Trim() }
+    }
+    return "unbekannt"
+}
+
+function Get-DcloudGitBranch {
+    if ($env:DCLOUD_GIT_BRANCH) { return $env:DCLOUD_GIT_BRANCH }
+    $marker = Join-Path $RepoRoot ".dcloud_git_branch"
+    if (Test-Path $marker) {
+        $value = (Get-Content -Path $marker -TotalCount 1 -ErrorAction SilentlyContinue).Trim()
+        if ($value) { return $value }
+    }
+    if ((Get-Command git -ErrorAction SilentlyContinue) -and (Test-Path (Join-Path $RepoRoot ".git"))) {
+        $value = (& git -C $RepoRoot rev-parse --abbrev-ref HEAD 2>$null)
+        if ($LASTEXITCODE -eq 0 -and $value) { return $value.Trim() }
+    }
+    return "main"
+}
+
+$DcloudGitRevision = Get-DcloudGitRevision
+$DcloudGitBranch = Get-DcloudGitBranch
+
 $DockerDir = Join-Path $RepoRoot "docker"
 $DataDir = Join-Path $RepoRoot "docker-data"
 $EnvFile = Join-Path $DockerDir ".env.windows"
@@ -77,6 +108,8 @@ DCLOUD_DASHBOARD_PORT=$DashboardPort
 DCLOUD_DISCOVERY_UDP_PORT=$DiscoveryUdpPort
 DCLOUD_STORAGE_LIMIT_GB=$StorageLimitGiB
 DCLOUD_SMB_PORT=$SmbPort
+DCLOUD_GIT_REVISION=$DcloudGitRevision
+DCLOUD_GIT_BRANCH=$DcloudGitBranch
 "@
     Set-Content -Path $EnvFile -Value $envContent -Encoding UTF8
 }

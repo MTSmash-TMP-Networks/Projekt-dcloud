@@ -1,14 +1,19 @@
 FROM python:3.11-slim
 
+ARG DCLOUD_GIT_REVISION=unbekannt
+ARG DCLOUD_GIT_BRANCH=unbekannt
+
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \
-    DCLOUD_CONFIG=/data/config.yml
+    DCLOUD_CONFIG=/data/config.yml \
+    DCLOUD_GIT_REVISION=${DCLOUD_GIT_REVISION} \
+    DCLOUD_GIT_BRANCH=${DCLOUD_GIT_BRANCH}
 
 WORKDIR /app
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates curl \
+    && apt-get install -y --no-install-recommends ca-certificates curl git php-cli php-cgi \
     && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt ./requirements.txt
@@ -17,7 +22,9 @@ RUN python -m pip install --upgrade pip \
 
 COPY . .
 
-RUN chmod +x /app/scripts/docker-entrypoint.sh
+RUN printf "%s\n" "$DCLOUD_GIT_REVISION" > /app/.dcloud_git_revision \
+    && printf "%s\n" "$DCLOUD_GIT_BRANCH" > /app/.dcloud_git_branch \
+    && chmod +x /app/scripts/docker-entrypoint.sh
 
 VOLUME ["/data"]
 EXPOSE 8787/tcp 6881/udp 445/tcp

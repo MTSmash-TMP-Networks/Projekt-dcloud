@@ -3,6 +3,9 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+      args:
+        DCLOUD_GIT_REVISION: ${DCLOUD_GIT_REVISION:-unbekannt}
+        DCLOUD_GIT_BRANCH: ${DCLOUD_GIT_BRANCH:-main}
     image: dcloud:local
     container_name: dcloud
     restart: unless-stopped
@@ -11,6 +14,8 @@ services:
       - "${DCLOUD_DISCOVERY_UDP_PORT:-6881}:6881/udp"
     environment:
       DCLOUD_CONFIG: /data/config.yml
+      DCLOUD_GIT_REVISION: ${DCLOUD_GIT_REVISION:-unbekannt}
+      DCLOUD_GIT_BRANCH: ${DCLOUD_GIT_BRANCH:-main}
       DCLOUD_NODE_NAME: "${DCLOUD_NODE_NAME:-dcloud-windows-docker}"
       DCLOUD_WEB_PORT: "8787"
       DCLOUD_UDP_PORT: "6881"

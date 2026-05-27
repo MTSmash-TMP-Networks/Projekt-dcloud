@@ -28,7 +28,8 @@ dcloud ist ein Python-basierter Storage-Client mit Web-Dashboard im Desktop-Stil
 - Optionaler eingebetteter SMB-Server
 - OpenWrt-, Linux-, macOS-, Windows- und Windows-Docker-Installationspfade
 - Auto-Update-Skripte für systemd, launchd und OpenWrt-Cron
-- Docker-Compose-Variante für Windows mit PowerShell-Helfer
+- Docker-Compose-Variante für Windows mit PowerShell- und CMD-Helfer
+- Windows-Docker-Installation direkt per CMD/`curl` aus GitHub
 - Synology-Docker-Installation per SSH, lokalem Script oder direktem GitHub-`curl`-Bootstrap
 
 ## Architektur
@@ -610,7 +611,40 @@ Für Windows ist Docker die empfohlene Variante, wenn die native Python-/Schedul
 2. Docker Desktop starten und warten, bis die Engine bereit ist.
 3. Projektordner öffnen, zum Beispiel in PowerShell.
 
-### Schnellstart
+### Schnellstart aus CMD mit GitHub-curl
+
+Nach dem Hochladen der aktuellen Dateien ins GitHub-Repository kann Windows direkt aus `cmd.exe` installiert werden. Docker Desktop muss vorher installiert und gestartet sein.
+
+```cmd
+curl.exe -fsSL https://raw.githubusercontent.com/MTSmash-TMP-Networks/Projekt-dcloud/main/Script/install_windows_docker_from_github.cmd -o "%TEMP%\install_dcloud_windows_docker.cmd" && cmd /c "%TEMP%\install_dcloud_windows_docker.cmd"
+```
+
+Mit eigenen Werten:
+
+```cmd
+set DCLOUD_NODE_NAME=mein-windows-peer
+set DCLOUD_DASHBOARD_PORT=8787
+set DCLOUD_STORAGE_LIMIT_GB=200
+curl.exe -fsSL https://raw.githubusercontent.com/MTSmash-TMP-Networks/Projekt-dcloud/main/Script/install_windows_docker_from_github.cmd -o "%TEMP%\install_dcloud_windows_docker.cmd" && cmd /c "%TEMP%\install_dcloud_windows_docker.cmd"
+```
+
+Das Bootstrap-Skript lädt das GitHub-Archiv herunter, entpackt es nach `%TEMP%\dcloud-windows-github-install` und startet danach `Script\install_windows_docker.cmd`. Es wird kein `git` benötigt.
+
+### Schnellstart aus CMD im entpackten Projekt
+
+```cmd
+Script\install_windows_docker.cmd
+```
+
+Verwaltung aus CMD:
+
+```cmd
+Script\install_windows_docker.cmd -Logs
+Script\install_windows_docker.cmd -Restart
+Script\install_windows_docker.cmd -Stop
+```
+
+### Schnellstart aus PowerShell
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\scripts\install_dcloud_docker_windows.ps1
@@ -632,6 +666,8 @@ docker-data/
 ```
 
 `docker-data/` enthält die persistente dcloud-Konfiguration und den Speicher. Diesen Ordner nicht löschen, wenn Node-ID, Dateien und Manifeste erhalten bleiben sollen.
+
+Das Standard-Dockerfile installiert zusätzlich `php-cli` und `php-cgi`, damit PHP-Dateien im dcloud-Webordner auch im Windows-Docker-Container optional ausgeführt werden können.
 
 ### Start mit eigenen Parametern
 
@@ -738,6 +774,8 @@ curl -fsSL https://raw.githubusercontent.com/MTSmash-TMP-Networks/Projekt-dcloud
 
 Das Bootstrap-Skript lädt das Repository von GitHub als Archiv herunter und startet danach automatisch `Script/install_synology_docker.sh`. Es wird kein `git` benötigt; `curl` oder alternativ `wget`, `tar`, Docker/Container Manager und Docker Compose müssen auf der Synology verfügbar sein.
 
+**GitHub-Stand im Dashboard:** Das Docker-Image installiert `git` und der Bootstrap schreibt zusätzlich `.dcloud_git_revision`/`.dcloud_git_branch` als Build-Metadaten. Dadurch zeigt das Dashboard auch bei Installation per GitHub-Archiv nicht mehr dauerhaft `unbekannt`, obwohl das Archiv selbst keinen `.git`-Ordner enthält.
+
 Standardwerte:
 
 ```text
@@ -745,14 +783,18 @@ Installationsordner: /volume1/docker/dcloud
 Dashboard-Port:      8787
 UDP-Discovery-Port:  6881
 Datenordner:         /volume1/docker/dcloud/data
-Containername:       dcloud
+Node-Name:           automatisch, z. B. dcloud-diskstation-123456789
+Containername:       automatisch, z. B. dcloud-diskstation-123456789
 ```
+
+Der automatische Name wird aus dem Synology-Hostnamen plus einem stabilen Geräte-Suffix gebildet. Dadurch heißen mehrere Synology-Installationen nicht mehr alle gleich. Falls ein fester Name gewünscht ist, können `DCLOUD_NODE_NAME` und optional `CONTAINER_NAME` weiterhin manuell gesetzt werden.
 
 Aufruf mit eigenen Werten:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/MTSmash-TMP-Networks/Projekt-dcloud/main/Script/install_synology_docker_from_github.sh | \
   DCLOUD_NODE_NAME=meine-synology \
+  CONTAINER_NAME=dcloud-meine-synology \
   DCLOUD_DASHBOARD_PORT=8787 \
   DCLOUD_DISCOVERY_UDP_PORT=6881 \
   INSTALL_DIR=/volume1/docker/dcloud \
@@ -1079,7 +1121,9 @@ Die Codebasis ist modular aufgebaut, damit spätere Transport-, Index- und Versc
 | `relay/dcloud_relay_server.py` | Python-Relay-Alternative für Server/VPS |
 | `scripts/install_dcloud_service.sh` | Linux/OpenWrt/Windows-Bootstrap |
 | `scripts/install_dcloud_service_mac.sh` | macOS-launchd-Installer |
-| `scripts/install_dcloud_docker_windows.ps1` | Windows-Docker-Installer/Starter |
+| `scripts/install_dcloud_docker_windows.ps1` | Windows-Docker-Installer/Starter für PowerShell |
+| `Script/install_windows_docker.cmd` | Windows-Docker-Installer/Starter für CMD |
+| `Script/install_windows_docker_from_github.cmd` | Windows-GitHub-Bootstrap für Installation per CMD und `curl` |
 | `Script/install_synology_docker.sh` | Synology-DSM-Docker-Installer mit persistentem `/volume1/docker/dcloud/data` |
 | `Script/install_synology_docker_from_github.sh` | Synology-GitHub-Bootstrap für Installation per `curl` |
 | `scripts/docker-entrypoint.sh` | Docker-Entrypoint für persistente Config unter `/data` |

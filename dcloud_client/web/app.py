@@ -101,8 +101,28 @@ def human_bytes(value: int) -> str:
 
 
 def current_git_revision() -> str:
+    """Return the best available source-code revision for the dashboard."""
+    for env_name in ("DCLOUD_GIT_REVISION", "GIT_COMMIT", "SOURCE_COMMIT"):
+        value = os.environ.get(env_name, "").strip()
+        if value and value.lower() not in {"unknown", "unbekannt", "none", "null"}:
+            return value[:12]
+
+    for marker in (Path("/app/.dcloud_git_revision"), Path(__file__).resolve().parents[2] / ".dcloud_git_revision"):
+        try:
+            value = marker.read_text(encoding="utf-8").strip()
+        except Exception:
+            continue
+        if value and value.lower() not in {"unknown", "unbekannt", "none", "null"}:
+            return value[:12]
+
     try:
-        result = subprocess.run(["git", "rev-parse", "--short", "HEAD"], capture_output=True, text=True, check=True)
+        result = subprocess.run(
+            ["git", "rev-parse", "--short", "HEAD"],
+            cwd=str(Path(__file__).resolve().parents[2]),
+            capture_output=True,
+            text=True,
+            check=True,
+        )
         revision = result.stdout.strip()
         return revision or "unbekannt"
     except Exception:
