@@ -29,6 +29,7 @@ dcloud ist ein Python-basierter Storage-Client mit Web-Dashboard im Desktop-Stil
 - OpenWrt-, Linux-, macOS-, Windows- und Windows-Docker-Installationspfade
 - Auto-Update-Skripte für systemd, launchd und OpenWrt-Cron
 - Docker-Compose-Variante für Windows mit PowerShell-Helfer
+- Synology-Docker-Installation per SSH, lokalem Script oder direktem GitHub-`curl`-Bootstrap
 
 ## Architektur
 
@@ -726,6 +727,61 @@ powershell -ExecutionPolicy Bypass -File .\scripts\install_dcloud_docker_windows
 
 Dabei wird das Image neu gebaut und der vorhandene `docker-data/`-Ordner weiterverwendet.
 
+
+## Synology-Installation mit Docker / Container Manager
+
+Auf Synology DSM kann dcloud direkt per SSH installiert werden. Nach dem Hochladen der aktuellen Dateien ins GitHub-Repository reicht ein einzelner `curl`-Befehl:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/MTSmash-TMP-Networks/Projekt-dcloud/main/Script/install_synology_docker_from_github.sh | sh
+```
+
+Das Bootstrap-Skript lädt das Repository von GitHub als Archiv herunter und startet danach automatisch `Script/install_synology_docker.sh`. Es wird kein `git` benötigt; `curl` oder alternativ `wget`, `tar`, Docker/Container Manager und Docker Compose müssen auf der Synology verfügbar sein.
+
+Standardwerte:
+
+```text
+Installationsordner: /volume1/docker/dcloud
+Dashboard-Port:      8787
+UDP-Discovery-Port:  6881
+Datenordner:         /volume1/docker/dcloud/data
+Containername:       dcloud
+```
+
+Aufruf mit eigenen Werten:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/MTSmash-TMP-Networks/Projekt-dcloud/main/Script/install_synology_docker_from_github.sh | \
+  DCLOUD_NODE_NAME=meine-synology \
+  DCLOUD_DASHBOARD_PORT=8787 \
+  DCLOUD_DISCOVERY_UDP_PORT=6881 \
+  INSTALL_DIR=/volume1/docker/dcloud \
+  sh
+```
+
+Falls das Repository auf einem anderen Branch liegt, kann der Branch ebenfalls gesetzt werden:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/MTSmash-TMP-Networks/Projekt-dcloud/main/Script/install_synology_docker_from_github.sh | \
+  DCLOUD_GITHUB_BRANCH=main \
+  sh
+```
+
+Alternativ kann weiterhin aus einem lokal entpackten Projekt installiert werden:
+
+```bash
+cd /pfad/zum/entpackten/Projekt-dcloud-main
+sh Script/install_synology_docker.sh
+```
+
+Nach der Installation ist das Dashboard unter folgender Adresse erreichbar:
+
+```text
+http://<SYNOLOGY-IP>:8787
+```
+
+SMB ist im Synology-Docker-Container standardmäßig deaktiviert, weil DSM Port 445 normalerweise selbst verwendet. Persistente dcloud-Daten bleiben unter `/volume1/docker/dcloud/data` erhalten und werden bei erneuter Installation nicht gelöscht.
+
 ## PHP-Relay installieren
 
 Das PHP-Relay besteht aus einer Datei:
@@ -1025,6 +1081,7 @@ Die Codebasis ist modular aufgebaut, damit spätere Transport-, Index- und Versc
 | `scripts/install_dcloud_service_mac.sh` | macOS-launchd-Installer |
 | `scripts/install_dcloud_docker_windows.ps1` | Windows-Docker-Installer/Starter |
 | `Script/install_synology_docker.sh` | Synology-DSM-Docker-Installer mit persistentem `/volume1/docker/dcloud/data` |
+| `Script/install_synology_docker_from_github.sh` | Synology-GitHub-Bootstrap für Installation per `curl` |
 | `scripts/docker-entrypoint.sh` | Docker-Entrypoint für persistente Config unter `/data` |
 | `Dockerfile` | Docker-Image für dcloud |
 | `docker-compose.windows.yml` | Docker-Compose für Windows ohne SMB |

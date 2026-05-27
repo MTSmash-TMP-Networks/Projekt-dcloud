@@ -1,9 +1,12 @@
 #!/bin/sh
 # dcloud Synology Docker installer
 #
-# Nutzung auf der Synology per SSH:
+# Nutzung aus entpacktem Projekt auf der Synology per SSH:
 #   cd /pfad/zum/entpackten/Projekt-dcloud-main
 #   sh Script/install_synology_docker.sh
+#
+# Komplett automatisch direkt von GitHub:
+#   curl -fsSL https://raw.githubusercontent.com/MTSmash-TMP-Networks/Projekt-dcloud/main/Script/install_synology_docker_from_github.sh | sh
 #
 # Optionale Anpassungen:
 #   INSTALL_DIR=/volume1/docker/dcloud DCLOUD_NODE_NAME=mein-peer sh Script/install_synology_docker.sh
