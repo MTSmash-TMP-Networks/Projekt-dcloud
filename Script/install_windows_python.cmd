@@ -3,7 +3,7 @@ setlocal EnableExtensions
 
 rem dcloud native Windows Python installer/launcher for cmd.exe
 rem This variant does not use Docker, WSL2 or virtualization.
-rem Python must already be installed and available through py -3 or python.
+rem If Python is missing, this script can install it automatically via winget or Chocolatey.
 rem
 rem Local usage from the unpacked project:
 rem   Script\install_windows_python.cmd
@@ -16,6 +16,8 @@ rem   set DCLOUD_STORAGE_LIMIT_GB=200
 rem   set DCLOUD_WINDOWS_DATA_DIR=C:\dcloud-data
 rem   set DCLOUD_ENABLE_SMB=0
 rem   set DCLOUD_ADD_FIREWALL_RULE=1
+rem   set DCLOUD_AUTO_INSTALL_PYTHON=1   rem default: 1, install Python automatically if missing
+rem   set DCLOUD_PYTHON_WINGET_ID=Python.Python.3.12
 rem
 rem Management examples:
 rem   Script\install_windows_python.cmd -Logs
@@ -35,6 +37,8 @@ if not defined DCLOUD_DISCOVERY_UDP_PORT set "DCLOUD_DISCOVERY_UDP_PORT=6881"
 if not defined DCLOUD_STORAGE_LIMIT_GB set "DCLOUD_STORAGE_LIMIT_GB=50"
 if not defined DCLOUD_ENABLE_SMB set "DCLOUD_ENABLE_SMB=0"
 if not defined DCLOUD_ADD_FIREWALL_RULE set "DCLOUD_ADD_FIREWALL_RULE=1"
+if not defined DCLOUD_AUTO_INSTALL_PYTHON set "DCLOUD_AUTO_INSTALL_PYTHON=1"
+if not defined DCLOUD_PYTHON_WINGET_ID set "DCLOUD_PYTHON_WINGET_ID=Python.Python.3.12"
 
 set "VENV_DIR=%REPO_ROOT%\.venv"
 set "VENV_PYTHON=%VENV_DIR%\Scripts\python.exe"
@@ -136,14 +140,34 @@ if errorlevel 1 (
 exit /b 0
 
 :find_python
+call :add_known_python_paths
 set "PYTHON_EXE="
 for /f "usebackq delims=" %%P in (`py -3 -c "import sys; print(sys.executable)" 2^>nul`) do set "PYTHON_EXE=%%P"
 if defined PYTHON_EXE goto :python_found
 for /f "usebackq delims=" %%P in (`python -c "import sys; print(sys.executable)" 2^>nul`) do set "PYTHON_EXE=%%P"
 if defined PYTHON_EXE goto :python_found
 
+if /I "%DCLOUD_AUTO_INSTALL_PYTHON%"=="0" goto :python_missing_manual
+
+echo [dcloud-windows-python] Python 3 was not found. Trying automatic Python installation...
+call :install_python_runtime
+if errorlevel 1 exit /b 1
+call :add_known_python_paths
+
+set "PYTHON_EXE="
+for /f "usebackq delims=" %%P in (`py -3 -c "import sys; print(sys.executable)" 2^>nul`) do set "PYTHON_EXE=%%P"
+if defined PYTHON_EXE goto :python_found
+for /f "usebackq delims=" %%P in (`python -c "import sys; print(sys.executable)" 2^>nul`) do set "PYTHON_EXE=%%P"
+if defined PYTHON_EXE goto :python_found
+
+echo [dcloud-windows-python] ERROR: Python was installed, but this CMD session cannot find it yet.
+echo Close this CMD window, open a new CMD window, and run the command again.
+exit /b 1
+
+:python_missing_manual
 echo [dcloud-windows-python] ERROR: Python 3 was not found.
-echo Install Python 3 first, then run this command again.
+echo Automatic installation is disabled by DCLOUD_AUTO_INSTALL_PYTHON=0.
+echo Install Python 3.10 or newer first, then run this command again.
 echo Download: https://www.python.org/downloads/windows/
 echo During installation, enable "Add python.exe to PATH".
 exit /b 1
@@ -151,11 +175,98 @@ exit /b 1
 :python_found
 "%PYTHON_EXE%" -c "import sys; raise SystemExit(0 if sys.version_info >= (3, 10) else 1)" >nul 2>nul
 if errorlevel 1 (
-  echo [dcloud-windows-python] ERROR: Python 3.10 or newer is required.
+  if /I "%DCLOUD_AUTO_INSTALL_PYTHON%"=="0" (
+    echo [dcloud-windows-python] ERROR: Python 3.10 or newer is required.
+    "%PYTHON_EXE%" --version
+    exit /b 1
+  )
+  echo [dcloud-windows-python] Existing Python is too old. Trying automatic Python upgrade/install...
   "%PYTHON_EXE%" --version
+  call :install_python_runtime
+  if errorlevel 1 exit /b 1
+  call :add_known_python_paths
+  set "PYTHON_EXE="
+  for /f "usebackq delims=" %%P in (`py -3 -c "import sys; print(sys.executable)" 2^>nul`) do set "PYTHON_EXE=%%P"
+  if defined PYTHON_EXE goto :python_found
+  for /f "usebackq delims=" %%P in (`python -c "import sys; print(sys.executable)" 2^>nul`) do set "PYTHON_EXE=%%P"
+  if defined PYTHON_EXE goto :python_found
+  echo [dcloud-windows-python] ERROR: Python 3.10+ was installed, but this CMD session cannot find it yet.
+  echo Close this CMD window, open a new CMD window, and run the command again.
   exit /b 1
 )
 echo [dcloud-windows-python] Python: %PYTHON_EXE%
+exit /b 0
+
+:install_python_runtime
+call :add_known_python_paths
+where winget >nul 2>nul
+if not errorlevel 1 (
+  echo [dcloud-windows-python] Installing Python with winget package %DCLOUD_PYTHON_WINGET_ID%...
+  winget install --id %DCLOUD_PYTHON_WINGET_ID% -e --source winget --silent --accept-package-agreements --accept-source-agreements
+  if not errorlevel 1 exit /b 0
+  echo [dcloud-windows-python] WARNING: winget Python installation failed. Trying Chocolatey fallback...
+) else (
+  echo [dcloud-windows-python] winget was not found. Trying Chocolatey fallback...
+)
+
+call :require_admin_for_python_install
+if errorlevel 1 exit /b 1
+call :ensure_chocolatey
+if errorlevel 1 exit /b 1
+
+echo [dcloud-windows-python] Installing Python with Chocolatey...
+choco install python -y --no-progress
+if errorlevel 1 (
+  echo [dcloud-windows-python] ERROR: Python installation via Chocolatey failed.
+  exit /b 1
+)
+exit /b 0
+
+:require_admin_for_python_install
+net session >nul 2>nul
+if not errorlevel 1 exit /b 0
+echo [dcloud-windows-python] Chocolatey fallback requires Administrator rights.
+echo Open CMD as Administrator and run the command again, or install Python 3.10+ manually.
+echo To disable automatic Python installation, run: set DCLOUD_AUTO_INSTALL_PYTHON=0
+exit /b 1
+
+:ensure_chocolatey
+where choco >nul 2>nul
+if not errorlevel 1 exit /b 0
+
+if exist "%ProgramData%\chocolatey\bin\choco.exe" (
+  set "PATH=%ProgramData%\chocolatey\bin;%PATH%"
+  exit /b 0
+)
+
+echo [dcloud-windows-python] Chocolatey was not found. Installing Chocolatey...
+powershell -NoProfile -ExecutionPolicy Bypass -Command "Set-ExecutionPolicy Bypass -Scope Process -Force; [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.ServicePointManager]::SecurityProtocol -bor 3072; iex ((New-Object System.Net.WebClient).DownloadString('https://community.chocolatey.org/install.ps1'))"
+if errorlevel 1 (
+  echo [dcloud-windows-python] ERROR: Chocolatey installation failed.
+  exit /b 1
+)
+set "PATH=%ProgramData%\chocolatey\bin;%PATH%"
+where choco >nul 2>nul
+if errorlevel 1 (
+  echo [dcloud-windows-python] ERROR: Chocolatey was installed, but choco.exe is not available yet.
+  echo Please open a new Administrator CMD window and run the command again.
+  exit /b 1
+)
+exit /b 0
+
+:add_known_python_paths
+if exist "%LocalAppData%\Microsoft\WindowsApps" set "PATH=%LocalAppData%\Microsoft\WindowsApps;%PATH%"
+if exist "%LocalAppData%\Programs\Python\Python314" set "PATH=%LocalAppData%\Programs\Python\Python314;%LocalAppData%\Programs\Python\Python314\Scripts;%PATH%"
+if exist "%LocalAppData%\Programs\Python\Python313" set "PATH=%LocalAppData%\Programs\Python\Python313;%LocalAppData%\Programs\Python\Python313\Scripts;%PATH%"
+if exist "%LocalAppData%\Programs\Python\Python312" set "PATH=%LocalAppData%\Programs\Python\Python312;%LocalAppData%\Programs\Python\Python312\Scripts;%PATH%"
+if exist "%LocalAppData%\Programs\Python\Python311" set "PATH=%LocalAppData%\Programs\Python\Python311;%LocalAppData%\Programs\Python\Python311\Scripts;%PATH%"
+if exist "%LocalAppData%\Programs\Python\Python310" set "PATH=%LocalAppData%\Programs\Python\Python310;%LocalAppData%\Programs\Python\Python310\Scripts;%PATH%"
+if exist "%ProgramFiles%\Python314" set "PATH=%ProgramFiles%\Python314;%ProgramFiles%\Python314\Scripts;%PATH%"
+if exist "%ProgramFiles%\Python313" set "PATH=%ProgramFiles%\Python313;%ProgramFiles%\Python313\Scripts;%PATH%"
+if exist "%ProgramFiles%\Python312" set "PATH=%ProgramFiles%\Python312;%ProgramFiles%\Python312\Scripts;%PATH%"
+if exist "%ProgramFiles%\Python311" set "PATH=%ProgramFiles%\Python311;%ProgramFiles%\Python311\Scripts;%PATH%"
+if exist "%ProgramFiles%\Python310" set "PATH=%ProgramFiles%\Python310;%ProgramFiles%\Python310\Scripts;%PATH%"
+if exist "%ProgramData%\chocolatey\bin" set "PATH=%ProgramData%\chocolatey\bin;%PATH%"
 exit /b 0
 
 :start_service

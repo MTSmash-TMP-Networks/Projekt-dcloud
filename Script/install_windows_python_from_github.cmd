@@ -4,7 +4,7 @@ setlocal EnableExtensions
 rem dcloud native Windows Python GitHub bootstrap installer for cmd.exe
 rem Downloads the project archive from GitHub with curl and starts the Python installer.
 rem This variant does not use Docker, WSL2 or virtualization.
-rem Python must already be installed on Windows.
+rem If Python is missing, the local installer can install it automatically via winget or Chocolatey.
 rem
 rem Recommended one-liner in Windows CMD:
 rem   curl.exe -fsSL https://raw.githubusercontent.com/MTSmash-TMP-Networks/Projekt-dcloud/main/Script/install_windows_python_from_github.cmd -o "%TEMP%\install_dcloud_windows_python.cmd" && cmd /c "%TEMP%\install_dcloud_windows_python.cmd"
@@ -15,6 +15,8 @@ rem   set DCLOUD_DASHBOARD_PORT=8787
 rem   set DCLOUD_STORAGE_LIMIT_GB=200
 rem   set DCLOUD_WINDOWS_APP_DIR=%LOCALAPPDATA%\dcloud\app
 rem   set DCLOUD_WINDOWS_DATA_DIR=%LOCALAPPDATA%\dcloud\data
+rem   set DCLOUD_AUTO_INSTALL_PYTHON=1
+rem   set DCLOUD_PYTHON_WINGET_ID=Python.Python.3.12
 
 if not defined DCLOUD_GITHUB_OWNER set "DCLOUD_GITHUB_OWNER=MTSmash-TMP-Networks"
 if not defined DCLOUD_GITHUB_REPO set "DCLOUD_GITHUB_REPO=Projekt-dcloud"
