@@ -10,7 +10,7 @@ declare(strict_types=1);
  * Landing page intentionally reveals only minimal information.
  */
 
-const DCLOUD_RELAY_VERSION = '1.6.0-security';
+const DCLOUD_RELAY_VERSION = '1.6.1-chat-alias';
 const DCLOUD_RELAY_TOKEN_ROTATION_SECONDS = 86400;
 const DCLOUD_PEER_TTL_SECONDS = 45;
 const DCLOUD_MESSAGE_TTL_SECONDS = 900;
@@ -1171,6 +1171,8 @@ function dcloud_sanitize_peer($peer, string $nodeId): array {
         'shared_storage_bytes' => max(0, (int)($peer['shared_storage_bytes'] ?? 0)),
         'free_storage_bytes' => max(0, (int)($peer['free_storage_bytes'] ?? 0)),
         'accepts_peer_storage' => !empty($peer['accepts_peer_storage']),
+        'chat_enabled' => array_key_exists('chat_enabled', $peer) ? !empty($peer['chat_enabled']) : true,
+        'chat_alias' => substr(trim(preg_replace('/[\r\n\t]+/', ' ', (string)($peer['chat_alias'] ?? ''))), 0, 48),
         'relay_url' => $relayUrls[0] ?? '',
         'relay_urls' => $relayUrls,
         'relay_tokens' => dcloud_sanitize_relay_tokens($peer['relay_tokens'] ?? []),
@@ -1667,7 +1669,7 @@ function dcloud_register(array $input): void {
     $peer = $input['peer'] ?? null;
 
     if (!is_array($peer)) {
-        foreach (['public_key', 'name', 'udp_port', 'web_port', 'client_type', 'shared_storage_bytes', 'free_storage_bytes', 'accepts_peer_storage', 'relay_url', 'relay_urls'] as $key) {
+        foreach (['public_key', 'name', 'udp_port', 'web_port', 'client_type', 'shared_storage_bytes', 'free_storage_bytes', 'accepts_peer_storage', 'chat_enabled', 'chat_alias', 'relay_url', 'relay_urls'] as $key) {
             if (array_key_exists($key, $input)) {
                 $peer = $input;
                 break;
@@ -1697,10 +1699,13 @@ function dcloud_register(array $input): void {
 
         $existing = isset($peers[$nodeId]) && is_array($peers[$nodeId]) ? $peers[$nodeId] : [];
         $sanitized = dcloud_sanitize_peer($peer, $nodeId);
+        if (!array_key_exists('chat_enabled', $peer) && array_key_exists('chat_enabled', $existing)) {
+            $sanitized['chat_enabled'] = !empty($existing['chat_enabled']);
+        }
 
         $sanitized['public_ip'] = dcloud_public_client_ip();
 
-        foreach (['public_key', 'client_type', 'shared_storage_bytes', 'free_storage_bytes', 'accepts_peer_storage', 'relay_url', 'relay_urls', 'relay_tokens', 'web_port', 'udp_port', 'public_ip'] as $key) {
+        foreach (['public_key', 'client_type', 'shared_storage_bytes', 'free_storage_bytes', 'accepts_peer_storage', 'chat_alias', 'relay_url', 'relay_urls', 'relay_tokens', 'web_port', 'udp_port', 'public_ip'] as $key) {
             $newValue = $sanitized[$key] ?? null;
             $emptyNewValue = $newValue === null || $newValue === '' || $newValue === [] || $newValue === 0 || $newValue === false;
             if ($emptyNewValue && array_key_exists($key, $existing)) {

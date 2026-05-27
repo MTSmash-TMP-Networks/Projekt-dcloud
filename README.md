@@ -1,5 +1,9 @@
 # dcloud – dezentraler Desktop-Speicher mit Peer-Replikation
 
+### v40 Chat-Alias über PHP-Relay
+
+Der PHP-Relay und die Python-Relay-Alternative übertragen jetzt auch `chat_enabled` und `chat_alias` in den Peer-Metadaten. Dadurch wird der Chat-Alias auch bei Peers korrekt angezeigt, die nur über das PHP-Relay sichtbar sind. Vorhandene Relay-Installationen müssen dafür die aktuelle `relay/dcloud_relay.php` aus diesem Paket bekommen.
+
 ### v38 Schnellbefehl-Tasten entfernt
 
 Die globalen Tastatur-Schnellbefehle im Dashboard und im Datei-Explorer sind entfernt.

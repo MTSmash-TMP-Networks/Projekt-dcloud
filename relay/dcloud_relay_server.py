@@ -35,7 +35,7 @@ except Exception:  # pragma: no cover - optional for tiny relay deployments
     InvalidSignature = Exception  # type: ignore[assignment]
 from urllib import error as urlerror, request as urlrequest
 
-VERSION = "py-1.1.1"
+VERSION = "py-1.1.2-chat-alias"
 TOKEN_ROTATION_SECONDS = 86400
 PEER_TTL_SECONDS = 45
 MESSAGE_TTL_SECONDS = 900
@@ -205,6 +205,8 @@ def sanitize_peer(peer: Any, node_id: str) -> dict[str, Any]:
         "shared_storage_bytes": max(0, int(peer.get("shared_storage_bytes") or 0)),
         "free_storage_bytes": max(0, int(peer.get("free_storage_bytes") or 0)),
         "accepts_peer_storage": bool(peer.get("accepts_peer_storage")),
+        "chat_enabled": bool(peer.get("chat_enabled", True)),
+        "chat_alias": str(peer.get("chat_alias") or "").replace("\r", " ").replace("\n", " ").replace("\t", " ").strip()[:48],
         "relay_url": relay_urls[0] if relay_urls else "",
         "relay_urls": relay_urls,
         "relay_tokens": peer.get("relay_tokens", []) if isinstance(peer.get("relay_tokens"), list) else [],
@@ -251,7 +253,10 @@ class Handler(BaseHTTPRequestHandler):
             self.wfile.write(body)
 
     def do_GET(self) -> None:  # noqa: N802
-        self._json(({"ok": True, "version": VERSION, "time": _now(), "token_public": False, **current_token_payload()} if relay_signature_valid(data) else {"ok": True, "version": VERSION, "time": _now(), "token_public": False}))
+        # GET is intentionally informational only. Signed/token-bearing health
+        # checks use POST so the relay token is never exposed by a casual URL
+        # fetch or browser preview.
+        self._json({"ok": True, "version": VERSION, "time": _now(), "token_public": False})
 
     def do_HEAD(self) -> None:  # noqa: N802
         self.do_GET()
@@ -300,9 +305,12 @@ class Handler(BaseHTTPRequestHandler):
         now = _now()
         peers = {nid: p for nid, p in peers.items() if isinstance(p, dict) and now - int(p.get("relay_seen_at") or 0) <= PEER_TTL_SECONDS}
         existing = peers.get(node_id, {}) if isinstance(peers.get(node_id), dict) else {}
-        peer = sanitize_peer(data.get("peer"), node_id)
+        raw_peer = data.get("peer")
+        peer = sanitize_peer(raw_peer, node_id)
+        if not (isinstance(raw_peer, dict) and "chat_enabled" in raw_peer) and "chat_enabled" in existing:
+            peer["chat_enabled"] = bool(existing.get("chat_enabled"))
         peer["public_ip"] = str(self.client_address[0] if self.client_address else "")[:80]
-        for key in ("public_key", "client_type", "shared_storage_bytes", "free_storage_bytes", "accepts_peer_storage", "relay_url", "relay_urls", "web_port", "udp_port", "public_ip"):
+        for key in ("public_key", "client_type", "shared_storage_bytes", "free_storage_bytes", "accepts_peer_storage", "chat_alias", "relay_url", "relay_urls", "web_port", "udp_port", "public_ip"):
             if peer.get(key) in (None, "", [], 0, False) and key in existing:
                 peer[key] = existing[key]
         peers[node_id] = peer
