@@ -456,7 +456,11 @@
     .chat-messages{ flex:1; overflow:auto; padding:14px; background:rgba(248,251,255,.72); }
     .chat-msg{ margin-bottom:10px; max-width:78%; padding:9px 11px; border-radius:18px; background:#fff; border:1px solid rgba(136,166,212,.28); box-shadow:0 8px 18px rgba(17,54,104,.08); white-space:pre-wrap; }
     .chat-msg.out{ margin-left:auto; background:linear-gradient(135deg,#e8f2ff,#d9ebff); }
-    .chat-meta{ display:block; margin-top:5px; font-size:.72rem; color:#668; white-space:nowrap; }
+    .chat-meta{ display:flex; justify-content:flex-end; align-items:center; gap:6px; margin-top:5px; font-size:.72rem; color:#668; white-space:nowrap; }
+    .chat-status{ font-weight:800; letter-spacing:-1px; color:#7b8798; }
+    .chat-status.sent{ color:#5c7cfa; }
+    .chat-status.read{ color:#15aabf; }
+    .chat-status.failed{ color:#d9480f; }
     .chat-attachment{ margin-top:8px; border-radius:14px; overflow:hidden; border:1px solid rgba(91,144,231,.24); background:rgba(255,255,255,.62); }
     .chat-attachment img{ display:block; max-width:260px; max-height:220px; object-fit:cover; }
     .chat-file-card{ display:flex; gap:9px; align-items:center; padding:9px 10px; text-decoration:none; color:#173053; }
@@ -631,7 +635,7 @@
       <button class="desk-item app-icon" data-app="users" type="button" id="users-app-icon">
         <span class="glyph">👥</span><span class="label">Benutzer</span>
       </button>
-      <button class="desk-item app-icon" data-app="chat" type="button">
+      <button class="desk-item app-icon" data-app="chat" id="chat-app-icon" type="button">
         <span class="glyph">💬</span><span class="label">Peer-Chat</span><span class="badge-dot" id="chat-app-badge" hidden>1</span>
       </button>
     </div>
@@ -899,6 +903,16 @@
               <button type="button" class="explorer-btn" id="recovery-upload-token">Token-Datei hochladen & wiederherstellen</button>
               <input type="file" id="recovery-upload-token-file" accept=".json,.txt,.dcloud,.token,application/json,text/plain" hidden>
             </div>
+          </section>
+
+          <section class="settings-panel">
+            <h3>Peer-Chat</h3>
+            <label style="display:flex;align-items:center;gap:.45rem;">
+              <input id="settings-chat-enabled" type="checkbox" name="chat_enabled" {% if settings_json.chatEnabled %}checked{% endif %}> Chat-App auf diesem Peer aktivieren
+            </label>
+            <label for="settings-chat-alias">Chat-Alias</label>
+            <input id="settings-chat-alias" type="text" name="chat_alias" maxlength="48" value="{{ settings_json.chatAlias }}" placeholder="Name, der im Chat angezeigt wird">
+            <p class="settings-note">Wenn der Chat deaktiviert ist, verschwindet die Chat-App auf diesem Peer und andere Peers können diesen Knoten nicht als Chat-Ziel auswählen. Der Peer speichert und repliziert Dateien weiterhin normal.</p>
           </section>
 
           <section class="settings-panel">
@@ -1799,7 +1813,7 @@
           const data = await response.json();
           if(data.ok){
             chatSummary = data;
-            updateChatBadge(data.total_unread);
+            updateChatBadge(data.chat_enabled === false ? 0 : data.total_unread);
             renderChatPeers();
           }
         }catch(error){}
@@ -2118,6 +2132,14 @@
         const currentUser = auth.currentUser || {};
         if(trayUser) trayUser.textContent = `Benutzer: ${currentUser.username || "-"}`;
         if(usersAppIcon) usersAppIcon.hidden = !auth.isAdmin;
+        const chatEnabled = settings.chatEnabled !== false;
+        const chatAppIcon = document.getElementById("chat-app-icon");
+        if(chatAppIcon) chatAppIcon.hidden = !chatEnabled;
+        if(!chatEnabled && windows.chat && !windows.chat.hidden){ windows.chat.hidden = true; updateTaskbar(); }
+        const chatEnabledInput = document.getElementById("settings-chat-enabled");
+        if(chatEnabledInput && document.activeElement !== chatEnabledInput && !settingsFormDirty) chatEnabledInput.checked = chatEnabled;
+        const chatAliasInput = document.getElementById("settings-chat-alias");
+        if(chatAliasInput && document.activeElement !== chatAliasInput && !settingsFormDirty) chatAliasInput.value = settings.chatAlias || settings.nodeDisplayName || settings.nodeName || "";
         document.getElementById("recovery-panel")?.toggleAttribute("hidden", !auth.isAdmin);
         document.getElementById("tray-restart")?.toggleAttribute("hidden", !auth.isAdmin);
         document.getElementById("users-restart-btn")?.toggleAttribute("hidden", !auth.isAdmin);
@@ -2383,10 +2405,14 @@
       function renderChatPeers(){
         const list = document.getElementById("chat-peer-list");
         if(!list) return;
-        const peers = appState.peers || [];
+        if((appState.settings || {}).chatEnabled === false || chatSummary.chat_enabled === false){
+          list.innerHTML = "Chat ist auf diesem Peer deaktiviert.";
+          return;
+        }
+        const peers = (appState.peers || []).filter(peer => peer.chat_enabled !== false);
         const summaryByPeer = new Map((chatSummary.conversations || []).map(item => [item.peer_id, item]));
         list.innerHTML = "";
-        if(!peers.length){ list.textContent = "Keine aktiven Peers."; return; }
+        if(!peers.length){ list.textContent = "Keine aktiven Chat-Peers."; return; }
         if(!activeChatPeerId || !peers.some(peer => peer.node_id === activeChatPeerId)) activeChatPeerId = peers[0].node_id;
         peers.forEach(peer => {
           const summary = summaryByPeer.get(peer.node_id) || {};
@@ -2395,7 +2421,7 @@
           btn.className = "chat-peer-btn" + (activeChatPeerId === peer.node_id ? " active" : "");
           const name = document.createElement("span");
           name.className = "chat-peer-name";
-          name.textContent = peer.display_name || peer.name || String(peer.node_id || "Peer").slice(0, 12);
+          name.textContent = peer.chat_alias || summary.display_name || peer.display_name || peer.name || String(peer.node_id || "Peer").slice(0, 12);
           const preview = document.createElement("span");
           preview.className = "chat-peer-preview";
           preview.textContent = chatPreview(summary.last_message);
@@ -2452,7 +2478,17 @@
           renderChatAttachment(bubble, msg.attachment);
           const meta = document.createElement("span");
           meta.className = "chat-meta";
-          meta.textContent = (msg.direction === "out" ? "Gesendet" : "Empfangen") + " · " + formatDateTime(msg.created_at);
+          const label = document.createElement("span");
+          label.textContent = (msg.direction === "out" ? "Gesendet" : "Empfangen") + " · " + formatDateTime(msg.created_at);
+          meta.appendChild(label);
+          if(msg.direction === "out"){
+            const status = String(msg.status || "sent");
+            const ticks = document.createElement("span");
+            ticks.className = "chat-status " + status;
+            ticks.title = status === "read" ? "Gelesen" : status === "sent" ? "Zugestellt" : status === "sending" ? "Wird gesendet" : "Fehlgeschlagen";
+            ticks.textContent = status === "read" ? "✓✓" : status === "sent" ? "✓✓" : status === "failed" ? "!" : "✓";
+            meta.appendChild(ticks);
+          }
           bubble.appendChild(meta);
           box.appendChild(bubble);
         });

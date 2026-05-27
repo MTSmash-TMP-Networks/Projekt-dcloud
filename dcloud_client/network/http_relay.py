@@ -682,6 +682,8 @@ def peer_from_relay_payload(raw: object, *, relay_url: str, own_node_id: str | N
         free_storage_bytes=optional_int("free_storage_bytes"),
         relay_url=relay_url.rstrip("/"),
         public_ip=str(raw.get("public_ip") or raw.get("remote_addr") or "").strip() or None,
+        chat_enabled=bool(raw.get("chat_enabled", True)),
+        chat_alias=str(raw.get("chat_alias") or "").strip() or None,
     )
 
 
@@ -707,6 +709,8 @@ class HttpRelayTransport:
         peer_timeout_seconds: int = 35,
         relay_urls: list[str] | None = None,
         relay_discovery_callback: Callable[[list[str]], None] | None = None,
+        chat_enabled: bool = True,
+        chat_alias: str = "",
     ) -> None:
         self.relay_client = relay_client
         self.relay_url = relay_client.relay_url
@@ -729,6 +733,8 @@ class HttpRelayTransport:
             urls.insert(0, self.relay_url)
         self.relay_urls = urls
         self.relay_discovery_callback = relay_discovery_callback
+        self.chat_enabled = bool(chat_enabled)
+        self.chat_alias = str(chat_alias or "")
         self.last_error: str | None = None
         self.last_success_at: float | None = None
         self.active_request_workers = 0
@@ -806,6 +812,8 @@ class HttpRelayTransport:
             "shared_storage_bytes": self.shared_storage_bytes,
             "free_storage_bytes": self.free_storage_bytes,
             "accepts_peer_storage": self.accepts_peer_storage,
+            "chat_enabled": bool(self.chat_enabled),
+            "chat_alias": self.chat_alias,
             "relay_url": self.relay_url,
             "relay_urls": self.relay_urls,
             # Distributed as metadata so clients can see which relay day-token a

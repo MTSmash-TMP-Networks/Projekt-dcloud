@@ -1,5 +1,11 @@
 # dcloud – dezentraler Desktop-Speicher mit Peer-Replikation
 
+### Chat steuerbar pro Peer
+
+Unter **Einstellungen → Peer-Chat** kann die Chat-App pro Peer aktiviert oder deaktiviert werden.
+Zusätzlich kann ein **Chat-Alias** gesetzt werden; dieser Alias wird anderen Peers als Anzeigename im Chat angekündigt.
+Nachrichten erscheinen lokal sofort mit Statushaken: ein Haken = wird gesendet, zwei Haken = zugestellt, farbige zwei Haken = gelesen.
+
 ### Live-Netzwerklast im Dashboard
 
 Unter **Netzwerk** zeigt dcloud jetzt eine Live-Netzwerklast mit Up-/Downloadrate, Gesamtlast, Ø Last pro aktivem Peer und einem Verlaufsgrafen.
@@ -34,7 +40,7 @@ dcloud ist ein Python-basierter Storage-Client mit Web-Dashboard im Desktop-Stil
 - PHP-Forwarder für direkte Peer-API-Aufrufe, Mailbox-Fallback für NAT-Fälle
 - Temporäre externe Download-Links mit maximal 60 Minuten Laufzeit
 - Reverse-Mailbox-Download über Relay, wenn der Node von außen nicht direkt erreichbar ist
-- Peer-Chat mit ungelesen-Badge, Emojis, Bildversand und Datei-Teilen
+- Peer-Chat optional pro Peer aktivierbar, mit Alias, ungelesen-Badge, Emojis, Bildversand, Datei-Teilen und Zustell-/Lesestatus
 - Interner Dashboard-Browser mit Server-Proxy, `peername.dcloud`-Auflösung, normalem Webzugriff, JavaScript-Unterstützung, aktualisierender Adressleiste, Ladeindikator, proxy-tauglicher Suchfunktion, lokalem `storage/web`-Hosting und Download-Ablage in `storage/Downloads`
 - Lokaler Web-Ordner `storage/web` als Datei-Explorer-Spezialordner `web`, inkl. Upload, Unterordnern, Texteditor und optionaler PHP-Ausführung über `php-cgi`/`php`
 - Standardordner `storage/Downloads` als Datei-Explorer-Spezialordner **Downloads**; Downloads aus dem Dashboard-Browser werden dort serverseitig gespeichert
@@ -213,8 +219,12 @@ Für ausgelagerte Dateien bleibt das System RAID-1-artig: Wenn Peers verschwinde
 
 Der Chat ist peerbasiert:
 
-- rote Badge nur bei ungelesenen Nachrichten größer `0`
-- ungelesene Nachrichten werden beim Öffnen des Chats als gelesen markiert
+- kann unter **Einstellungen → Peer-Chat** pro Peer aktiviert oder deaktiviert werden
+- Chat-Alias wird als Anzeigename in Chat-Listen und Nachrichten verwendet
+- Peers mit deaktiviertem Chat werden nicht als Chat-Ziel angezeigt
+- Nachrichten werden lokal sofort eingetragen und danach im Hintergrund zugestellt
+- Statushaken: `✓` = wird gesendet, `✓✓` = zugestellt, farbige `✓✓` = gelesen
+- ungelesene Nachrichten werden beim Öffnen des Chats als gelesen markiert und als Lesebestätigung zurückgemeldet
 - Emoji-Auswahl im Eingabebereich
 - Bildversand mit Vorschau in der Chat-Bubble
 - Datei-Teilen über grafische Dateiauswahl statt ID-Eingabe

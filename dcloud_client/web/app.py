@@ -367,6 +367,13 @@ def create_app(
     disabled_peers: dict[str, dict[str, Any]] = {}
     chat_messages: dict[str, deque[dict[str, Any]]] = defaultdict(lambda: deque(maxlen=240))
     chat_unread: dict[str, int] = defaultdict(int)
+    chat_lock = threading.RLock()
+    chat_delivery_queue: deque[dict[str, Any]] = deque()
+    chat_delivery_event = threading.Event()
+    chat_delivery_lock = threading.RLock()
+    chat_delivery_worker_started = False
+    chat_settings_path = chunk_store.root / "chat_settings.json"
+    chat_settings: dict[str, Any] = {"enabled": True, "alias": ""}
     replication_repair_lock = threading.Lock()
     last_replication_repair_at = 0.0
     replication_queue: deque[dict[str, Any]] = deque()
@@ -1769,6 +1776,46 @@ def create_app(
     _ensure_web_root()
     _ensure_browser_downloads_root()
 
+    def _sanitize_chat_alias(value: Any) -> str:
+        alias = str(value or "").strip()
+        alias = re.sub(r"[\r\n\t]+", " ", alias)
+        alias = re.sub(r"\s{2,}", " ", alias)
+        return alias[:48]
+
+    def _default_chat_alias() -> str:
+        return display_name_for_peer(identity.node_id, config.node.name)
+
+    def _load_chat_settings() -> None:
+        nonlocal chat_settings
+        try:
+            with chat_settings_path.open("r", encoding="utf-8") as handle:
+                raw = json.load(handle)
+            if not isinstance(raw, dict):
+                raise ValueError("invalid chat settings")
+            chat_settings = {
+                "enabled": bool(raw.get("enabled", True)),
+                "alias": _sanitize_chat_alias(raw.get("alias") or ""),
+            }
+        except FileNotFoundError:
+            chat_settings = {"enabled": True, "alias": ""}
+        except Exception:
+            chat_settings = {"enabled": True, "alias": ""}
+
+    def _persist_chat_settings() -> None:
+        chat_settings_path.parent.mkdir(parents=True, exist_ok=True)
+        payload = json.dumps(chat_settings, ensure_ascii=False, indent=2, sort_keys=True)
+        tmp_path = chat_settings_path.with_suffix(".tmp")
+        tmp_path.write_text(payload, encoding="utf-8")
+        tmp_path.replace(chat_settings_path)
+
+    def _chat_enabled() -> bool:
+        return bool(chat_settings.get("enabled", True))
+
+    def _chat_alias() -> str:
+        return _sanitize_chat_alias(chat_settings.get("alias")) or _default_chat_alias()
+
+    _load_chat_settings()
+
     def _load_disabled_peers() -> None:
         """Load user-disabled peers that discovery must not re-add to the UI."""
         nonlocal disabled_peers
@@ -2563,6 +2610,8 @@ def create_app(
             "relaySecretSet": False,
             "relayTokenMode": "automatic-daily",
             "relayTokenLabel": "Automatisch, tägliche Rotation",
+            "chatEnabled": _chat_enabled(),
+            "chatAlias": _chat_alias(),
             "smbEnabled": bool(config.smb.enabled),
             "smbHost": config.smb.host,
             "smbPort": runtime_smb_port,
@@ -2760,9 +2809,13 @@ def create_app(
                 "web_port": config.web.port,
                 "relay_urls": _relay_url_list(),
                 "relay_discovery_callback": _learn_relay_urls,
+                "chat_enabled": _chat_enabled(),
+                "chat_alias": _chat_alias(),
             }.items():
                 if hasattr(connector, name):
                     setattr(connector, name, value)
+
+    _sync_peer_connector_settings()
 
     def _stream_external_download_to_relay(local_token: str, stream_id: str, relay_client: HttpRelayClient) -> RelayHttpResponse:
         safe_token = "".join(char for char in str(local_token or "") if char.isalnum() or char in "-_")
@@ -2959,6 +3012,8 @@ def create_app(
                     peer_timeout_seconds=getattr(config.network, "peer_timeout_seconds", 35),
                     relay_urls=desired_urls,
                     relay_discovery_callback=_learn_relay_urls,
+                    chat_enabled=_chat_enabled(),
+                    chat_alias=_chat_alias(),
                 )
                 relay_clients[desired_url] = relay_client
                 relay_transports[desired_url] = relay_transport
@@ -3549,22 +3604,41 @@ def create_app(
             limit = 12
         return jsonify({"uploads": upload_progress.list_recent(include_finished=include_finished, limit=limit)})
 
+    def _chat_display_name(peer: Any) -> str:
+        try:
+            peer_dict = peer.to_dict()
+            alias = str(peer_dict.get("chat_alias") or "").strip()
+            if alias:
+                return alias
+            return str(peer_dict.get("display_name") or "").strip() or peer.node_id[:12]
+        except Exception:
+            return display_name_for_peer(getattr(peer, "node_id", ""), getattr(peer, "name", None))
+
+    def _chat_peer_available(peer: Any) -> bool:
+        try:
+            return bool(peer.to_dict().get("chat_enabled", True))
+        except Exception:
+            return bool(getattr(peer, "chat_enabled", True))
+
     def _chat_summary_payload() -> dict[str, Any]:
-        peers = _list_active_peers()
+        if not _chat_enabled():
+            return {"ok": True, "chat_enabled": False, "chat_alias": _chat_alias(), "total_unread": 0, "conversations": []}
+        peers = [peer for peer in _list_active_peers() if _chat_peer_available(peer)]
         conversations = []
         total_unread = 0
-        for peer in peers:
-            messages = list(chat_messages.get(peer.node_id, []))
-            last_message = messages[-1] if messages else None
-            unread = int(chat_unread.get(peer.node_id, 0))
-            total_unread += unread
-            conversations.append({
-                "peer_id": peer.node_id,
-                "display_name": peer.to_dict().get("display_name") or peer.name or peer.node_id[:12],
-                "unread": unread,
-                "last_message": last_message,
-            })
-        return {"ok": True, "total_unread": total_unread, "conversations": conversations}
+        with chat_lock:
+            for peer in peers:
+                messages = list(chat_messages.get(peer.node_id, []))
+                last_message = messages[-1] if messages else None
+                unread = int(chat_unread.get(peer.node_id, 0))
+                total_unread += unread
+                conversations.append({
+                    "peer_id": peer.node_id,
+                    "display_name": _chat_display_name(peer),
+                    "unread": unread,
+                    "last_message": last_message,
+                })
+        return {"ok": True, "chat_enabled": True, "chat_alias": _chat_alias(), "total_unread": total_unread, "conversations": conversations}
 
     def _safe_chat_attachment(payload: dict[str, Any], peer_id: str) -> dict[str, Any] | None:
         attachment = payload.get("attachment")
@@ -3599,28 +3673,172 @@ def create_app(
             }
         raise StorageError("Unbekannter Chat-Anhang")
 
+    def _find_chat_peer(peer_id: str) -> Any | None:
+        return next((item for item in _list_active_peers() if item.node_id == peer_id), None)
+
+    def _set_chat_message_status(peer_id: str, message_id: str, status: str, **extra: Any) -> bool:
+        changed = False
+        with chat_lock:
+            for msg in chat_messages.get(peer_id, []):
+                if str(msg.get("id")) == message_id:
+                    msg["status"] = status
+                    msg.update({key: value for key, value in extra.items() if value is not None})
+                    changed = True
+                    break
+        return changed
+
+    def _enqueue_chat_delivery(peer_id: str, payload: dict[str, Any], *, attempt: int = 0) -> None:
+        with chat_delivery_lock:
+            chat_delivery_queue.append({
+                "peer_id": peer_id,
+                "payload": payload,
+                "attempt": int(attempt),
+                "next_at": time.time(),
+            })
+            chat_delivery_event.set()
+        _ensure_chat_delivery_worker()
+
+    def _ensure_chat_delivery_worker() -> None:
+        nonlocal chat_delivery_worker_started
+        if chat_delivery_worker_started:
+            return
+        with chat_delivery_lock:
+            if chat_delivery_worker_started:
+                return
+            chat_delivery_worker_started = True
+        worker = threading.Thread(target=_chat_delivery_worker_loop, name="chat-delivery", daemon=True)
+        worker.start()
+
+    def _chat_delivery_worker_loop() -> None:
+        while True:
+            chat_delivery_event.wait(timeout=10.0)
+            chat_delivery_event.clear()
+            while True:
+                item: dict[str, Any] | None = None
+                with chat_delivery_lock:
+                    now = time.time()
+                    for idx, candidate in enumerate(list(chat_delivery_queue)):
+                        if float(candidate.get("next_at") or 0) <= now:
+                            item = candidate
+                            try:
+                                del chat_delivery_queue[idx]
+                            except Exception:
+                                pass
+                            break
+                    if item is None:
+                        next_times = [float(candidate.get("next_at") or 0) for candidate in chat_delivery_queue]
+                        if next_times:
+                            delay = max(0.5, min(10.0, min(next_times) - time.time()))
+                            threading.Timer(delay, chat_delivery_event.set).start()
+                        break
+                if item is not None:
+                    _deliver_chat_queue_item(item)
+
+    def _deliver_chat_queue_item(item: dict[str, Any]) -> None:
+        peer_id = str(item.get("peer_id") or "").strip()
+        payload = item.get("payload") if isinstance(item.get("payload"), dict) else {}
+        message_id = str(payload.get("id") or "").strip()
+        if not peer_id or not message_id:
+            return
+        peer = _find_chat_peer(peer_id)
+        if peer is None or not _chat_peer_available(peer):
+            attempt = int(item.get("attempt") or 0) + 1
+            if attempt <= 10:
+                item["attempt"] = attempt
+                item["next_at"] = time.time() + min(300, 3 * attempt * attempt)
+                with chat_delivery_lock:
+                    chat_delivery_queue.append(item)
+            else:
+                _set_chat_message_status(peer_id, message_id, "failed", error="Peer ist nicht erreichbar oder Chat ist deaktiviert")
+            return
+        transfer = p2p_client._post_json_to_peer(  # noqa: SLF001
+            peer,
+            path="/api/p2p/chat",
+            payload=payload,
+            success_message="chat delivered",
+            log_message="Chat message to peer %s failed",
+        )
+        if transfer.ok:
+            _set_chat_message_status(peer_id, message_id, "sent", delivered_at=datetime.now(timezone.utc).isoformat())
+            return
+        attempt = int(item.get("attempt") or 0) + 1
+        if attempt <= 10:
+            item["attempt"] = attempt
+            item["next_at"] = time.time() + min(300, 3 * attempt * attempt)
+            with chat_delivery_lock:
+                chat_delivery_queue.append(item)
+            chat_delivery_event.set()
+        else:
+            _set_chat_message_status(peer_id, message_id, "failed", error=transfer.message or "Zustellung fehlgeschlagen")
+
+    def _send_chat_read_receipt(peer_id: str, message_ids: list[str]) -> None:
+        if not message_ids:
+            return
+        peer = _find_chat_peer(peer_id)
+        if peer is None or not _chat_peer_available(peer):
+            return
+        payload = {
+            "from_node_id": identity.node_id,
+            "to_node_id": peer_id,
+            "message_ids": list(dict.fromkeys(message_ids))[:100],
+            "read_at": datetime.now(timezone.utc).isoformat(),
+        }
+        def worker() -> None:
+            try:
+                p2p_client._post_json_to_peer(  # noqa: SLF001
+                    peer,
+                    path="/api/p2p/chat/read-receipt",
+                    payload=payload,
+                    success_message="chat read receipt delivered",
+                    log_message="Chat read receipt to peer %s failed",
+                )
+            except Exception:
+                pass
+        threading.Thread(target=worker, name="chat-read-receipt", daemon=True).start()
+
     @app.get("/api/chat/summary")
     def api_chat_summary() -> Response:
         return jsonify(_chat_summary_payload())
 
     @app.get("/api/chat")
     def api_chat_list() -> Response:
+        if not _chat_enabled():
+            return jsonify({"ok": False, "message": "Chat ist auf diesem Peer deaktiviert", "chat_enabled": False}), 403
         peer_id = str(request.args.get("peer_id", "")).strip()
         if not peer_id:
             return jsonify({"ok": False, "message": "peer_id fehlt"}), 400
-        chat_unread[peer_id] = 0
-        return jsonify({"ok": True, "peerId": peer_id, "messages": list(chat_messages.get(peer_id, [])), "summary": _chat_summary_payload()})
+        read_ids: list[str] = []
+        with chat_lock:
+            for msg in chat_messages.get(peer_id, []):
+                if msg.get("direction") == "in" and not msg.get("read_at"):
+                    msg["read_at"] = datetime.now(timezone.utc).isoformat()
+                    read_ids.append(str(msg.get("id")))
+            chat_unread[peer_id] = 0
+            messages = list(chat_messages.get(peer_id, []))
+        _send_chat_read_receipt(peer_id, read_ids)
+        return jsonify({"ok": True, "peerId": peer_id, "messages": messages, "summary": _chat_summary_payload()})
 
     @app.post("/api/chat/read")
     def api_chat_mark_read() -> Response:
+        if not _chat_enabled():
+            return jsonify({"ok": False, "message": "Chat ist auf diesem Peer deaktiviert", "chat_enabled": False}), 403
         payload = request.get_json(silent=True) or {}
         peer_id = str(payload.get("peer_id", "")).strip()
+        read_ids: list[str] = []
         if peer_id:
-            chat_unread[peer_id] = 0
+            with chat_lock:
+                for msg in chat_messages.get(peer_id, []):
+                    if msg.get("direction") == "in" and not msg.get("read_at"):
+                        msg["read_at"] = datetime.now(timezone.utc).isoformat()
+                        read_ids.append(str(msg.get("id")))
+                chat_unread[peer_id] = 0
+            _send_chat_read_receipt(peer_id, read_ids)
         return jsonify(_chat_summary_payload())
 
     @app.post("/api/chat/send")
     def api_chat_send() -> Response:
+        if not _chat_enabled():
+            return jsonify({"ok": False, "message": "Chat ist auf diesem Peer deaktiviert", "chat_enabled": False}), 403
         payload = request.get_json(silent=True) or {}
         peer_id = str(payload.get("peer_id", "")).strip()
         text = str(payload.get("text", "")).strip()
@@ -3633,31 +3851,26 @@ def create_app(
             return jsonify({"ok": False, "message": str(exc)}), 400
         if not text and not attachment:
             return jsonify({"ok": False, "message": "Nachricht oder Anhang erforderlich"}), 400
-        peers = _list_active_peers()
-        peer = next((item for item in peers if item.node_id == peer_id), None)
+        peer = _find_chat_peer(peer_id)
         if peer is None:
             return jsonify({"ok": False, "message": "Peer ist nicht aktiv erreichbar"}), 404
+        if not _chat_peer_available(peer):
+            return jsonify({"ok": False, "message": "Dieser Peer hat den Chat deaktiviert"}), 409
         now = datetime.now(timezone.utc).isoformat()
         outgoing = {
             "id": uuid4().hex,
             "from_node_id": identity.node_id,
+            "from_alias": _chat_alias(),
             "to_node_id": peer_id,
             "text": text,
             "attachment": attachment,
             "created_at": now,
         }
-        transfer = p2p_client._post_json_to_peer(  # noqa: SLF001
-            peer,
-            path="/api/p2p/chat",
-            payload=outgoing,
-            success_message="chat delivered",
-            log_message="Chat message to peer %s failed",
-        )
-        if not transfer.ok:
-            return jsonify({"ok": False, "message": transfer.message or "Chat konnte nicht zugestellt werden"}), 502
-        local_event = {**outgoing, "direction": "out"}
-        chat_messages[peer_id].append(local_event)
-        return jsonify({"ok": True, "message": local_event, "summary": _chat_summary_payload()})
+        local_event = {**outgoing, "direction": "out", "status": "sending"}
+        with chat_lock:
+            chat_messages[peer_id].append(local_event)
+        _enqueue_chat_delivery(peer_id, outgoing)
+        return jsonify({"ok": True, "queued": True, "message": local_event, "summary": _chat_summary_payload()})
 
     def _requested_storage_peers() -> list[Any]:
         available_peers = _eligible_storage_peers()
@@ -4324,6 +4537,9 @@ def create_app(
                 compression_min_savings_percent=request.form.get("compression_min_savings_percent", str(config.storage.compression.min_savings_percent)),
                 compression_skip_incompressible=request.form.get("compression_skip_incompressible") == "on",
             )
+            chat_settings["enabled"] = request.form.get("chat_enabled") == "on"
+            chat_settings["alias"] = _sanitize_chat_alias(request.form.get("chat_alias") or "")
+            _persist_chat_settings()
             chunk_store.limit_bytes = config.storage.limit_bytes
             chunk_store.configure_compression(
                 mode=config.storage.compression.mode,
@@ -5462,13 +5678,18 @@ def create_app(
 
     @app.post("/api/p2p/chat")
     def p2p_chat_message() -> Response:
+        if not _chat_enabled():
+            return jsonify({"ok": False, "message": "Chat ist auf diesem Peer deaktiviert"}), 403
         payload = request.get_json(silent=True) or {}
         from_node_id = str(payload.get("from_node_id", "")).strip()
         to_node_id = str(payload.get("to_node_id", "")).strip()
+        verified_node_id = str(request.environ.get("dcloud.p2p_node_id") or "").strip()
         text = str(payload.get("text", "")).strip()
         attachment = payload.get("attachment") if isinstance(payload.get("attachment"), dict) else None
         if not from_node_id or not to_node_id or (not text and not attachment):
             return jsonify({"ok": False, "message": "Ungültige Chat-Nachricht"}), 400
+        if verified_node_id and verified_node_id != from_node_id:
+            return jsonify({"ok": False, "message": "Chat-Absender stimmt nicht mit P2P-Signatur überein"}), 403
         if to_node_id != identity.node_id:
             return jsonify({"ok": False, "message": "Nachricht war nicht für diesen Peer bestimmt"}), 400
         if attachment and attachment.get("kind") == "image":
@@ -5478,15 +5699,45 @@ def create_app(
         event = {
             "id": str(payload.get("id") or uuid4().hex),
             "from_node_id": from_node_id,
+            "from_alias": _sanitize_chat_alias(payload.get("from_alias") or ""),
             "to_node_id": to_node_id,
             "text": text,
             "attachment": attachment,
-            "created_at": datetime.now(timezone.utc).isoformat(),
+            "created_at": str(payload.get("created_at") or datetime.now(timezone.utc).isoformat()),
+            "received_at": datetime.now(timezone.utc).isoformat(),
             "direction": "in",
+            "status": "received",
         }
-        chat_messages[from_node_id].append(event)
-        chat_unread[from_node_id] += 1
-        return jsonify({"ok": True})
+        with chat_lock:
+            existing_ids = {str(item.get("id")) for item in chat_messages.get(from_node_id, [])}
+            if event["id"] not in existing_ids:
+                chat_messages[from_node_id].append(event)
+                chat_unread[from_node_id] += 1
+        return jsonify({"ok": True, "message_id": event["id"], "received_at": event["received_at"]})
+
+    @app.post("/api/p2p/chat/read-receipt")
+    def p2p_chat_read_receipt() -> Response:
+        if not _chat_enabled():
+            return jsonify({"ok": False, "message": "Chat ist auf diesem Peer deaktiviert"}), 403
+        payload = request.get_json(silent=True) or {}
+        from_node_id = str(payload.get("from_node_id", "")).strip()
+        to_node_id = str(payload.get("to_node_id", "")).strip()
+        verified_node_id = str(request.environ.get("dcloud.p2p_node_id") or "").strip()
+        if verified_node_id and verified_node_id != from_node_id:
+            return jsonify({"ok": False, "message": "Lesebestätigung stimmt nicht mit P2P-Signatur überein"}), 403
+        if to_node_id != identity.node_id:
+            return jsonify({"ok": False, "message": "Lesebestätigung war nicht für diesen Peer bestimmt"}), 400
+        raw_ids = payload.get("message_ids") if isinstance(payload.get("message_ids"), list) else []
+        message_ids = {str(item) for item in raw_ids if str(item)}
+        read_at = str(payload.get("read_at") or datetime.now(timezone.utc).isoformat())
+        updated = 0
+        with chat_lock:
+            for msg in chat_messages.get(from_node_id, []):
+                if msg.get("direction") == "out" and str(msg.get("id")) in message_ids:
+                    msg["status"] = "read"
+                    msg["read_at"] = read_at
+                    updated += 1
+        return jsonify({"ok": True, "updated": updated})
 
     @app.post("/files/<manifest_id>/delete")
     def delete_file(manifest_id: str) -> Response | str:

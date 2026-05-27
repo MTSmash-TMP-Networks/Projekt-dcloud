@@ -66,6 +66,8 @@ class UdpDiscoveryTransport:
         web_port: int | None = None,
         relay_urls: list[str] | None = None,
         relay_discovery_callback: Callable[[list[str]], None] | None = None,
+        chat_enabled: bool = True,
+        chat_alias: str = "",
     ) -> None:
         self.host = host
         self.port = port
@@ -90,6 +92,8 @@ class UdpDiscoveryTransport:
         self.web_port = web_port
         self.relay_urls = normalize_relay_urls(relay_urls or [])
         self.relay_discovery_callback = relay_discovery_callback
+        self.chat_enabled = bool(chat_enabled)
+        self.chat_alias = str(chat_alias or "")
         self.accepts_peer_storage = False
         self._child_node_ids: set[str] = set()
         self._socket: socket.socket | None = None
@@ -186,6 +190,8 @@ class UdpDiscoveryTransport:
                 "shared_storage_bytes": self.shared_storage_bytes,
                 "free_storage_bytes": self.free_storage_bytes,
                 "accepts_peer_storage": self.accepts_peer_storage,
+                "chat_enabled": bool(self.chat_enabled),
+                "chat_alias": self.chat_alias,
                 "relay_urls": self.relay_urls,
                 "target_node_id": peer.node_id,
                 "payload": message,
@@ -353,6 +359,8 @@ class UdpDiscoveryTransport:
             free_storage_bytes=int(message["free_storage_bytes"]) if str(message.get("free_storage_bytes", "")).isdigit() else None,
             relay_url=relay_urls[0] if relay_urls else None,
             public_ip=str(message.get("public_ip") or "").strip() or None,
+            chat_enabled=bool(message.get("chat_enabled", True)),
+            chat_alias=str(message.get("chat_alias") or "").strip() or None,
         )
 
     def _ingest_peer_payload(self, raw_peers: object, sender_node_id: str) -> list[Peer]:
@@ -402,6 +410,8 @@ class UdpDiscoveryTransport:
                 free_storage_bytes=int(raw_peer["free_storage_bytes"]) if str(raw_peer.get("free_storage_bytes", "")).isdigit() else None,
                 relay_url=relay_urls[0] if relay_urls else None,
                 public_ip=str(raw_peer.get("public_ip") or "").strip() or None,
+                chat_enabled=bool(raw_peer.get("chat_enabled", True)),
+                chat_alias=str(raw_peer.get("chat_alias") or "").strip() or None,
             )
         except (KeyError, TypeError, ValueError):
             return None
@@ -469,6 +479,8 @@ class UdpDiscoveryTransport:
             "shared_storage_bytes": self.shared_storage_bytes,
             "free_storage_bytes": self.free_storage_bytes,
             "accepts_peer_storage": self.accepts_peer_storage,
+            "chat_enabled": bool(self.chat_enabled),
+            "chat_alias": self.chat_alias,
             "web_port": self.web_port,
             "relay_urls": self.relay_urls,
             "peers": self._known_peers_payload(for_peer=for_peer),

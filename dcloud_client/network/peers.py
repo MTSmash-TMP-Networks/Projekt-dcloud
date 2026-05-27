@@ -88,6 +88,8 @@ class Peer:
     free_storage_bytes: int | None = None
     relay_url: str | None = None
     public_ip: str | None = None
+    chat_enabled: bool = True
+    chat_alias: str | None = None
     last_seen: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 
     def endpoint_key(self) -> tuple[str, int, str | None]:
@@ -116,6 +118,8 @@ class Peer:
             "free_storage_bytes": self.free_storage_bytes,
             "relay_url": self.relay_url,
             "public_ip": self.public_ip,
+            "chat_enabled": bool(self.chat_enabled),
+            "chat_alias": self.chat_alias,
             "transport": "relay" if self.host == "__relay__" else ("direct+relay" if self.relay_url else "direct"),
             "display_name": display_name_for_peer(self.node_id, self.name),
             "last_seen": self.last_seen.isoformat(),
@@ -188,6 +192,8 @@ class InMemoryPeerProvider:
                 peer.free_storage_bytes = (
                     peer.free_storage_bytes if peer.free_storage_bytes is not None else existing.free_storage_bytes
                 )
+                if peer.chat_alias is None:
+                    peer.chat_alias = existing.chat_alias
 
                 existing_relay_url = existing.relay_url
                 incoming_relay_url = peer.relay_url
