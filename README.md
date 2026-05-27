@@ -207,6 +207,8 @@ Bei ausgelagerten Dateien stellt dcloud fehlende Chunks zuerst über lokale/Peer
 
 Beim Upload wird die Datei zuerst lokal gespeichert und sofort im Dashboard sichtbar. Die Replikation auf Peers läuft danach im Hintergrund. Dadurch blockieren große Dateien nicht mehr den Browser-Upload.
 
+Große Dateien werden im Dashboard automatisch als **Chunk-/Resume-Upload** übertragen. Ab Werk nutzt dcloud diese Methode ab 64 MiB und sendet die Datei in 16-MiB-Teilstücken an den lokalen Node. Dadurch müssen Dateien wie große Tensor-/Modelldateien nicht mehr als einzelner Multipart-Request übertragen werden und Uploads im Bereich von 2 GiB sind deutlich stabiler. Die Werte können bei Bedarf über `DCLOUD_LARGE_UPLOAD_THRESHOLD_BYTES`, `DCLOUD_UPLOAD_CHUNK_BYTES` und `DCLOUD_LARGE_UPLOAD_MAX_BYTES` angepasst werden.
+
 Die Replikation arbeitet jetzt als dynamischer RAID-1-Mirror: Es werden ganze Chunk-Kopien gespiegelt, keine Parity- oder Stripe-Blöcke. Ohne Peers bleibt eine lokale Kopie. Sobald Peers aktiv sind, wird mindestens eine zweite Kopie angestrebt. Kommen mehr Speicher-Peers hinzu, erhöht sich der Mirror-Faktor automatisch bis zum aktuellen Schutzlimit von vier Kopien pro Chunk.
 
 Ablauf:
@@ -1229,10 +1231,12 @@ netstat -ano | findstr "8787 6881 445"
 - Auf Linux/macOS benötigt Port `445` meist Root-Rechte.
 - Testweise einen höheren Port verwenden, zum Beispiel `1445`.
 
-### Upload großer Dateien ist langsam
+### Upload großer Dateien ist langsam oder bricht ab
 
+- Große Dateien werden automatisch in Teilstücken übertragen. Falls ein Reverse Proxy oder Mesh-Agent sehr kleine Request-Limits hat, kann `DCLOUD_UPLOAD_CHUNK_BYTES` reduziert werden, zum Beispiel auf `4194304` für 4 MiB.
 - Upload selbst sollte nach lokaler Speicherung fertig sein; die Peer-Replikation läuft im Hintergrund.
 - Das Transfer-Center erscheint nur während aktiver Uploads/Downloads; Peer-Replikation läuft nach lokaler Speicherung im Hintergrund weiter.
+- Für 2-GiB-Dateien muss auf dem Zielgerät genügend freier Speicher vorhanden sein, weil dcloud während der Verarbeitung temporär die empfangene Datei und danach die gespeicherten Chunks hält.
 - Bei Relay-Peers sind kleinere Pakete absichtlich sicherer, aber langsamer.
 - Für große Datenmengen sind direkte Peers, VPN oder Portfreigabe schneller als Shared-PHP-Relay.
 

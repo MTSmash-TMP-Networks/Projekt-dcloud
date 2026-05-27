@@ -1242,6 +1242,8 @@
     const SHARED_FOLDER = {{ shared_folder | tojson }};
     const WEB_FOLDER = "web";
     const DOWNLOADS_FOLDER = "Downloads";
+    const LARGE_UPLOAD_THRESHOLD_BYTES = {{ large_upload_threshold_bytes | tojson }};
+    const LARGE_UPLOAD_CHUNK_BYTES = {{ large_upload_chunk_bytes | tojson }};
 
     (function(){
       "use strict";
@@ -3316,10 +3318,127 @@
         applyDownloadProgress(payload.progress);
         startDownloadPolling();
       }
+      async function uploadLargeFile(file, folder, doneCallback=null){
+        const targetFolder = normalizeFolderPath(folder || DEFAULT_FOLDER);
+        const uploadId = makeUploadId();
+        currentUploadId = uploadId;
+        trackUploadId(uploadId);
+        showTransfer(file, targetFolder);
+        const controller = new AbortController();
+        currentUploadXhr = controller;
+        startUploadPolling(uploadId);
+        const basePayload = {
+          upload_id: uploadId,
+          file_name: file.name,
+          file_size: file.size,
+          folder: targetFolder,
+          storage_peer_selection_mode: storagePeerSelectionTouched ? "manual" : "auto",
+          storage_peer_node_ids: Array.from(selectedStoragePeerIds)
+        };
+        const jsonHeaders = { "Content-Type":"application/json", "Accept":"application/json", "X-Requested-With":"XMLHttpRequest" };
+        if(csrfToken) jsonHeaders["X-CSRF-Token"] = csrfToken;
+        try{
+          const startResponse = await fetch("/api/uploads/chunk/start", {
+            method:"POST",
+            headers: jsonHeaders,
+            body: JSON.stringify(basePayload),
+            signal: controller.signal
+          });
+          const startPayload = await startResponse.json().catch(() => null);
+          if(!startResponse.ok || !startPayload || !startPayload.ok){
+            throw new Error((startPayload && startPayload.message) || "Großer Upload konnte nicht gestartet werden");
+          }
+          const chunkSize = Math.max(1024 * 1024, Number(startPayload.chunkSize || LARGE_UPLOAD_CHUNK_BYTES || (16 * 1024 * 1024)));
+          let offset = Math.max(0, Number(startPayload.receivedBytes || 0));
+          let chunkIndex = Math.floor(offset / chunkSize);
+          document.getElementById("transfer-subtitle").textContent = "Große Datei wird in Teilstücken übertragen; dadurch sind 2-GB-Dateien stabiler.";
+          while(offset < file.size){
+            if(controller.signal.aborted) throw new DOMException("Upload abgebrochen", "AbortError");
+            const end = Math.min(file.size, offset + chunkSize);
+            const blob = file.slice(offset, end);
+            let attempt = 0;
+            while(true){
+              try{
+                const chunkHeaders = {
+                  "Accept":"application/json",
+                  "X-Requested-With":"XMLHttpRequest",
+                  "X-DCloud-Upload-Id": uploadId,
+                  "X-DCloud-Chunk-Offset": String(offset),
+                  "X-DCloud-Chunk-Index": String(chunkIndex),
+                  "X-DCloud-File-Size": String(file.size)
+                };
+                if(csrfToken) chunkHeaders["X-CSRF-Token"] = csrfToken;
+                const chunkResponse = await fetch(`/api/uploads/chunk/${encodeURIComponent(uploadId)}`, {
+                  method:"POST",
+                  headers: chunkHeaders,
+                  body: blob,
+                  signal: controller.signal
+                });
+                const chunkPayload = await chunkResponse.json().catch(() => null);
+                if(chunkResponse.status === 409 && chunkPayload && Number.isFinite(Number(chunkPayload.expectedOffset))){
+                  offset = Math.max(0, Number(chunkPayload.expectedOffset));
+                  chunkIndex = Math.floor(offset / chunkSize);
+                  break;
+                }
+                if(!chunkResponse.ok || !chunkPayload || !chunkPayload.ok){
+                  throw new Error((chunkPayload && chunkPayload.message) || "Upload-Chunk fehlgeschlagen");
+                }
+                offset = Math.max(offset, Number(chunkPayload.receivedBytes || end));
+                chunkIndex = Math.floor(offset / chunkSize);
+                const clientPct = file.size ? (offset / file.size * 100) : 100;
+                setMiniProgress("client", clientPct);
+                updateTransfer(clientPct * 0.35, `Datei wird in Teilen übertragen… ${formatBytes(offset)} von ${formatBytes(file.size)}`);
+                document.getElementById("transfer-browser").textContent = `${formatBytes(offset)} / ${formatBytes(file.size)}`;
+                if(chunkPayload.uploadProgress) applyUploadProgress(chunkPayload.uploadProgress);
+                break;
+              }catch(error){
+                if(controller.signal.aborted) throw error;
+                attempt += 1;
+                if(attempt >= 4) throw error;
+                updateTransfer(Math.min(34, (offset / Math.max(1, file.size)) * 35), `Netzwerkproblem beim Upload-Teil; erneuter Versuch ${attempt}/3…`);
+                await new Promise(resolve => setTimeout(resolve, 700 * attempt));
+              }
+            }
+          }
+          setMiniProgress("client", 100);
+          updateTransfer(Math.max(lastTransferPercent, 35), "Übertragung abgeschlossen; Server verarbeitet Chunks…");
+          document.getElementById("transfer-browser").textContent = `${formatBytes(file.size)} / ${formatBytes(file.size)}`;
+          document.getElementById("transfer-server").textContent = "startet…";
+          const finishResponse = await fetch(`/api/uploads/chunk/${encodeURIComponent(uploadId)}/finish`, {
+            method:"POST",
+            headers: jsonHeaders,
+            body: "{}",
+            signal: controller.signal
+          });
+          const finishPayload = await finishResponse.json().catch(() => null);
+          const progress = finishPayload && finishPayload.uploadProgress ? finishPayload.uploadProgress : null;
+          if(!finishResponse.ok || !finishPayload || !finishPayload.ok){
+            throw new Error((finishPayload && finishPayload.message) || "Upload konnte nicht abgeschlossen werden");
+          }
+          applyState(finishPayload.state);
+          finishTransfer(finishPayload.message || "Upload abgeschlossen", true, progress);
+          showToast(finishPayload.message || "Upload abgeschlossen", "success");
+          if(targetFolder) openExplorerAt(targetFolder);
+          if(doneCallback) doneCallback();
+        }catch(error){
+          const aborted = controller.signal.aborted || (error && error.name === "AbortError");
+          if(aborted){
+            fetch(`/api/uploads/chunk/${encodeURIComponent(uploadId)}/abort`, { method:"POST", headers: jsonHeaders, body:"{}" }).catch(() => {});
+          }
+          finishTransfer(aborted ? "Upload abgebrochen" : (error && error.message ? error.message : "Upload fehlgeschlagen"), false);
+          showToast(aborted ? "Upload abgebrochen" : (error && error.message ? error.message : "Upload fehlgeschlagen"), aborted ? "warning" : "error");
+          if(doneCallback) doneCallback();
+        }
+      }
+
       function uploadFile(file, folder, doneCallback=null){
         const targetFolder = normalizeFolderPath(folder || DEFAULT_FOLDER);
         if(isWebPath(targetFolder)){
           uploadWebFile(file, targetFolder, doneCallback);
+          return;
+        }
+        if(file && Number(file.size || 0) >= Number(LARGE_UPLOAD_THRESHOLD_BYTES || 0)){
+          uploadLargeFile(file, targetFolder, doneCallback);
           return;
         }
         const uploadId = makeUploadId();

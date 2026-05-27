@@ -95,6 +95,10 @@ WEB_EDITABLE_SUFFIXES = {
 WEB_EDIT_MAX_BYTES = 2 * 1024 * 1024
 NETWORK_LOAD_HISTORY_LIMIT = 72
 NETWORK_LOAD_MIN_SAMPLE_SECONDS = 1.0
+LARGE_UPLOAD_THRESHOLD_BYTES = int(os.environ.get("DCLOUD_LARGE_UPLOAD_THRESHOLD_BYTES", str(64 * 1024 * 1024)))
+LARGE_UPLOAD_CHUNK_BYTES = int(os.environ.get("DCLOUD_UPLOAD_CHUNK_BYTES", str(16 * 1024 * 1024)))
+LARGE_UPLOAD_MAX_BYTES = int(os.environ.get("DCLOUD_LARGE_UPLOAD_MAX_BYTES", str(64 * 1024 * 1024 * 1024)))
+LARGE_UPLOAD_STREAM_BUFFER_BYTES = int(os.environ.get("DCLOUD_UPLOAD_STREAM_BUFFER_BYTES", str(1024 * 1024)))
 
 
 def _read_system_net_io() -> tuple[int, int] | None:
@@ -354,7 +358,13 @@ def create_app(
     relay_transports: dict[str, HttpRelayTransport] = {}
     relay_lock = threading.RLock()
     p2p_client = P2PStorageClient(default_web_port=config.web.port, identity=identity)
-    upload_progress = UploadProgressTracker(persist_dir=chunk_store.tmp_dir / "upload_progress")
+    upload_progress = UploadProgressTracker(
+        persist_dir=chunk_store.tmp_dir / "upload_progress",
+        active_stall_seconds=int(os.environ.get("DCLOUD_UPLOAD_STALL_SECONDS", "900")),
+    )
+    large_upload_sessions_dir = chunk_store.tmp_dir / "upload_sessions"
+    large_upload_sessions_dir.mkdir(parents=True, exist_ok=True)
+    large_upload_session_lock = threading.RLock()
     download_progress = UploadProgressTracker(persist_dir=chunk_store.tmp_dir / "download_progress")
     network_load_sampler = NetworkLoadSampler()
     download_results: dict[str, dict[str, Any]] = {}
@@ -3497,6 +3507,8 @@ def create_app(
             git_revision=current_git_revision(),
             auth=_auth_payload(),
             current_user=_current_user(),
+            large_upload_threshold_bytes=LARGE_UPLOAD_THRESHOLD_BYTES,
+            large_upload_chunk_bytes=LARGE_UPLOAD_CHUNK_BYTES,
         )
 
     @app.get("/files")
@@ -4026,6 +4038,264 @@ def create_app(
             storage_peers=storage_peers,
         )
         return True, {"manifest": manifest, "upload_result": upload_result, "message": message}, file_size
+
+    def _large_upload_session_meta_path(upload_id: str) -> Path:
+        return large_upload_sessions_dir / f"{_safe_upload_id(upload_id)}.json"
+
+    def _large_upload_session_temp_path(upload_id: str) -> Path:
+        return large_upload_sessions_dir / f"{_safe_upload_id(upload_id)}.part"
+
+    def _load_large_upload_session(upload_id: str) -> dict[str, Any]:
+        path = _large_upload_session_meta_path(upload_id)
+        if not path.exists():
+            raise StorageError("Upload-Sitzung wurde nicht gefunden. Bitte Upload neu starten.")
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError, TypeError) as exc:
+            raise StorageError("Upload-Sitzung ist beschädigt. Bitte Upload neu starten.") from exc
+        if not isinstance(payload, dict):
+            raise StorageError("Upload-Sitzung ist ungültig. Bitte Upload neu starten.")
+        return payload
+
+    def _save_large_upload_session(upload_id: str, payload: dict[str, Any]) -> None:
+        path = _large_upload_session_meta_path(upload_id)
+        tmp_path = path.with_suffix(".tmp")
+        tmp_path.write_text(json.dumps(payload, ensure_ascii=False, sort_keys=True), encoding="utf-8")
+        tmp_path.replace(path)
+
+    def _cleanup_large_upload_session(upload_id: str, *, remove_temp: bool = True) -> None:
+        _large_upload_session_meta_path(upload_id).unlink(missing_ok=True)
+        if remove_temp:
+            _large_upload_session_temp_path(upload_id).unlink(missing_ok=True)
+
+    def _storage_peers_from_selection(selection_mode: str | None, peer_ids: list[str] | None) -> list[Any]:
+        available_peers = _eligible_storage_peers()
+        requested_peer_ids = [str(peer_id).strip() for peer_id in (peer_ids or []) if str(peer_id).strip()]
+        explicit_selection = str(selection_mode or "").strip().lower() == "manual"
+        if not requested_peer_ids:
+            return [] if explicit_selection else available_peers
+        requested_set = set(requested_peer_ids)
+        selected = [peer for peer in available_peers if peer.node_id in requested_set]
+        return selected if explicit_selection else (selected or available_peers)
+
+    def _validate_large_upload_size(file_size: int) -> None:
+        if file_size < 0:
+            raise StorageError("Dateigröße ist ungültig")
+        if file_size > LARGE_UPLOAD_MAX_BYTES:
+            raise StorageError(f"Datei ist zu groß. Maximal erlaubt: {human_bytes(LARGE_UPLOAD_MAX_BYTES)}")
+        # Local-first uploads need temporary space while chunking runs.  Keep this
+        # check conservative but not overly strict: the final compressed chunks may
+        # be smaller than the raw file, but the temporary stream must fit first.
+        try:
+            free_bytes = shutil.disk_usage(chunk_store.tmp_dir).free
+            if free_bytes - file_size < chunk_store.min_free_bytes:
+                raise StorageError("Nicht genug freier Speicherplatz für den temporären Upload")
+        except FileNotFoundError:
+            pass
+
+    @app.post("/api/uploads/chunk/start")
+    def api_large_upload_start() -> Response:
+        payload = request.get_json(silent=True) or {}
+        upload_id = _safe_upload_id(payload.get("upload_id"))
+        try:
+            safe_name = secure_filename(str(payload.get("file_name") or "")) or "upload.bin"
+            folder_path = sanitize_folder_path(payload.get("folder", DEFAULT_FOLDER))
+            if folder_path == INCOMING_SHARES_FOLDER or folder_path.startswith(f"{INCOMING_SHARES_FOLDER}/"):
+                raise StorageError("In den Ordner für Peer-Freigaben kann nicht hochgeladen werden")
+            file_size = int(payload.get("file_size") or 0)
+            _validate_large_upload_size(file_size)
+            peer_ids = payload.get("storage_peer_node_ids")
+            if not isinstance(peer_ids, list):
+                peer_ids = []
+            session_payload = {
+                "upload_id": upload_id,
+                "file_name": safe_name,
+                "folder_path": folder_path,
+                "file_size": file_size,
+                "received_bytes": 0,
+                "storage_peer_selection_mode": str(payload.get("storage_peer_selection_mode") or "auto"),
+                "storage_peer_node_ids": [str(peer_id) for peer_id in peer_ids if str(peer_id)],
+                "created_at": time.time(),
+                "updated_at": time.time(),
+            }
+            with large_upload_session_lock:
+                _cleanup_large_upload_session(upload_id, remove_temp=True)
+                _save_large_upload_session(upload_id, session_payload)
+                _large_upload_session_temp_path(upload_id).parent.mkdir(parents=True, exist_ok=True)
+                _large_upload_session_temp_path(upload_id).touch()
+            upload_progress.start(upload_id, file_name=safe_name, folder_path=folder_path, total_bytes=file_size)
+            upload_progress.update(
+                upload_id,
+                phase="receiving_chunks",
+                status="Großer Upload gestartet; Datei wird in Teilen übertragen…",
+                percent=0,
+                server_percent=0,
+                raw_bytes_processed=0,
+                total_bytes=file_size,
+                details={"chunkedUpload": True, "chunkSize": LARGE_UPLOAD_CHUNK_BYTES},
+            )
+            return jsonify({
+                "ok": True,
+                "uploadId": upload_id,
+                "chunkSize": LARGE_UPLOAD_CHUNK_BYTES,
+                "receivedBytes": 0,
+                "uploadProgress": upload_progress.get(upload_id),
+            })
+        except (StorageError, ValueError) as exc:
+            upload_progress.finish(upload_id, ok=False, message=str(exc))
+            _cleanup_large_upload_session(upload_id, remove_temp=True)
+            return jsonify({"ok": False, "message": str(exc), "uploadId": upload_id, "uploadProgress": upload_progress.get(upload_id)}), 400
+
+    @app.post("/api/uploads/chunk/<upload_id>")
+    def api_large_upload_chunk(upload_id: str) -> Response:
+        upload_id = _safe_upload_id(upload_id)
+        try:
+            try:
+                offset = int(request.headers.get("X-DCloud-Chunk-Offset") or request.args.get("offset") or 0)
+            except ValueError as exc:
+                raise StorageError("Chunk-Offset ist ungültig") from exc
+            try:
+                declared_index = int(request.headers.get("X-DCloud-Chunk-Index") or request.args.get("index") or 0)
+            except ValueError:
+                declared_index = 0
+            content_length = int(request.content_length or 0)
+            if content_length <= 0:
+                raise StorageError("Leerer Upload-Chunk")
+            if content_length > max(LARGE_UPLOAD_CHUNK_BYTES * 2, 1):
+                raise StorageError("Upload-Chunk ist zu groß")
+
+            with large_upload_session_lock:
+                meta = _load_large_upload_session(upload_id)
+                file_size = int(meta.get("file_size") or 0)
+                temp_path = _large_upload_session_temp_path(upload_id)
+                current_size = temp_path.stat().st_size if temp_path.exists() else 0
+                if offset < current_size and offset + content_length <= current_size:
+                    # Browser retry of an already accepted chunk. Consume and
+                    # acknowledge without appending duplicate bytes.
+                    remaining = content_length
+                    while remaining > 0:
+                        data = request.stream.read(min(LARGE_UPLOAD_STREAM_BUFFER_BYTES, remaining))
+                        if not data:
+                            break
+                        remaining -= len(data)
+                    return jsonify({"ok": True, "uploadId": upload_id, "receivedBytes": current_size, "duplicate": True})
+                if offset != current_size:
+                    return jsonify({
+                        "ok": False,
+                        "message": "Upload-Chunk ist nicht an der erwarteten Position angekommen",
+                        "expectedOffset": current_size,
+                        "receivedBytes": current_size,
+                    }), 409
+                if current_size + content_length > file_size:
+                    raise StorageError("Upload überschreitet die gemeldete Dateigröße")
+
+                temp_path.parent.mkdir(parents=True, exist_ok=True)
+                bytes_written = 0
+                try:
+                    with temp_path.open("ab") as handle:
+                        while True:
+                            data = request.stream.read(LARGE_UPLOAD_STREAM_BUFFER_BYTES)
+                            if not data:
+                                break
+                            handle.write(data)
+                            bytes_written += len(data)
+                        handle.flush()
+                        os.fsync(handle.fileno())
+                except Exception:
+                    try:
+                        with temp_path.open("r+b") as handle:
+                            handle.truncate(current_size)
+                    except OSError:
+                        pass
+                    raise
+                if bytes_written != content_length:
+                    try:
+                        with temp_path.open("r+b") as handle:
+                            handle.truncate(current_size)
+                    except OSError:
+                        pass
+                    raise StorageError("Upload-Chunk wurde unvollständig übertragen")
+                received = current_size + bytes_written
+                meta["received_bytes"] = received
+                meta["updated_at"] = time.time()
+                _save_large_upload_session(upload_id, meta)
+
+            browser_percent = (received / file_size * 35.0) if file_size else 0.0
+            upload_progress.update(
+                upload_id,
+                phase="receiving_chunks",
+                status=f"Datei wird in Teilen übertragen… {human_bytes(received)} von {human_bytes(file_size)}",
+                percent=browser_percent,
+                server_percent=0,
+                raw_bytes_processed=received,
+                total_bytes=file_size,
+                current_chunk=max(1, declared_index + 1),
+                total_chunks=max(1, (file_size + LARGE_UPLOAD_CHUNK_BYTES - 1) // LARGE_UPLOAD_CHUNK_BYTES) if file_size else 1,
+            )
+            return jsonify({"ok": True, "uploadId": upload_id, "receivedBytes": received, "uploadProgress": upload_progress.get(upload_id)})
+        except StorageError as exc:
+            upload_progress.finish(upload_id, ok=False, message=str(exc))
+            return jsonify({"ok": False, "message": str(exc), "uploadId": upload_id, "uploadProgress": upload_progress.get(upload_id)}), 400
+
+    @app.post("/api/uploads/chunk/<upload_id>/finish")
+    def api_large_upload_finish(upload_id: str) -> Response:
+        upload_id = _safe_upload_id(upload_id)
+        temp_path = _large_upload_session_temp_path(upload_id)
+        try:
+            with large_upload_session_lock:
+                meta = _load_large_upload_session(upload_id)
+                file_size = int(meta.get("file_size") or 0)
+                received = temp_path.stat().st_size if temp_path.exists() else 0
+                if received != file_size:
+                    return jsonify({
+                        "ok": False,
+                        "message": "Upload ist noch nicht vollständig übertragen",
+                        "receivedBytes": received,
+                        "expectedBytes": file_size,
+                        "uploadProgress": upload_progress.get(upload_id),
+                    }), 409
+            safe_name = str(meta.get("file_name") or "upload.bin")
+            folder_path = sanitize_folder_path(meta.get("folder_path") or DEFAULT_FOLDER)
+            storage_peers = _storage_peers_from_selection(
+                str(meta.get("storage_peer_selection_mode") or "auto"),
+                [str(peer_id) for peer_id in meta.get("storage_peer_node_ids") or []],
+            )
+            upload_progress.update(
+                upload_id,
+                phase="saving_temp",
+                status="Upload vollständig übertragen; Datei wird jetzt lokal verarbeitet…",
+                percent=38,
+                server_percent=2,
+                total_bytes=file_size,
+                raw_bytes_processed=file_size,
+            )
+            manifest, upload_result, message = _run_local_first_upload(
+                temp_path=temp_path,
+                safe_name=safe_name,
+                folder_path=folder_path,
+                upload_id=upload_id,
+                storage_peers=storage_peers,
+            )
+            return jsonify({
+                "ok": True,
+                "message": message,
+                "manifest": manifest_payload(manifest),
+                "state": state_payload(),
+                "uploadId": upload_id,
+                "uploadProgress": upload_progress.get(upload_id),
+            })
+        except StorageError as exc:
+            upload_progress.finish(upload_id, ok=False, message=str(exc))
+            return jsonify({"ok": False, "message": str(exc), "uploadId": upload_id, "uploadProgress": upload_progress.get(upload_id)}), 400
+        finally:
+            _cleanup_large_upload_session(upload_id, remove_temp=True)
+
+    @app.post("/api/uploads/chunk/<upload_id>/abort")
+    def api_large_upload_abort(upload_id: str) -> Response:
+        upload_id = _safe_upload_id(upload_id)
+        _cleanup_large_upload_session(upload_id, remove_temp=True)
+        upload_progress.finish(upload_id, ok=False, message="Upload abgebrochen")
+        return jsonify({"ok": True, "uploadId": upload_id, "uploadProgress": upload_progress.get(upload_id)})
 
     @app.get("/api/web/files")
     def api_web_files() -> Response:
