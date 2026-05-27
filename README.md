@@ -311,7 +311,7 @@ Windows PowerShell:
 - Python 3.11 oder neuer empfohlen
 - Git
 - optional für Windows-Docker: Docker Desktop
-- für Windows ohne Docker: Python 3.10 oder neuer; das CMD-Skript kann Python bei Bedarf automatisch per `winget` oder Chocolatey installieren
+- für Windows ohne Docker: Python 3.10 bis 3.13; das CMD-Skript installiert bevorzugt Python 3.12 automatisch per `winget` oder Chocolatey
 - ausgehende HTTP/HTTPS-Verbindung für Relays und Updates
 - genügend Speicherplatz im gewählten `storage.path`
 
@@ -325,7 +325,7 @@ Pflichtpakete aus `requirements.txt`:
 
 Optionale Python-/System-Erweiterungen:
 
-- `impacket`
+- `impacket` für den optionalen eingebetteten SMB-Server
 - `zstandard` für zstd-Komprimierung
 
 ## Manuelle Installation
@@ -606,7 +606,7 @@ cd C:\dcloud
 
 ## Windows-Installation ohne Docker mit Python
 
-Diese Variante ist für Windows-Systeme gedacht, auf denen Docker Desktop wegen fehlender oder deaktivierter Virtualisierung/WSL2 nicht funktioniert. dcloud läuft dabei direkt in einer normalen Python-Umgebung auf Windows. Wenn Python fehlt, installiert das CMD-Skript Python automatisch per `winget`. Falls `winget` nicht verfügbar ist oder fehlschlägt, wird Chocolatey als Fallback verwendet.
+Diese Variante ist für Windows-Systeme gedacht, auf denen Docker Desktop wegen fehlender oder deaktivierter Virtualisierung/WSL2 nicht funktioniert. dcloud läuft dabei direkt in einer normalen Python-Umgebung auf Windows. Wenn Python fehlt oder nur eine nicht unterstützte Version wie Python 3.14 gefunden wird, installiert das CMD-Skript bevorzugt Python 3.12 per `winget`. Falls `winget` nicht verfügbar ist oder fehlschlägt, wird Chocolatey als Fallback verwendet.
 
 ### Schnellstart aus CMD mit GitHub-curl
 
@@ -627,7 +627,7 @@ set DCLOUD_AUTO_INSTALL_PYTHON=1
 curl.exe -fsSL https://raw.githubusercontent.com/MTSmash-TMP-Networks/Projekt-dcloud/main/Script/install_windows_python_from_github.cmd -o "%TEMP%\install_dcloud_windows_python.cmd" && cmd /c "%TEMP%\install_dcloud_windows_python.cmd"
 ```
 
-Das Bootstrap-Skript lädt das GitHub-Archiv herunter, kopiert die App standardmäßig nach `%LOCALAPPDATA%\dcloud\app`, legt die Daten unter `%LOCALAPPDATA%\dcloud\data` ab, installiert bei Bedarf Python, erzeugt eine `.venv`, installiert `requirements.txt` und startet dcloud im Hintergrund. Es wird kein Docker, kein WSL2 und keine Virtualisierung benötigt.
+Das Bootstrap-Skript lädt das GitHub-Archiv herunter, kopiert die App standardmäßig nach `%LOCALAPPDATA%\dcloud\app`, legt die Daten unter `%LOCALAPPDATA%\dcloud\data` ab, installiert bei Bedarf Python, erzeugt eine `.venv`, installiert die Windows-Basisabhängigkeiten aus `requirements-windows-python.txt` und startet dcloud im Hintergrund. Es wird kein Docker, kein WSL2 und keine Virtualisierung benötigt.
 
 ### Schnellstart aus CMD im entpackten Projekt
 
@@ -672,11 +672,14 @@ Script\install_windows_python.cmd -Run
 ### Hinweise zur nativen Windows-Python-Variante
 
 - Wenn Python fehlt, versucht das Skript zuerst `winget install --id Python.Python.3.12`. Danach wird die aktuelle CMD-Umgebung um bekannte Python-Pfade ergänzt.
-- Wenn `winget` nicht verfügbar ist oder fehlschlägt, verwendet das Skript Chocolatey als Fallback. Dieser Fallback benötigt Administratorrechte.
+- Unterstützt und bevorzugt werden Python `3.12`, `3.11`, `3.10` und danach `3.13`. Python `3.14` wird für diese Installationsvariante aktuell nicht verwendet, weil einzelne Pakete dort noch Probleme verursachen können.
+- Wenn `winget` nicht verfügbar ist oder fehlschlägt, verwendet das Skript Chocolatey als Fallback. Dieser Fallback benötigt Administratorrechte und installiert standardmäßig das Paket `python312`.
 - Die automatische Python-Installation kann mit `set DCLOUD_AUTO_INSTALL_PYTHON=0` deaktiviert werden.
-- Das winget-Paket kann mit `set DCLOUD_PYTHON_WINGET_ID=Python.Python.3.12` geändert werden.
+- Das winget-Paket kann mit `set DCLOUD_PYTHON_WINGET_ID=Python.Python.3.12` geändert werden; das Chocolatey-Paket mit `set DCLOUD_PYTHON_CHOCO_PACKAGE=python312`.
+- Die Windows-Python-Variante installiert standardmäßig `requirements-windows-python.txt`. Das Paket `impacket` wird ausgelassen, damit die Grundinstallation nicht an Windows-Script-Wrappern wie `GetNPUsers.py` scheitert.
+- Wenn der optionale SMB-Server wirklich gebraucht wird, kann er vor dem ersten Start mit `set DCLOUD_ENABLE_SMB=1` aktiviert werden. Dann versucht das Skript zusätzlich, `impacket` zu installieren. Scheitert das, läuft dcloud trotzdem ohne SMB weiter.
 - Wenn `php-cgi` oder `php` nicht im Windows-`PATH` liegt, funktionieren HTML-Webseiten weiterhin, PHP-Dateien im Webspace aber erst nach einer PHP-Installation.
-- SMB ist in dieser Variante standardmäßig deaktiviert, weil Windows Port `445` meistens selbst nutzt. Es kann später im Dashboard oder vor dem ersten Start mit `set DCLOUD_ENABLE_SMB=1` aktiviert werden.
+- SMB ist in dieser Variante standardmäßig deaktiviert, weil Windows Port `445` meistens selbst nutzt.
 - Wenn CMD als Administrator gestartet wird, legt das Skript automatisch Windows-Firewall-Regeln für Dashboard-TCP-Port und UDP-Discovery an. Ohne Administratorrechte funktioniert der lokale Zugriff über `127.0.0.1` trotzdem.
 - Der GitHub-Stand wird beim `curl`-Bootstrap als `.dcloud_git_revision` gespeichert, damit im Dashboard nicht `unbekannt` steht.
 

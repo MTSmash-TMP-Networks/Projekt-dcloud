@@ -1,0 +1,9 @@
+Flask>=3.0,<4.0
+PyYAML>=6.0,<7.0
+cryptography>=42.0,<46.0
+
+# Windows native installer core dependencies.
+# impacket/SMB is intentionally not installed here because its console-script
+# wrappers can fail on some Windows/Python combinations, especially Python 3.14
+# or systemprofile installs. The Windows installer installs impacket only when
+# DCLOUD_ENABLE_SMB=1 is set.
