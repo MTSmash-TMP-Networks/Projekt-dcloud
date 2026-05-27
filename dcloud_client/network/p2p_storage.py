@@ -743,6 +743,36 @@ class P2PStorageClient:
             log_message="Manifest share to peer %s failed",
         )
 
+    def get_manifests_for_owner(self, peer: Peer, owner_node_id: str) -> list[dict[str, Any]]:
+        """Fetch manifests a storage peer still has for the given owner node id."""
+        safe_owner = parse.quote(str(owner_node_id or ""), safe="")
+        path = f"/api/p2p/manifests/owner/{safe_owner}"
+        headers = {"Accept": "application/json"}
+        direct_error: Exception | None = None
+        if peer.host != RELAY_HOST:
+            url = f"{self.api_base(peer)}{path}"
+            req = request.Request(url, headers=headers, method="GET")
+            try:
+                with request.urlopen(req, timeout=max(self.timeout, 8.0)) as response:
+                    payload = json.loads(response.read().decode("utf-8", errors="replace"))
+                    manifests = payload.get("manifests", []) if isinstance(payload, dict) else []
+                    return [item for item in manifests if isinstance(item, dict)]
+            except (OSError, error.URLError, error.HTTPError, ValueError, TypeError) as exc:
+                direct_error = exc
+                LOG.debug("Direct owner manifest recovery from peer %s failed", peer.node_id, exc_info=True)
+        if self._relay_available(peer):
+            try:
+                response = self._forward_via_relay(peer, method="GET", path=path, headers=headers, timeout=max(self.timeout, 12.0))
+                if 200 <= response.status_code < 300:
+                    payload = json.loads(response.body.decode("utf-8", errors="replace"))
+                    manifests = payload.get("manifests", []) if isinstance(payload, dict) else []
+                    return [item for item in manifests if isinstance(item, dict)]
+                direct_error = StorageError(_relay_http_message(response))
+            except (RelayError, ValueError, TypeError) as exc:
+                direct_error = exc
+                LOG.debug("Relay owner manifest recovery from peer %s failed", peer.node_id, exc_info=True)
+        raise StorageError(f"Manifest-Wiederherstellung von Peer {peer.node_id} fehlgeschlagen: {direct_error}") from direct_error
+
     def post_manifest_revocation(self, peer: Peer, revocation: dict[str, Any]) -> PeerTransferResult:
         return self._post_json_to_peer(
             peer,

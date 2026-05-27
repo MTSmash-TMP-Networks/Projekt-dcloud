@@ -1180,6 +1180,25 @@ netstat -ano | findstr "8787 6881 445"
 - Auf allen Peers `zstandard` installieren oder `algorithm: zlib` nutzen.
 - Bereits vorhandene zstd-Chunks benötigen zum Lesen weiterhin zstd-Unterstützung.
 
+
+## Backup-Token und Peer-Wiederherstellung
+
+Im Dashboard unter **Einstellungen → Backup-Token & Wiederherstellung** zeigt jeder Peer einen eigenen Backup-Token an. Dieser Token sichert die lokale dcloud-Identität, also die private Ed25519-Node-ID. Wer diesen Token besitzt, kann einen neu installierten Peer wieder mit derselben Node-ID starten.
+
+Ablauf bei einem verlorenen oder neu installierten Peer:
+
+1. Neuen Peer installieren und Dashboard öffnen.
+2. Unter **Einstellungen → Backup-Token & Wiederherstellung** den alten Backup-Token einfügen oder mit **Token-Datei hochladen & wiederherstellen** die gespeicherte Token-Datei auswählen.
+3. **Token übernehmen & Service neu starten** klicken, falls der Token manuell eingefügt wurde. Beim Datei-Upload wird der Token direkt übernommen.
+4. Nach dem Neustart **Wiederherstellung von Peers starten** klicken.
+5. Der Peer fragt erreichbare Speicher-Peers nach Manifesten der wiederhergestellten Node-ID und importiert diese lokal.
+
+Der aktuelle Token kann im Dashboard zusätzlich mit **Token herunterladen** als JSON-Datei gespeichert werden. Diese Datei enthält den geheimen Backup-Token und Metadaten wie Node-ID und Erstellungszeit. Der Upload akzeptiert sowohl diese JSON-Datei als auch eine einfache Textdatei, die nur den Token enthält.
+
+Sicherheits-/RAID-Schutzfrist: Wenn ein Speicher-Peer eine signierte Löschanweisung für fremde Daten bekommt, löscht er die sichtbare Manifest-Kopie sofort, hält die eigentlichen Chunks aber noch 15 Tage als Wiederherstellungsreserve vor. Erst danach dürfen diese Chunks endgültig entfernt werden, sofern sie nicht mehr von aktiven Manifesten referenziert werden.
+
+Wichtig: Der Backup-Token und die heruntergeladene Token-Datei sind geheim. Nicht in Chats, Tickets, Screenshots oder öffentliche Repositories kopieren.
+
 ## Sicherheitshinweise
 
 - Dashboard und lokale Verwaltungsaktionen sind loginpflichtig.

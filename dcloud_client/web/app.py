@@ -45,8 +45,8 @@ from ..config import (
     persist_relay_urls,
     update_runtime_settings,
 )
-from ..identity import NodeIdentity
-from ..manifests import DEFAULT_FOLDER, INCOMING_SHARES_FOLDER, FileManifest, ManifestStore, sanitize_folder_path
+from ..identity import IdentityManager, NodeIdentity, build_backup_token
+from ..manifests import DEFAULT_FOLDER, INCOMING_SHARES_FOLDER, REMOTE_DELETE_GRACE_SECONDS, FileManifest, ManifestStore, sanitize_folder_path
 from ..network.http_relay import HttpRelayClient, HttpRelayTransport, RelayHttpResponse, RELAY_HOST
 from ..network.p2p_storage import (
     CHUNK_UPLOAD_PACK_MAGIC,
@@ -2165,6 +2165,107 @@ def create_app(
             return "fehler", "; ".join(errors[:2])
         return "startet", None
 
+    def recovery_payload(*, include_secret: bool | None = None) -> dict[str, Any]:
+        show_secret = _current_user_is_admin() if include_secret is None else bool(include_secret)
+        payload = {
+            "nodeId": identity.node_id,
+            "nodeIdShort": identity.node_id[:12],
+            "backupToken": "",
+            "retentionDays": int(REMOTE_DELETE_GRACE_SECONDS / 86400),
+            "identityPath": str(config.node.identity_path),
+            "adminOnly": True,
+        }
+        if show_secret:
+            payload["backupToken"] = build_backup_token(identity)
+        return payload
+
+    def _backup_token_download_payload() -> dict[str, Any]:
+        return {
+            "kind": "dcloud-backup-token",
+            "version": 1,
+            "createdAt": datetime.now(timezone.utc).isoformat(),
+            "nodeId": identity.node_id,
+            "nodeIdShort": identity.node_id[:12],
+            "backupToken": build_backup_token(identity),
+            "retentionDays": int(REMOTE_DELETE_GRACE_SECONDS / 86400),
+            "warning": "Geheim halten. Wer diesen Token besitzt, kann diese dcloud-Node-ID wiederherstellen.",
+        }
+
+    def _extract_backup_token_from_upload(raw: bytes) -> str:
+        if len(raw) > 256 * 1024:
+            raise ValueError("Backup-Token-Datei ist zu groß")
+        try:
+            text = raw.decode("utf-8-sig")
+        except UnicodeDecodeError as exc:
+            raise ValueError("Backup-Token-Datei ist keine lesbare Text-/JSON-Datei") from exc
+        stripped = text.strip()
+        if not stripped:
+            raise ValueError("Backup-Token-Datei ist leer")
+        if stripped.startswith("{"):
+            try:
+                doc = json.loads(stripped)
+            except json.JSONDecodeError as exc:
+                raise ValueError("Backup-Token-Datei enthält kein gültiges JSON") from exc
+            for key in ("backupToken", "backup_token", "token"):
+                token = str(doc.get(key) or "").strip()
+                if token:
+                    return token
+            raise ValueError("Backup-Token-Datei enthält kein Feld backupToken")
+        match = re.search(r"DCLOUD-BACKUP-v1:[A-Za-z0-9]{6,64}:[A-Za-z0-9_-]+:[A-Fa-f0-9]{16}", stripped)
+        if match:
+            return match.group(0)
+        return stripped
+
+    def _import_backup_token_and_restart(token: str) -> dict[str, Any]:
+        recovered = IdentityManager(config.node.identity_path).import_backup_token(token)
+        message = (
+            f"Backup-Token übernommen. Node-ID nach Neustart: {recovered.node_id[:12]}. "
+            "Der Service wird jetzt neu gestartet; danach 'Wiederherstellung von Peers starten' verwenden."
+        )
+        _restart_current_process_delayed()
+        return {"ok": True, "message": message, "nodeId": recovered.node_id, "restart": True}
+
+    def _recover_owned_manifests_from_peers(peers: list[Any] | None = None) -> dict[str, Any]:
+        active_peers = peers if peers is not None else _list_active_peers()
+        imported = 0
+        already_present = 0
+        failed = 0
+        scanned = 0
+        messages: list[str] = []
+        for peer in active_peers:
+            scanned += 1
+            try:
+                raw_manifests = p2p_client.get_manifests_for_owner(peer, identity.node_id)
+            except Exception as exc:
+                failed += 1
+                messages.append(f"{display_name_for_peer(getattr(peer, 'node_id', ''), getattr(peer, 'name', None))}: {exc}")
+                continue
+            for raw_manifest in raw_manifests:
+                try:
+                    manifest = FileManifest.from_dict(raw_manifest)
+                    if manifest.owner_node_id != identity.node_id:
+                        continue
+                    try:
+                        manifest_store.load(manifest.manifest_id)
+                        already_present += 1
+                        continue
+                    except StorageError:
+                        pass
+                    manifest_store.save_imported(manifest)
+                    imported += 1
+                except Exception as exc:
+                    failed += 1
+                    messages.append(f"Manifest von {getattr(peer, 'node_id', '')[:12]} konnte nicht importiert werden: {exc}")
+        if imported:
+            _sync_peer_connector_settings()
+        return {
+            "scannedPeers": scanned,
+            "imported": imported,
+            "alreadyPresent": already_present,
+            "failed": failed,
+            "messages": messages[:8],
+        }
+
     def network_payload() -> dict[str, Any]:
         relay_statuses = _relay_statuses()
         relay_status, relay_error = _relay_overall_status(relay_statuses)
@@ -2573,6 +2674,7 @@ def create_app(
         _repair_under_replicated_manifests(peers)
         _deliver_pending_share_revocations(peers)
         _deliver_pending_file_deletions(peers)
+        manifest_store.purge_expired_remote_chunk_deletions()
         manifests = manifest_store.list_visible_for_node(identity.node_id)
         folders = manifest_store.list_folders_for_node(identity.node_id)
         tree = build_folder_tree(manifests, folders, identity.node_id)
@@ -2584,6 +2686,7 @@ def create_app(
             "network": network_payload(),
             "networkCapacity": _network_storage_capacity(stats, peers),
             "webHosting": web_hosting_payload(peers),
+            "recovery": recovery_payload(),
             "webFiles": web_files_payload(),
             "browserDownloads": browser_downloads_payload(),
             "peers": [peer.to_dict() for peer in peers],
@@ -2655,6 +2758,75 @@ def create_app(
             return admin_error
         _restart_current_process_delayed()
         return jsonify({"ok": True, "message": "Service-Neustart wurde ausgelöst"})
+
+    @app.get("/api/recovery")
+    def api_recovery() -> Response:
+        admin_error = _require_admin()
+        if admin_error is not None:
+            return admin_error
+        return jsonify({"ok": True, "recovery": recovery_payload()})
+
+    @app.get("/api/recovery/token/download")
+    def api_recovery_token_download() -> Response:
+        admin_error = _require_admin()
+        if admin_error is not None:
+            return admin_error
+        payload = _backup_token_download_payload()
+        raw = json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8")
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+        filename = f"dcloud-backup-token-{identity.node_id[:12]}-{stamp}.json"
+        response = send_file(
+            BytesIO(raw),
+            mimetype="application/json; charset=utf-8",
+            as_attachment=True,
+            download_name=filename,
+            max_age=0,
+        )
+        response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+        response.headers["Pragma"] = "no-cache"
+        return response
+
+    @app.post("/api/recovery/import")
+    def api_recovery_import() -> Response:
+        admin_error = _require_admin()
+        if admin_error is not None:
+            return admin_error
+        data = request.get_json(silent=True) or request.form
+        token = str(data.get("backup_token") or data.get("token") or "").strip()
+        try:
+            return jsonify(_import_backup_token_and_restart(token))
+        except ValueError as exc:
+            return jsonify({"ok": False, "message": str(exc)}), 400
+        except OSError as exc:
+            return jsonify({"ok": False, "message": f"Identität konnte nicht geschrieben werden: {exc}"}), 500
+
+    @app.post("/api/recovery/import-file")
+    def api_recovery_import_file() -> Response:
+        admin_error = _require_admin()
+        if admin_error is not None:
+            return admin_error
+        upload = request.files.get("backup_token_file") or request.files.get("file")
+        if upload is None or not upload.filename:
+            return jsonify({"ok": False, "message": "Bitte eine Backup-Token-Datei auswählen"}), 400
+        try:
+            token = _extract_backup_token_from_upload(upload.read())
+            return jsonify(_import_backup_token_and_restart(token))
+        except ValueError as exc:
+            return jsonify({"ok": False, "message": str(exc)}), 400
+        except OSError as exc:
+            return jsonify({"ok": False, "message": f"Identität konnte nicht geschrieben werden: {exc}"}), 500
+
+    @app.post("/api/recovery/scan")
+    def api_recovery_scan() -> Response:
+        admin_error = _require_admin()
+        if admin_error is not None:
+            return admin_error
+        result = _recover_owned_manifests_from_peers()
+        message = (
+            f"Wiederherstellung geprüft: {result['imported']} Datei-Manifest(e) importiert, "
+            f"{result['alreadyPresent']} bereits vorhanden, {result['failed']} Fehler."
+        )
+        return jsonify({"ok": True, "message": message, "result": result, "state": state_payload()})
 
     @app.get("/api/users")
     def api_users() -> Response:
@@ -2741,6 +2913,7 @@ def create_app(
             settings_json=settings_payload(stats, peers),
             network_json=network_payload(),
             web_hosting_json=web_hosting_payload(peers),
+            recovery_json=recovery_payload(),
             web_files_json=web_files_payload(),
             browser_downloads_json=browser_downloads_payload(),
             manifests=manifests,
@@ -2750,6 +2923,7 @@ def create_app(
             default_folder=DEFAULT_FOLDER,
             shared_folder=INCOMING_SHARES_FOLDER,
             git_revision=current_git_revision(),
+            auth=_auth_payload(),
             current_user=_current_user(),
         )
 
@@ -4731,22 +4905,42 @@ def create_app(
             if local_manifest is not None:
                 if local_manifest.owner_node_id != deletion_manifest.owner_node_id:
                     raise StorageError("File deletion owner does not match local manifest owner")
-                manifest_store.delete(local_manifest.manifest_id, delete_unreferenced_chunks=True)
+                # Hide the manifest immediately, but keep remote chunks for the
+                # recovery grace period. This gives a user up to 15 days to
+                # reinstall a lost peer and import the backup token before RAID
+                # copies may be hard-deleted by storage peers.
+                manifest_store.delete(local_manifest.manifest_id, delete_unreferenced_chunks=False)
                 removed_manifest = True
 
-            removed_chunks = manifest_store.delete_chunks_if_unreferenced(
-                [str(chunk["hash"]) for chunk in deletion_manifest.chunks]
+            scheduled = manifest_store.schedule_remote_chunk_deletion(
+                deletion_manifest,
+                retention_seconds=REMOTE_DELETE_GRACE_SECONDS,
             )
             _sync_peer_connector_settings()
             return jsonify({
                 "ok": True,
                 "manifest_id": deletion_manifest.manifest_id,
                 "removed_manifest": removed_manifest,
-                "removed_chunks": removed_chunks,
+                "removed_chunks": 0,
+                "deferred_chunks": scheduled.get("chunk_count", 0),
+                "delete_after": scheduled.get("delete_after"),
+                "retention_days": int(REMOTE_DELETE_GRACE_SECONDS / 86400),
                 "state": state_payload(),
             })
         except (ValueError, TypeError, StorageError) as exc:
             return jsonify({"ok": False, "message": str(exc), "state": state_payload()}), 400
+
+    @app.get("/api/p2p/manifests/owner/<owner_node_id>")
+    def api_p2p_owner_manifests(owner_node_id: str) -> Response:
+        owner = str(owner_node_id or "").strip()
+        if not owner:
+            return jsonify({"ok": False, "message": "Owner node id missing"}), 400
+        manifests = [
+            manifest.to_dict()
+            for manifest in manifest_store.list_manifests()
+            if manifest.owner_node_id == owner and not manifest_store.is_file_deleted(manifest.manifest_id, manifest.owner_node_id)
+        ]
+        return jsonify({"ok": True, "owner_node_id": owner, "manifests": manifests, "count": len(manifests)})
 
     @app.post("/api/p2p/manifests")
     def api_p2p_receive_manifest() -> Response:

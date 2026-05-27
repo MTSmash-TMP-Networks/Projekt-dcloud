@@ -20,10 +20,11 @@ MANIFEST_VERSION = 1
 DEFAULT_FOLDER = "Meine Dateien"
 INCOMING_SHARES_FOLDER = "Freigaben von Peers"
 MANIFEST_TRASH_RETENTION = 20
+REMOTE_DELETE_GRACE_SECONDS = 15 * 24 * 60 * 60
 MANIFEST_LOCK_TIMEOUT_SECONDS = 10
 MANIFEST_LOCK_POLL_SECONDS = 0.1
 MANIFEST_LOCK_STALE_SECONDS = 120
-MANIFEST_META_FILES = {"folders.json", "share_revocations.json", "file_deletions.json", "manifest_audit.log"}
+MANIFEST_META_FILES = {"folders.json", "share_revocations.json", "file_deletions.json", "pending_chunk_deletions.json", "manifest_audit.log"}
 LOG = logging.getLogger("dcloud.manifest_store")
 
 
@@ -616,6 +617,100 @@ class ManifestStore:
             record.get("manifest_id") == str(manifest_id) and record.get("owner_node_id") == str(owner_node_id)
             for record in self._load_file_deletions()
         )
+
+    @property
+    def pending_chunk_deletions_path(self) -> Path:
+        return self.manifests_dir / "pending_chunk_deletions.json"
+
+    def _load_pending_chunk_deletions(self) -> list[dict[str, Any]]:
+        if not self.pending_chunk_deletions_path.exists():
+            return []
+        try:
+            raw = json.loads(self.pending_chunk_deletions_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            return []
+        if not isinstance(raw, list):
+            return []
+        result: list[dict[str, Any]] = []
+        for item in raw:
+            if not isinstance(item, dict):
+                continue
+            manifest_id = str(item.get("manifest_id", ""))
+            owner_node_id = str(item.get("owner_node_id", ""))
+            chunk_hashes = list(dict.fromkeys(str(value) for value in item.get("chunk_hashes", []) if str(value)))
+            try:
+                delete_after = float(item.get("delete_after", 0))
+            except (TypeError, ValueError):
+                delete_after = 0.0
+            if not manifest_id or not owner_node_id or not chunk_hashes or delete_after <= 0:
+                continue
+            cleaned = dict(item)
+            cleaned["manifest_id"] = manifest_id
+            cleaned["owner_node_id"] = owner_node_id
+            cleaned["chunk_hashes"] = chunk_hashes
+            cleaned["delete_after"] = delete_after
+            result.append(cleaned)
+        return result
+
+    def _save_pending_chunk_deletions(self, records: list[dict[str, Any]]) -> None:
+        self.manifests_dir.mkdir(parents=True, exist_ok=True)
+        self._write_json_atomically(self.pending_chunk_deletions_path, records, "save_pending_chunk_deletions")
+
+    def schedule_remote_chunk_deletion(self, manifest: FileManifest, *, retention_seconds: int = REMOTE_DELETE_GRACE_SECONDS) -> dict[str, Any]:
+        """Keep remote chunks for a recovery grace period before hard deletion.
+
+        A storage peer may receive a signed owner delete request while the owner
+        is actually trying to recover a lost node. The manifest is hidden from
+        normal file lists immediately, but the raw chunks stay on disk for up to
+        15 days so the owner can reinstall a peer and import the backup token.
+        """
+        now = time.time()
+        delete_after = now + max(0, int(retention_seconds))
+        chunk_hashes = list(dict.fromkeys(str(chunk.get("hash", "")) for chunk in manifest.chunks if str(chunk.get("hash", ""))))
+        if not chunk_hashes:
+            return {"scheduled": False, "delete_after": delete_after, "chunk_count": 0}
+
+        records = self._load_pending_chunk_deletions()
+        for record in records:
+            if record.get("manifest_id") == manifest.manifest_id and record.get("owner_node_id") == manifest.owner_node_id:
+                record["chunk_hashes"] = list(dict.fromkeys([*record.get("chunk_hashes", []), *chunk_hashes]))
+                record["delete_after"] = max(float(record.get("delete_after", 0) or 0), delete_after)
+                record["updated_at"] = datetime.now(timezone.utc).isoformat()
+                self._save_pending_chunk_deletions(records)
+                self._append_audit_event("remote_chunk_deletion_deferred", {"manifest_id": manifest.manifest_id, "delete_after": record["delete_after"], "chunk_count": len(record["chunk_hashes"])})
+                return {"scheduled": True, "delete_after": record["delete_after"], "chunk_count": len(record["chunk_hashes"])}
+
+        record = {
+            "manifest_id": manifest.manifest_id,
+            "owner_node_id": manifest.owner_node_id,
+            "file_name": manifest.file_name,
+            "chunk_hashes": chunk_hashes,
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "delete_after": delete_after,
+            "retention_seconds": max(0, int(retention_seconds)),
+        }
+        records.append(record)
+        self._save_pending_chunk_deletions(records)
+        self._append_audit_event("remote_chunk_deletion_deferred", {"manifest_id": manifest.manifest_id, "delete_after": delete_after, "chunk_count": len(chunk_hashes)})
+        return {"scheduled": True, "delete_after": delete_after, "chunk_count": len(chunk_hashes)}
+
+    def purge_expired_remote_chunk_deletions(self, *, now: float | None = None) -> dict[str, int]:
+        now_value = time.time() if now is None else float(now)
+        records = self._load_pending_chunk_deletions()
+        kept: list[dict[str, Any]] = []
+        purged_records = 0
+        purged_chunks = 0
+        for record in records:
+            if float(record.get("delete_after", 0) or 0) > now_value:
+                kept.append(record)
+                continue
+            removed = self.delete_chunks_if_unreferenced([str(value) for value in record.get("chunk_hashes", [])])
+            purged_chunks += removed
+            purged_records += 1
+            self._append_audit_event("remote_chunk_deletion_purged", {"manifest_id": record.get("manifest_id"), "removed_chunks": removed})
+        if purged_records or len(kept) != len(records):
+            self._save_pending_chunk_deletions(kept)
+        return {"purged_records": purged_records, "purged_chunks": purged_chunks, "pending_records": len(kept)}
 
     def delete_chunks_if_unreferenced(self, chunk_hashes: list[str]) -> int:
         """Remove local chunk files only when no remaining manifest references them."""

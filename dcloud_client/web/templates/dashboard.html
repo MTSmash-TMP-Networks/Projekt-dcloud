@@ -838,6 +838,26 @@
             <p class="settings-note">Minimum: {{ settings_json.minSharedStorageGb }} GB. Aktuell frei innerhalb der Freigabe: <strong id="settings-storage-free">{{ stats.free_limit_bytes | human_bytes }}</strong>.</p>
           </section>
 
+          <section class="settings-panel" id="recovery-panel">
+            <h3>Backup-Token & Wiederherstellung</h3>
+            <label for="recovery-backup-token">Backup-Token dieses Peers</label>
+            <textarea id="recovery-backup-token" rows="3" readonly>{{ recovery_json.backupToken }}</textarea>
+            <div class="settings-inline">
+              <button type="button" class="explorer-btn" id="recovery-copy-token">Token kopieren</button>
+              <button type="button" class="explorer-btn" id="recovery-download-token">Token herunterladen</button>
+              <button type="button" class="explorer-btn" id="recovery-scan-peers">Wiederherstellung von Peers starten</button>
+            </div>
+            <p class="settings-note">Bewahre diesen Token sicher auf. Er stellt die Peer-Identität wieder her und gibt einem neu installierten Peer wieder dieselbe Node-ID: <strong id="recovery-node-id">{{ recovery_json.nodeIdShort }}</strong>…</p>
+            <p class="settings-note">Speicher-Peers behalten entfernte RAID-/Sicherheitskopien mindestens <strong id="recovery-retention-days">{{ recovery_json.retentionDays }}</strong> Tage als Wiederherstellungsreserve, bevor Chunks endgültig gelöscht werden dürfen.</p>
+            <label for="recovery-import-token">Backup-Token auf diesem Peer wiederherstellen</label>
+            <textarea id="recovery-import-token" rows="3" placeholder="DCLOUD-BACKUP-v1:..."></textarea>
+            <div class="settings-inline">
+              <button type="button" class="explorer-btn" id="recovery-import-btn">Token übernehmen & Service neu starten</button>
+              <button type="button" class="explorer-btn" id="recovery-upload-token">Token-Datei hochladen & wiederherstellen</button>
+              <input type="file" id="recovery-upload-token-file" accept=".json,.txt,.dcloud,.token,application/json,text/plain" hidden>
+            </div>
+          </section>
+
           <section class="settings-panel">
             <h3>Komprimierung</h3>
             <label for="settings-compression-mode">Modus</label>
@@ -1147,6 +1167,7 @@
       settings: {{ settings_json | tojson }},
       network: {{ network_json | tojson }},
       webHosting: {{ web_hosting_json | tojson }},
+      recovery: {{ recovery_json | tojson }},
       webFiles: {{ web_files_json | tojson }},
       browserDownloads: {{ browser_downloads_json | tojson }},
       peers: {{ peers_json | tojson }},
@@ -1969,6 +1990,7 @@
         const currentUser = auth.currentUser || {};
         if(trayUser) trayUser.textContent = `Benutzer: ${currentUser.username || "-"}`;
         if(usersAppIcon) usersAppIcon.hidden = !auth.isAdmin;
+        document.getElementById("recovery-panel")?.toggleAttribute("hidden", !auth.isAdmin);
         document.getElementById("tray-restart")?.toggleAttribute("hidden", !auth.isAdmin);
         document.getElementById("users-restart-btn")?.toggleAttribute("hidden", !auth.isAdmin);
         if(!auth.isAdmin && windows.users && !windows.users.hidden){ windows.users.hidden = true; updateTaskbar(); }
@@ -1987,6 +2009,13 @@
             storageGbInput.value = String(Math.max(settings.minSharedStorageGb || 5, Math.round(Number(settings.sharedStorageGb || 5))));
           }
         }
+        const recovery = appState.recovery || {};
+        const recoveryToken = document.getElementById("recovery-backup-token");
+        if(recoveryToken && document.activeElement !== recoveryToken){ recoveryToken.value = recovery.backupToken || ""; }
+        const recoveryNodeId = document.getElementById("recovery-node-id");
+        if(recoveryNodeId) recoveryNodeId.textContent = recovery.nodeIdShort || String(appState.nodeId || "").slice(0, 12);
+        const recoveryRetention = document.getElementById("recovery-retention-days");
+        if(recoveryRetention) recoveryRetention.textContent = String(recovery.retentionDays || 15);
         const compressionModeInput = document.getElementById("settings-compression-mode");
         if(compressionModeInput && document.activeElement !== compressionModeInput && !settingsFormDirty) compressionModeInput.value = settings.compressionMode || "auto";
         const compressionAlgorithmInput = document.getElementById("settings-compression-algorithm");
@@ -3838,6 +3867,112 @@ ${file.name}`)) return;
       document.getElementById("tray-logout")?.addEventListener("click", logoutDashboard);
       document.getElementById("users-restart-btn")?.addEventListener("click", restartDashboardService);
       document.getElementById("tray-restart")?.addEventListener("click", restartDashboardService);
+
+      async function copyRecoveryToken(){
+        const token = document.getElementById("recovery-backup-token")?.value || "";
+        if(!token){ showToast("Kein Backup-Token verfügbar", "warning"); return; }
+        try{
+          await navigator.clipboard.writeText(token);
+          showToast("Backup-Token kopiert", "success");
+        }catch(error){
+          const field = document.getElementById("recovery-backup-token");
+          if(field){ field.focus(); field.select(); }
+          showToast("Token markiert. Bitte mit Strg+C kopieren.", "warning");
+        }
+      }
+
+      function downloadRecoveryToken(){
+        const token = document.getElementById("recovery-backup-token")?.value || "";
+        if(!token){ showToast("Kein Backup-Token verfügbar", "warning"); return; }
+        window.location.href = "/api/recovery/token/download";
+        showToast("Backup-Token-Download gestartet", "success");
+      }
+
+      async function importRecoveryToken(){
+        const field = document.getElementById("recovery-import-token");
+        const token = String(field?.value || "").trim();
+        if(!token){ showToast("Bitte zuerst einen Backup-Token einfügen", "warning"); return; }
+        if(!confirm("Backup-Token übernehmen? Dieser Peer erhält nach dem Neustart die alte Node-ID.")) return;
+        const button = document.getElementById("recovery-import-btn");
+        if(button) button.disabled = true;
+        try{
+          const response = await fetch("/api/recovery/import", {
+            method:"POST",
+            headers:{ "Content-Type":"application/json", "Accept":"application/json", "X-Requested-With":"XMLHttpRequest" },
+            body:JSON.stringify({ backup_token: token })
+          });
+          const payload = await response.json();
+          if(!response.ok || !payload.ok) throw new Error(payload.message || "Backup-Token konnte nicht übernommen werden");
+          showToast(payload.message || "Backup-Token übernommen", "success");
+          waitForServiceAfterRestart();
+        }catch(error){
+          if(button) button.disabled = false;
+          showToast(error.message || "Backup-Token konnte nicht übernommen werden", "error");
+        }
+      }
+
+      function chooseRecoveryTokenFile(){
+        const input = document.getElementById("recovery-upload-token-file");
+        if(!input) return;
+        input.value = "";
+        input.click();
+      }
+
+      async function uploadRecoveryTokenFile(){
+        const input = document.getElementById("recovery-upload-token-file");
+        const file = input?.files?.[0];
+        if(!file){ return; }
+        if(!confirm(`Backup-Token-Datei "${file.name}" hochladen und übernehmen? Dieser Peer erhält nach dem Neustart die alte Node-ID.`)){
+          input.value = "";
+          return;
+        }
+        const button = document.getElementById("recovery-upload-token");
+        if(button) button.disabled = true;
+        try{
+          const form = new FormData();
+          form.append("backup_token_file", file);
+          const response = await fetch("/api/recovery/import-file", {
+            method:"POST",
+            headers:{ "Accept":"application/json", "X-Requested-With":"XMLHttpRequest" },
+            body:form
+          });
+          const payload = await response.json();
+          if(!response.ok || !payload.ok) throw new Error(payload.message || "Backup-Token-Datei konnte nicht übernommen werden");
+          showToast(payload.message || "Backup-Token-Datei übernommen", "success");
+          waitForServiceAfterRestart();
+        }catch(error){
+          if(button) button.disabled = false;
+          showToast(error.message || "Backup-Token-Datei konnte nicht übernommen werden", "error");
+        }finally{
+          if(input) input.value = "";
+        }
+      }
+
+      async function scanRecoveryPeers(){
+        const button = document.getElementById("recovery-scan-peers");
+        if(button) button.disabled = true;
+        try{
+          const response = await fetch("/api/recovery/scan", {
+            method:"POST",
+            headers:{ "Accept":"application/json", "X-Requested-With":"XMLHttpRequest" }
+          });
+          const payload = await response.json();
+          if(!response.ok || !payload.ok) throw new Error(payload.message || "Wiederherstellung konnte nicht gestartet werden");
+          if(payload.state) applyState(payload.state);
+          showToast(payload.message || "Wiederherstellung geprüft", "success");
+        }catch(error){
+          showToast(error.message || "Wiederherstellung konnte nicht gestartet werden", "error");
+        }finally{
+          if(button) button.disabled = false;
+        }
+      }
+
+      document.getElementById("recovery-copy-token")?.addEventListener("click", copyRecoveryToken);
+      document.getElementById("recovery-download-token")?.addEventListener("click", downloadRecoveryToken);
+      document.getElementById("recovery-import-btn")?.addEventListener("click", importRecoveryToken);
+      document.getElementById("recovery-upload-token")?.addEventListener("click", chooseRecoveryTokenFile);
+      document.getElementById("recovery-upload-token-file")?.addEventListener("change", uploadRecoveryTokenFile);
+      document.getElementById("recovery-scan-peers")?.addEventListener("click", scanRecoveryPeers);
 
       const usersCreateForm = document.getElementById("users-create-form");
       if(usersCreateForm){
