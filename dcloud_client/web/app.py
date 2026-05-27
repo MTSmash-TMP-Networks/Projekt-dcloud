@@ -2815,7 +2815,6 @@ def create_app(
                 if hasattr(connector, name):
                     setattr(connector, name, value)
 
-    _sync_peer_connector_settings()
 
     def _stream_external_download_to_relay(local_token: str, stream_id: str, relay_client: HttpRelayClient) -> RelayHttpResponse:
         safe_token = "".join(char for char in str(local_token or "") if char.isalnum() or char in "-_")

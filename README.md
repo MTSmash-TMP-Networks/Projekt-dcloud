@@ -1,5 +1,12 @@
 # dcloud – dezentraler Desktop-Speicher mit Peer-Replikation
 
+### v37 Start-Fix nach Chat-Update
+
+In v36 konnte der Dienst beim Start mit `NameError: _learn_relay_urls` abbrechen.
+Die Chat-/Peer-Synchronisierung wird jetzt erst nach Initialisierung der Relay-Hilfsfunktionen ausgeführt.
+Außerdem ist die ZIP wieder mit dem Projektordner `Projekt-dcloud-main/` gepackt, damit bestehende Installationswege konsistent bleiben.
+
+
 ### Chat steuerbar pro Peer
 
 Unter **Einstellungen → Peer-Chat** kann die Chat-App pro Peer aktiviert oder deaktiviert werden.
