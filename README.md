@@ -1,5 +1,10 @@
 # dcloud – dezentraler Desktop-Speicher mit Peer-Replikation
 
+### v38 Schnellbefehl-Tasten entfernt
+
+Die globalen Tastatur-Schnellbefehle im Dashboard und im Datei-Explorer sind entfernt.
+Buchstaben- und Tastenkombinationen wie `Shift+N`, `Ctrl+S`, `Ctrl+U`, `Delete` oder `Enter` loesen dadurch beim Tippen im Chat, Browser, Texteditor oder in Formularen keine Datei-Aktionen mehr aus.
+
 ### v37 Start-Fix nach Chat-Update
 
 In v36 konnte der Dienst beim Start mit `NameError: _learn_relay_urls` abbrechen.

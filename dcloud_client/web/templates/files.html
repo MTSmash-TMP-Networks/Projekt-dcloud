@@ -533,27 +533,27 @@
     <!-- Explorer Context menu -->
     <div class="ctx" id="ctxMenu" role="menu" aria-label="Explorer Kontextmenü">
       <button type="button" id="ctxOpen">
-        <span>Öffnen</span><span class="kbd">Enter</span>
+        <span>Öffnen</span>
       </button>
       <button type="button" id="ctxDownload">
-        <span>Download</span><span class="kbd">Ctrl+S</span>
+        <span>Download</span>
       </button>
       <div class="sep"></div>
       <button type="button" id="ctxShare">
-        <span>Freigabe umschalten</span><span class="kbd">Ctrl+H</span>
+        <span>Freigabe umschalten</span>
       </button>
       <button type="button" id="ctxOffload">
-        <span>Auf Peers auslagern</span><span class="kbd">Ctrl+O</span>
+        <span>Auf Peers auslagern</span>
       </button>
       <button type="button" id="ctxDelete" style="color:#b42318;">
-        <span>Löschen</span><span class="kbd">Del</span>
+        <span>Löschen</span>
       </button>
       <div class="sep"></div>
       <button type="button" id="ctxNewFolder">
-        <span>Neuer Ordner…</span><span class="kbd">Shift+N</span>
+        <span>Neuer Ordner…</span>
       </button>
       <button type="button" id="ctxRefresh">
-        <span>Aktualisieren</span><span class="kbd">F5</span>
+        <span>Aktualisieren</span>
       </button>
     </div>
 
@@ -753,50 +753,10 @@
       // Toolbar button
       btnNewFolder.addEventListener('click', focusNewFolder);
 
-      // Keyboard shortcuts
+      // Keine globalen Schnellbefehl-Tasten mehr: Eingaben in Chat/Formularen sollen
+      // keine Datei-Aktionen ausloesen. Escape darf nur Kontextmenues schliessen.
       window.addEventListener('keydown', (e)=>{
         if(e.key === 'Escape') closeCtx();
-
-        if(e.key === 'F5'){
-          // normal reload ok
-          return;
-        }
-
-        if(e.shiftKey && (e.key === 'N' || e.key === 'n')){
-          e.preventDefault();
-          focusNewFolder();
-        }
-
-        if(e.key === 'Delete' && selectedTile && (selectedTile.dataset.owner === '1' || selectedTile.dataset.deletable === '1')){
-          e.preventDefault();
-          document.getElementById('ctxDelete').click();
-        }
-
-        if(e.key === 'Enter' && selectedTile && selectedTile.dataset.download){
-          e.preventDefault();
-          window.location.href = selectedTile.dataset.download;
-        }
-
-        if(e.ctrlKey && (e.key === 's' || e.key === 'S')){
-          if(selectedTile?.dataset.download){
-            e.preventDefault();
-            window.location.href = selectedTile.dataset.download;
-          }
-        }
-
-        if(e.ctrlKey && (e.key === 'o' || e.key === 'O')){
-          if(selectedTile && selectedTile.dataset.owner === '1'){
-            e.preventDefault();
-            document.getElementById('ctxOffload').click();
-          }
-        }
-
-        if(e.ctrlKey && (e.key === 'h' || e.key === 'H')){
-          if(selectedTile && selectedTile.dataset.owner === '1'){
-            e.preventDefault();
-            document.getElementById('ctxShare').click();
-          }
-        }
       });
 
       function formatBytes(value){

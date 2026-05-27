@@ -1073,20 +1073,20 @@
     </aside>
 
     <div class="ctx" id="ctxMenu" role="menu" aria-label="Desktop Kontextmenü">
-      <button type="button" id="ctxOpen"><span>Öffnen</span><span class="kbd">Enter</span></button>
-      <button type="button" id="ctxPreview"><span>Vorschau öffnen</span><span class="kbd">Space</span></button>
-      <button type="button" id="ctxEdit"><span>Im Texteditor bearbeiten</span><span class="kbd">Ctrl+E</span></button>
-      <button type="button" id="ctxDownload"><span>Herunterladen</span><span class="kbd">Ctrl+S</span></button>
+      <button type="button" id="ctxOpen"><span>Öffnen</span></button>
+      <button type="button" id="ctxPreview"><span>Vorschau öffnen</span></button>
+      <button type="button" id="ctxEdit"><span>Im Texteditor bearbeiten</span></button>
+      <button type="button" id="ctxDownload"><span>Herunterladen</span></button>
       <button type="button" id="ctxExternalLink"><span>Externen Link erstellen…</span><span class="kbd">1h</span></button>
-      <button type="button" id="ctxShare"><span>An Peer freigeben…</span><span class="kbd">Ctrl+H</span></button>
-      <button type="button" id="ctxOffload"><span>Lokal auslagern auf Peers</span><span class="kbd">Ctrl+O</span></button>
-      <button type="button" id="ctxMoveFolder"><span>In Ordner verschieben…</span><span class="kbd">Ctrl+B</span></button>
-      <button type="button" id="ctxMovePeer"><span>Kopie auf Peer erstellen…</span><span class="kbd">Ctrl+M</span></button>
-      <button type="button" id="ctxDelete" style="color:#b42318;"><span>Löschen</span><span class="kbd">Del</span></button>
+      <button type="button" id="ctxShare"><span>An Peer freigeben…</span></button>
+      <button type="button" id="ctxOffload"><span>Lokal auslagern auf Peers</span></button>
+      <button type="button" id="ctxMoveFolder"><span>In Ordner verschieben…</span></button>
+      <button type="button" id="ctxMovePeer"><span>Kopie auf Peer erstellen…</span></button>
+      <button type="button" id="ctxDelete" style="color:#b42318;"><span>Löschen</span></button>
       <div class="sep"></div>
-      <button type="button" id="ctxUpload"><span>Datei hier hochladen…</span><span class="kbd">Ctrl+U</span></button>
-      <button type="button" id="ctxNewFolder"><span>Neuer Ordner…</span><span class="kbd">Shift+N</span></button>
-      <button type="button" id="ctxRefresh"><span>Aktualisieren</span><span class="kbd">F5</span></button>
+      <button type="button" id="ctxUpload"><span>Datei hier hochladen…</span></button>
+      <button type="button" id="ctxNewFolder"><span>Neuer Ordner…</span></button>
+      <button type="button" id="ctxRefresh"><span>Aktualisieren</span></button>
     </div>
 
     <div class="dialog-backdrop" id="folderDialog" hidden>
@@ -3763,13 +3763,6 @@ ${file.name}`)) return;
         if(item.dataset.app) openWindow(item.dataset.app);
         if(item.dataset.folder) openExplorerAt(item.dataset.folder);
       });
-      desktopArea.addEventListener("keydown", event => {
-        if(event.key !== "Enter") return;
-        const item = document.activeElement.closest(".desk-item");
-        if(!item) return;
-        if(item.dataset.app) openWindow(item.dataset.app);
-        if(item.dataset.folder) openExplorerAt(item.dataset.folder);
-      });
       desktopArea.addEventListener("contextmenu", event => {
         event.preventDefault();
         const item = event.target.closest(".desk-item");
@@ -4288,62 +4281,14 @@ ${file.name}`)) return;
         transferToggle.onclick = () => setTransferPanelExpanded(!transferExpanded);
       }
 
+      // Keine globalen Schnellbefehl-Tasten mehr: Buchstaben wie Shift+N duerfen beim Tippen
+      // im Chat, Browser, Editor oder Formularen keine Datei-Explorer-Aktion ausloesen.
       window.addEventListener("keydown", event => {
         if(event.key === "Escape"){
           if(!folderDialog.hidden) closeFolderDialog();
           if(chatFileDialog && !chatFileDialog.hidden) closeChatFileDialog();
           if(!windows.viewer.hidden) closeWindow("viewer");
           closeCtx();
-        }
-        if(event.key === "F5") return;
-        if(event.shiftKey && (event.key === "N" || event.key === "n")){
-          event.preventDefault();
-          openFolderDialog(windows.explorer.hidden ? VROOT : explorerPath);
-        }
-        if(event.ctrlKey && (event.key === "u" || event.key === "U")){
-          event.preventDefault();
-          openUploadPicker(chooseUploadTarget());
-        }
-        if(event.key === "Delete" && selectedTarget.kind === "file" && selectedTarget.file.web){
-          event.preventDefault();
-          deleteWebTarget(selectedTarget).catch(error => showToast(error.message, "error"));
-        }else if(event.key === "Delete" && selectedTarget.kind === "file" && selectedTarget.file.browserDownload){
-          event.preventDefault();
-          deleteFile(selectedTarget.file).catch(error => showToast(error.message, "error"));
-        }else if(event.key === "Delete" && selectedTarget.kind === "file" && selectedTarget.file.owner){
-          event.preventDefault();
-          deleteFile(selectedTarget.file).catch(error => showToast(error.message, "error"));
-        }
-        if(event.key === "Delete" && selectedTarget.kind === "folder" && ![DEFAULT_FOLDER, SHARED_FOLDER, DOWNLOADS_FOLDER].includes(normalizeFolderPath(selectedTarget.path))){
-          event.preventDefault();
-          deleteFolder(selectedTarget.path).catch(error => showToast(error.message, "error"));
-        }
-        if(event.key === "Enter"){
-          if(selectedTarget.kind === "folder") openExplorerAt(selectedTarget.path);
-          if(selectedTarget.kind === "file") openFile(selectedTarget.file);
-        }
-        if(event.key === " " && selectedTarget.kind === "file" && isPreviewable(selectedTarget.file)){
-          event.preventDefault();
-          openPreview(selectedTarget.file);
-        }
-        if(event.ctrlKey && (event.key === "e" || event.key === "E") && selectedTarget.kind === "file" && selectedTarget.file.web){
-          event.preventDefault();
-          openWebEditor(selectedTarget.file).catch(error => showToast(error.message, "error"));
-        }
-        if(event.ctrlKey && (event.key === "s" || event.key === "S") && activeWindow === "webEditor"){
-          event.preventDefault();
-          saveWebEditor().catch(error => showToast(error.message, "error"));
-        }else if(event.ctrlKey && (event.key === "s" || event.key === "S") && selectedTarget.kind === "file"){
-          event.preventDefault();
-          startDownload(selectedTarget.file).catch(error => showToast(error.message, "error"));
-        }
-        if(event.ctrlKey && (event.key === "o" || event.key === "O") && selectedTarget.kind === "file" && selectedTarget.file.owner){
-          event.preventDefault();
-          offloadFile(selectedTarget.file).catch(error => showToast(error.message, "error"));
-        }
-        if(event.ctrlKey && (event.key === "h" || event.key === "H") && selectedTarget.kind === "file" && selectedTarget.file.owner){
-          event.preventDefault();
-          toggleShare(selectedTarget.file).catch(error => showToast(error.message, "error"));
         }
       });
 
