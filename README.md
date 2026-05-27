@@ -1208,10 +1208,10 @@ Wichtig: Der Backup-Token und die heruntergeladene Token-Datei sind geheim. Nich
 
 ## Sicherheitshinweise
 
-Die v32-Security-Hardening-Version schützt die wichtigsten Verwaltungs- und Peer-Flächen zusätzlich:
+Die v33-Security-Hardening-Version schützt die wichtigsten Verwaltungs- und Peer-Flächen zusätzlich:
 
 - Das Flask-Dashboard nutzt nicht mehr die Node-ID als Session-Secret. Beim ersten Start wird ein zufälliges Secret unter `storage/security/dashboard_secret.key` erzeugt.
-- Dashboard-POST/PUT/PATCH/DELETE-Aktionen nutzen CSRF-Tokens und eine Origin-/Referer-Prüfung.
+- Dashboard-POST/PUT/PATCH/DELETE-Aktionen nutzen CSRF-Tokens. Die Origin-/Referer-Prüfung ist Reverse-Proxy-freundlich und lässt gültige CSRF-Token auch dann zu, wenn Host-Header durch Mesh-Agent, Portweiterleitung oder Proxy umgesetzt werden.
 - Session-Cookies sind `HttpOnly` und `SameSite=Lax`; `DCLOUD_COOKIE_SECURE=1` aktiviert zusätzlich `Secure` für HTTPS-Betrieb.
 - P2P-API-Anfragen unter `/api/p2p/...` müssen jetzt mit der Ed25519-Node-ID signiert sein. Enthalten sind Timestamp, Nonce, Method, Pfad und Body-Hash. Replay-Angriffe werden über Nonce-Cache blockiert.
 - P2P-Endpunkte haben ein einfaches Rate-Limit und ein Größenlimit.
@@ -1220,6 +1220,9 @@ Die v32-Security-Hardening-Version schützt die wichtigsten Verwaltungs- und Pee
 - Das PHP-Relay gibt den Tages-Relay-Token nicht mehr öffentlich über `health` aus. Neue Clients bekommen ihn nur über eine signierte Health-Anfrage; normale Relay-Aktionen akzeptieren signierte Node-Anfragen oder den gültigen Relay-Token.
 
 Weitere Hinweise:
+
+
+Reverse-Proxy-/Mesh-Agent-Hinweis: Wenn das Dashboard über einen externen Namen oder eine Portweiterleitung läuft, kannst du erlaubte öffentliche Origins zusätzlich per Umgebungsvariable setzen, z. B. `DCLOUD_DASHBOARD_PUBLIC_URL=https://dcloud.example.tld` oder `DCLOUD_DASHBOARD_ALLOWED_ORIGINS=https://dcloud.example.tld,http://nas.local:8787`.
 
 - `web.host: 0.0.0.0` macht Dashboard und Peer-API im LAN erreichbar.
 - Stelle den Dienst trotzdem nicht ungeschützt ins Internet. Nutze Firewall, VPN oder Reverse Proxy, wenn du dcloud außerhalb deines LANs bereitstellst.

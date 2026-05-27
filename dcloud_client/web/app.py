@@ -399,21 +399,77 @@ def create_app(
             return jsonify({"ok": False, "message": message}), 403
         return Response(message, status=403, content_type="text/plain; charset=utf-8")
 
+    def _normalize_origin(value: str) -> str | None:
+        value = (value or "").strip()
+        if not value or value == "null":
+            return None
+        try:
+            parsed = url_parse.urlsplit(value)
+        except Exception:
+            return None
+        if not parsed.scheme or not parsed.netloc:
+            return None
+        scheme = parsed.scheme.lower()
+        host = (parsed.hostname or "").strip().lower().rstrip(".")
+        if not host:
+            return None
+        port = parsed.port
+        default_port = 443 if scheme == "https" else 80
+        netloc = host if port in (None, default_port) else f"{host}:{port}"
+        return f"{scheme}://{netloc}"
+
+    def _dashboard_allowed_origins() -> set[str]:
+        origins: set[str] = set()
+
+        def add(value: str | None) -> None:
+            normalized = _normalize_origin(value or "")
+            if normalized:
+                origins.add(normalized)
+
+        add(request.host_url.rstrip("/"))
+
+        host = (request.headers.get("Host") or request.host or "").split(",", 1)[0].strip()
+        proto = (request.headers.get("X-Forwarded-Proto") or request.scheme or "http").split(",", 1)[0].strip()
+        if host:
+            add(f"{proto}://{host}")
+
+        forwarded_host = (request.headers.get("X-Forwarded-Host") or "").split(",", 1)[0].strip()
+        forwarded_proto = (request.headers.get("X-Forwarded-Proto") or proto or "http").split(",", 1)[0].strip()
+        if forwarded_host:
+            add(f"{forwarded_proto}://{forwarded_host}")
+
+        forwarded = request.headers.get("Forwarded") or ""
+        if forwarded:
+            first = forwarded.split(",", 1)[0]
+            forwarded_parts: dict[str, str] = {}
+            for part in first.split(";"):
+                if "=" not in part:
+                    continue
+                key, value = part.split("=", 1)
+                forwarded_parts[key.strip().lower()] = value.strip().strip('"')
+            if forwarded_parts.get("host"):
+                add(f"{forwarded_parts.get('proto') or proto or 'http'}://{forwarded_parts['host']}")
+
+        for env_name in ("DCLOUD_DASHBOARD_PUBLIC_URL", "DCLOUD_DASHBOARD_ALLOWED_ORIGINS", "DCLOUD_TRUSTED_ORIGINS"):
+            raw = os.environ.get(env_name, "")
+            for item in re.split(r"[\s,;]+", raw):
+                add(item)
+        return origins
+
     def _same_origin_or_empty() -> bool:
         origin = request.headers.get("Origin") or ""
         referer = request.headers.get("Referer") or ""
-        expected = request.host_url.rstrip("/")
-        for value in (origin, referer):
-            if not value:
-                continue
-            try:
-                parsed = url_parse.urlsplit(value)
-                candidate = f"{parsed.scheme}://{parsed.netloc}".rstrip("/")
-            except Exception:
-                return False
-            if candidate != expected:
-                return False
-        return True
+        if not origin and not referer:
+            return True
+        # Prefer the Origin header when present. Referer is only a fallback because
+        # many browsers and privacy tools intentionally strip or shorten it.
+        values = [origin] if origin else [referer]
+        allowed = _dashboard_allowed_origins()
+        for value in values:
+            candidate = _normalize_origin(value)
+            if candidate and candidate in allowed:
+                return True
+        return False
 
     def _csrf_exempt_path(path: str) -> bool:
         if request.method == "OPTIONS":
@@ -434,8 +490,6 @@ def create_app(
             return None
         if _csrf_exempt_path(path):
             return None
-        if not _same_origin_or_empty():
-            return _csrf_error("Anfrage wurde wegen ungültiger Herkunft blockiert.")
         expected = str(session.get("dcloud_csrf_token") or "")
         provided = str(
             request.headers.get("X-CSRF-Token")
@@ -444,7 +498,10 @@ def create_app(
             or request.args.get("csrf_token")
             or ""
         )
-        if not expected or not provided or not secrets.compare_digest(expected, provided):
+        token_ok = bool(expected and provided and secrets.compare_digest(expected, provided))
+        if not token_ok:
+            if not _same_origin_or_empty():
+                return _csrf_error("Anfrage wurde wegen ungültiger Herkunft blockiert.")
             return _csrf_error()
         return None
 
