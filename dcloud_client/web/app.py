@@ -22,6 +22,7 @@ from uuid import uuid4
 import atexit
 import base64
 import socket
+import ipaddress
 import time
 import subprocess
 import re
@@ -51,6 +52,7 @@ from ..config import (
     update_runtime_settings,
 )
 from ..identity import IdentityManager, NodeIdentity, build_backup_token
+from ..crypto import b64decode, derive_node_id, sha256_hex, verify_signature
 from ..manifests import DEFAULT_FOLDER, INCOMING_SHARES_FOLDER, REMOTE_DELETE_GRACE_SECONDS, FileManifest, ManifestStore, sanitize_folder_path
 from ..network.http_relay import HttpRelayClient, HttpRelayTransport, RelayHttpResponse, RELAY_HOST
 from ..network.p2p_storage import (
@@ -309,17 +311,49 @@ def create_app(
     peer_provider: PeerProvider,
     peer_connector: PeerConnector | None = None,
 ) -> Flask:
+    def _load_or_create_dashboard_secret() -> str:
+        secret_path = chunk_store.root / "security" / "dashboard_secret.key"
+        try:
+            secret_path.parent.mkdir(parents=True, exist_ok=True)
+            if secret_path.exists():
+                value = secret_path.read_text(encoding="utf-8").strip()
+                if len(value) >= 32:
+                    return value
+            value = secrets.token_urlsafe(48)
+            tmp_path = secret_path.with_suffix(".tmp")
+            tmp_path.write_text(value, encoding="utf-8")
+            try:
+                os.chmod(tmp_path, 0o600)
+            except OSError:
+                pass
+            tmp_path.replace(secret_path)
+            return value
+        except Exception:
+            # Last-resort fallback keeps the dashboard running, but persistent
+            # installations should always be able to write the secret file.
+            return secrets.token_urlsafe(48)
+
+    class _NoRedirectHandler(url_request.HTTPRedirectHandler):
+        def redirect_request(self, req: Any, fp: Any, code: int, msg: str, headers: Any, newurl: str) -> None:  # type: ignore[override]
+            return None
+
     app = Flask(__name__)
-    app.secret_key = identity.node_id[:32]
-    app.config["DCLOUD_APP_CONFIG"] = config
+    app.secret_key = _load_or_create_dashboard_secret()
+    app.config.update(
+        DCLOUD_APP_CONFIG=config,
+        SESSION_COOKIE_HTTPONLY=True,
+        SESSION_COOKIE_SAMESITE="Lax",
+        SESSION_COOKIE_SECURE=str(os.environ.get("DCLOUD_COOKIE_SECURE", "")).lower() in {"1", "true", "yes", "on"},
+        MAX_CONTENT_LENGTH=int(os.environ.get("DCLOUD_MAX_REQUEST_BYTES", str(1024 * 1024 * 1024))),
+    )
     app.jinja_env.filters["human_bytes"] = human_bytes
     browser_access_token = secrets.token_urlsafe(32)
     browser_cookie_jar = http.cookiejar.CookieJar()
-    browser_http_opener = url_request.build_opener(url_request.HTTPCookieProcessor(browser_cookie_jar))
+    browser_http_opener = url_request.build_opener(_NoRedirectHandler, url_request.HTTPCookieProcessor(browser_cookie_jar))
     relay_clients: dict[str, HttpRelayClient] = {}
     relay_transports: dict[str, HttpRelayTransport] = {}
     relay_lock = threading.RLock()
-    p2p_client = P2PStorageClient(default_web_port=config.web.port)
+    p2p_client = P2PStorageClient(default_web_port=config.web.port, identity=identity)
     upload_progress = UploadProgressTracker(persist_dir=chunk_store.tmp_dir / "upload_progress")
     download_progress = UploadProgressTracker(persist_dir=chunk_store.tmp_dir / "download_progress")
     network_load_sampler = NetworkLoadSampler()
@@ -343,6 +377,219 @@ def create_app(
     user_store = UserStore(chunk_store.root / "users.json")
     web_root = chunk_store.root / "web"
     browser_downloads_root = chunk_store.root / BROWSER_DOWNLOADS_FOLDER
+    p2p_nonce_lock = threading.RLock()
+    p2p_seen_nonces: dict[str, float] = {}
+    p2p_rate_lock = threading.RLock()
+    p2p_rate_buckets: dict[str, deque[float]] = defaultdict(deque)
+    MAX_P2P_REQUEST_BYTES = 80 * 1024 * 1024
+    P2P_SIGNATURE_WINDOW_SECONDS = 300
+    P2P_NONCE_RETENTION_SECONDS = 900
+    P2P_RATE_WINDOW_SECONDS = 60
+    P2P_RATE_MAX_REQUESTS = 420
+
+    def _csrf_token() -> str:
+        token = session.get("dcloud_csrf_token")
+        if not isinstance(token, str) or len(token) < 24:
+            token = secrets.token_urlsafe(32)
+            session["dcloud_csrf_token"] = token
+        return token
+
+    def _csrf_error(message: str = "Sicherheitsprüfung fehlgeschlagen. Bitte Dashboard neu laden.") -> Response:
+        if _wants_json_response():
+            return jsonify({"ok": False, "message": message}), 403
+        return Response(message, status=403, content_type="text/plain; charset=utf-8")
+
+    def _same_origin_or_empty() -> bool:
+        origin = request.headers.get("Origin") or ""
+        referer = request.headers.get("Referer") or ""
+        expected = request.host_url.rstrip("/")
+        for value in (origin, referer):
+            if not value:
+                continue
+            try:
+                parsed = url_parse.urlsplit(value)
+                candidate = f"{parsed.scheme}://{parsed.netloc}".rstrip("/")
+            except Exception:
+                return False
+            if candidate != expected:
+                return False
+        return True
+
+    def _csrf_exempt_path(path: str) -> bool:
+        if request.method == "OPTIONS":
+            return True
+        if path.startswith("/api/p2p/"):
+            return True
+        if path.startswith("/dcloud-site"):
+            return True
+        if path.startswith("/external/"):
+            return True
+        if path.startswith("/browser/view"):
+            token = str(request.args.get("browser_token") or "")
+            return bool(token and secrets.compare_digest(token, browser_access_token))
+        return False
+
+    def _check_csrf_for_dashboard_request(path: str) -> Response | None:
+        if request.method.upper() not in {"POST", "PUT", "PATCH", "DELETE"}:
+            return None
+        if _csrf_exempt_path(path):
+            return None
+        if not _same_origin_or_empty():
+            return _csrf_error("Anfrage wurde wegen ungültiger Herkunft blockiert.")
+        expected = str(session.get("dcloud_csrf_token") or "")
+        provided = str(
+            request.headers.get("X-CSRF-Token")
+            or request.headers.get("X-DCloud-CSRF")
+            or request.form.get("csrf_token")
+            or request.args.get("csrf_token")
+            or ""
+        )
+        if not expected or not provided or not secrets.compare_digest(expected, provided):
+            return _csrf_error()
+        return None
+
+    def _cleanup_p2p_security_state(now: float) -> None:
+        cutoff_nonce = now - P2P_NONCE_RETENTION_SECONDS
+        with p2p_nonce_lock:
+            for key, seen_at in list(p2p_seen_nonces.items()):
+                if seen_at < cutoff_nonce:
+                    p2p_seen_nonces.pop(key, None)
+        cutoff_rate = now - P2P_RATE_WINDOW_SECONDS
+        with p2p_rate_lock:
+            for key, bucket in list(p2p_rate_buckets.items()):
+                while bucket and bucket[0] < cutoff_rate:
+                    bucket.popleft()
+                if not bucket:
+                    p2p_rate_buckets.pop(key, None)
+
+    def _p2p_rate_limit_key() -> str:
+        forwarded = request.headers.get("X-Forwarded-For", "").split(",", 1)[0].strip()
+        return forwarded or request.remote_addr or "unknown"
+
+    def _check_p2p_rate_limit() -> Response | None:
+        now = time.time()
+        _cleanup_p2p_security_state(now)
+        key = _p2p_rate_limit_key()
+        with p2p_rate_lock:
+            bucket = p2p_rate_buckets[key]
+            cutoff = now - P2P_RATE_WINDOW_SECONDS
+            while bucket and bucket[0] < cutoff:
+                bucket.popleft()
+            if len(bucket) >= P2P_RATE_MAX_REQUESTS:
+                return jsonify({"ok": False, "message": "P2P-Rate-Limit erreicht"}), 429
+            bucket.append(now)
+        return None
+
+    def _p2p_signature_error(message: str, status: int = 403) -> Response:
+        return jsonify({"ok": False, "message": message}), status
+
+    def _verify_p2p_request_signature() -> Response | None:
+        if not request.path.startswith("/api/p2p/"):
+            return None
+        limited = _check_p2p_rate_limit()
+        if limited is not None:
+            return limited
+        try:
+            content_length = int(request.headers.get("Content-Length") or 0)
+        except ValueError:
+            content_length = 0
+        if content_length > MAX_P2P_REQUEST_BYTES:
+            return _p2p_signature_error("P2P-Anfrage ist zu groß", 413)
+
+        node_id = str(request.headers.get("X-DCloud-Node-Id") or "").strip()
+        public_key_b64 = str(request.headers.get("X-DCloud-Public-Key") or "").strip()
+        timestamp_text = str(request.headers.get("X-DCloud-Timestamp") or "").strip()
+        nonce = str(request.headers.get("X-DCloud-Nonce") or "").strip()
+        body_hash = str(request.headers.get("X-DCloud-Body-SHA256") or "").strip().lower()
+        signature = str(request.headers.get("X-DCloud-Signature") or "").strip()
+        if not all([node_id, public_key_b64, timestamp_text, nonce, body_hash, signature]):
+            return _p2p_signature_error("P2P-Signatur fehlt")
+        if len(nonce) > 96 or not re.match(r"^[A-Za-z0-9_.:-]+$", nonce):
+            return _p2p_signature_error("P2P-Nonce ist ungültig")
+        try:
+            timestamp = float(timestamp_text)
+        except ValueError:
+            return _p2p_signature_error("P2P-Zeitstempel ist ungültig")
+        now = time.time()
+        if abs(now - timestamp) > P2P_SIGNATURE_WINDOW_SECONDS:
+            return _p2p_signature_error("P2P-Signatur ist abgelaufen")
+        try:
+            public_key_bytes = b64decode(public_key_b64)
+        except Exception:
+            return _p2p_signature_error("P2P-Public-Key ist ungültig")
+        if derive_node_id(public_key_bytes) != node_id:
+            return _p2p_signature_error("P2P-Node-ID passt nicht zum Public-Key")
+        body = request.get_data(cache=True) if request.method.upper() != "GET" else b""
+        actual_hash = sha256_hex(body)
+        if body_hash != actual_hash:
+            return _p2p_signature_error("P2P-Body-Hash passt nicht")
+        nonce_key = f"{node_id}:{nonce}"
+        with p2p_nonce_lock:
+            if nonce_key in p2p_seen_nonces:
+                return _p2p_signature_error("P2P-Anfrage wurde bereits verwendet")
+            p2p_seen_nonces[nonce_key] = now
+        path_with_query = request.full_path[:-1] if request.full_path.endswith("?") else request.full_path
+        canonical = "\n".join([
+            request.method.upper(),
+            path_with_query,
+            timestamp_text,
+            nonce,
+            actual_hash,
+        ]).encode("utf-8")
+        if not verify_signature(public_key_bytes, canonical, signature):
+            return _p2p_signature_error("P2P-Signatur ist ungültig")
+        request.environ["dcloud.p2p_node_id"] = node_id
+        return None
+
+    def _host_is_private_or_local(hostname: str) -> bool:
+        host = (hostname or "").strip().strip("[]").lower().rstrip(".")
+        if not host:
+            return True
+        if host in {"localhost", "localhost.localdomain", "host.docker.internal"} or host.endswith(".local"):
+            return True
+        try:
+            addresses = [ipaddress.ip_address(host)]
+        except ValueError:
+            try:
+                infos = socket.getaddrinfo(host, None)
+            except socket.gaierror:
+                raise StorageError("Hostname konnte nicht aufgelöst werden")
+            addresses = []
+            for info in infos:
+                sockaddr = info[4]
+                if sockaddr:
+                    try:
+                        addresses.append(ipaddress.ip_address(str(sockaddr[0]).strip("[]")))
+                    except ValueError:
+                        pass
+        if not addresses:
+            return True
+        for address in addresses:
+            if (
+                address.is_private
+                or address.is_loopback
+                or address.is_link_local
+                or address.is_multicast
+                or address.is_reserved
+                or address.is_unspecified
+            ):
+                return True
+        return False
+
+    def _validate_external_browser_target(url: str) -> None:
+        parsed = url_parse.urlsplit(url)
+        if parsed.scheme.lower() not in {"http", "https"}:
+            raise StorageError("Der interne Browser erlaubt nur http:// und https:// URLs.")
+        hostname = (parsed.hostname or "").lower()
+        if not hostname:
+            raise StorageError("URL enthält keinen Hostnamen")
+        if hostname.endswith(".dcloud"):
+            return
+        if _host_is_private_or_local(hostname):
+            raise StorageError("Diese Adresse wurde aus Sicherheitsgründen blockiert, weil sie auf ein lokales oder privates Netzwerk zeigt.")
+        port = parsed.port
+        if port is not None and port not in {80, 443, 8080, 8443}:
+            raise StorageError("Dieser Port ist im Dashboard-Browser nicht erlaubt.")
 
     def _is_ajax_request() -> bool:
         return request.headers.get("X-Requested-With") == "XMLHttpRequest" or request.accept_mimetypes.best == "application/json"
@@ -1289,9 +1536,11 @@ def create_app(
         return method, body, headers
 
     def _fetch_external_browser_url(url: str, *, native_mode: bool = False) -> Response:
+        try:
+            _validate_external_browser_target(url)
+        except StorageError as exc:
+            return Response(str(exc), status=403, content_type="text/plain; charset=utf-8")
         parsed = url_parse.urlsplit(url)
-        if parsed.scheme.lower() not in {"http", "https"}:
-            return Response("Der interne Browser erlaubt nur http:// und https:// URLs.", status=400, content_type="text/plain; charset=utf-8")
         hostname = (parsed.hostname or "").lower()
         if _is_google_host(hostname):
             params = url_parse.parse_qs(parsed.query, keep_blank_values=True)
@@ -1323,7 +1572,12 @@ def create_app(
             headers = {str(k): str(v) for k, v in exc.headers.items()}
             location = headers.get("Location") or headers.get("location")
             if location and 300 <= int(exc.code) < 400:
-                redirected = _browser_proxy_target(location, url, native_mode=native_mode)
+                absolute_location = url_parse.urljoin(url, location)
+                try:
+                    _validate_external_browser_target(absolute_location)
+                except StorageError as validation_error:
+                    return Response(str(validation_error), status=403, content_type="text/plain; charset=utf-8")
+                redirected = _browser_proxy_target(absolute_location, url, native_mode=native_mode)
                 return redirect(redirected, code=302)
             return _proxy_response_from_bytes(body, status=int(exc.code), headers=headers, base_url=url, native_mode=native_mode)
         except Exception as exc:
@@ -1847,6 +2101,12 @@ def create_app(
     @app.before_request
     def _dashboard_auth_guard() -> Response | None:
         path = request.path or "/"
+        p2p_error = _verify_p2p_request_signature()
+        if p2p_error is not None:
+            return p2p_error
+        csrf_error = _check_csrf_for_dashboard_request(path)
+        if csrf_error is not None:
+            return csrf_error
         if _is_public_or_peer_path(path):
             if path == "/setup" and user_store.has_users():
                 return redirect(url_for("dashboard"))
@@ -1859,9 +2119,18 @@ def create_app(
             return _auth_error()
         return None
 
+    @app.after_request
+    def _security_headers(response: Response) -> Response:
+        response.headers.setdefault("X-Content-Type-Options", "nosniff")
+        response.headers.setdefault("Referrer-Policy", "no-referrer")
+        response.headers.setdefault("Permissions-Policy", "geolocation=(), microphone=(), camera=(), payment=()")
+        if request.path.startswith("/browser/view"):
+            response.headers["X-Frame-Options"] = "SAMEORIGIN"
+        return response
+
     @app.context_processor
     def _inject_auth_context() -> dict[str, Any]:
-        return {"auth": _auth_payload()}
+        return {"auth": _auth_payload(), "csrf_token": _csrf_token()}
 
     def _list_active_peers() -> list[Any]:
         if peer_connector is not None and hasattr(peer_connector, "prune_stale_peers"):

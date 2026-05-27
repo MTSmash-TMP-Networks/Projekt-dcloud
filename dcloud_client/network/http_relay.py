@@ -12,6 +12,7 @@ import base64
 import json
 import logging
 import re
+import secrets
 import threading
 import time
 from typing import Any, Callable
@@ -20,6 +21,7 @@ from uuid import uuid4
 
 from .peers import Peer, PeerProvider
 from ..identity import NodeIdentity
+from ..crypto import sign_bytes
 
 LOG = logging.getLogger(__name__)
 RELAY_HOST = "__relay__"
@@ -164,12 +166,14 @@ class HttpRelayClient:
         self.last_token_refresh_at: float | None = None
 
     def _send_json(self, payload: dict[str, Any], *, include_token: bool = True, timeout: float | None = None) -> dict[str, Any]:
+        action = str(payload.get("action", ""))
         full_payload = {
             "protocol": "dcloud-relay-v1",
             "node_id": self.identity.node_id,
             # Deprecated compatibility field. New relays use relay_token.
             "secret": self.secret,
             **payload,
+            **self._relay_signature_fields(action),
         }
         if include_token and self.access_token:
             full_payload["relay_token"] = self.access_token
@@ -228,6 +232,17 @@ class HttpRelayClient:
         if self.access_token_expires_at is None:
             return False
         return time.time() + self.TOKEN_REFRESH_MARGIN_SECONDS >= self.access_token_expires_at
+
+    def _relay_signature_fields(self, action: str) -> dict[str, str]:
+        timestamp = str(int(time.time()))
+        nonce = secrets.token_urlsafe(18)
+        canonical = "\n".join([str(action or ""), self.identity.node_id, timestamp, nonce]).encode("utf-8")
+        return {
+            "public_key": self.identity.public_key_b64,
+            "relay_signature_timestamp": timestamp,
+            "relay_signature_nonce": nonce,
+            "relay_signature": sign_bytes(self.identity.private_key, canonical),
+        }
 
     def _relay_url_with_php_suffix(self) -> str:
         if self.relay_url.lower().endswith('/dcloud_relay.php'):
@@ -421,6 +436,7 @@ class HttpRelayClient:
             "node_id": self.identity.node_id,
             "secret": self.secret,
             **payload,
+            **self._relay_signature_fields(action),
         }
         if action != "health" and self.access_token:
             full_payload["relay_token"] = self.access_token

@@ -4,6 +4,7 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>dcloud Control Desktop</title>
+  <meta name="dcloud-csrf-token" content="{{ csrf_token }}" />
   <style>
     :root{
       color-scheme: light;
@@ -721,7 +722,7 @@
           <span class="browser-chip" id="browser-engine-status">Modus: Server-Proxy</span>
         </div>
         <div class="browser-stage">
-          <iframe class="browser-frame" id="browser-frame" title="dcloud Browser" referrerpolicy="no-referrer" sandbox="allow-scripts allow-same-origin allow-forms allow-popups allow-popups-to-escape-sandbox allow-downloads allow-modals allow-top-navigation-by-user-activation"></iframe>
+          <iframe class="browser-frame" id="browser-frame" title="dcloud Browser" referrerpolicy="no-referrer" sandbox="allow-scripts allow-forms allow-popups allow-downloads allow-modals allow-top-navigation-by-user-activation"></iframe>
           <div class="browser-loading-indicator" id="browser-loading" hidden aria-live="polite">
             <div class="browser-loading-title"><span class="browser-loading-dot"></span><span id="browser-loading-label">Webseite wird geladen…</span></div>
             <div class="browser-loading-track"><span></span></div>
@@ -867,6 +868,7 @@
         <p>Hier steuerst du Speicherfreigabe, Komprimierung, Relay-Vermittlung, SMB und manuelle Peer-Verbindungen.</p>
 
         <form method="post" action="/settings" class="settings-form" id="settings-form">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
           <input type="hidden" name="next" value="/">
 
           <section class="settings-panel">
@@ -961,6 +963,7 @@
         <hr style="border:0;border-top:1px solid #d8e4f6;margin:1.1rem 0;">
         <p>Peers manuell eintragen oder über Discovery/Relay automatisch finden.</p>
         <form method="post" action="/peers" class="settings-form">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
           <label for="settings-peer">Peer-Adresse (host:port)</label>
           <input id="settings-peer" type="text" name="peer" placeholder="192.168.1.10:6881" required>
           <label style="display:flex;align-items:center;gap:.45rem;">
@@ -1218,7 +1221,8 @@
       folders: {{ folders | tojson }},
       folderTree: {{ folder_tree_json | tojson }},
       gitRevision: {{ git_revision | tojson }},
-      auth: {{ auth | tojson }}
+      auth: {{ auth | tojson }},
+      csrfToken: {{ csrf_token | tojson }}
     };
     const DEFAULT_FOLDER = {{ default_folder | tojson }};
     const SHARED_FOLDER = {{ shared_folder | tojson }};
@@ -1227,6 +1231,23 @@
 
     (function(){
       "use strict";
+      const csrfToken = INITIAL_STATE.csrfToken || document.querySelector('meta[name="dcloud-csrf-token"]')?.content || "";
+      const nativeFetch = window.fetch.bind(window);
+      window.fetch = function(input, init){
+        const options = init ? Object.assign({}, init) : {};
+        const method = String(options.method || (input && input.method) || "GET").toUpperCase();
+        let url = "";
+        try{ url = typeof input === "string" ? input : (input && input.url ? input.url : String(input || "")); }catch(error){ url = ""; }
+        let sameOrigin = true;
+        try{ sameOrigin = new URL(url || window.location.href, window.location.href).origin === window.location.origin; }catch(error){ sameOrigin = true; }
+        if(csrfToken && sameOrigin && !["GET", "HEAD", "OPTIONS"].includes(method)){
+          const headers = new Headers(options.headers || (input && input.headers) || {});
+          if(!headers.has("X-CSRF-Token")) headers.set("X-CSRF-Token", csrfToken);
+          if(!headers.has("X-Requested-With")) headers.set("X-Requested-With", "XMLHttpRequest");
+          options.headers = headers;
+        }
+        return nativeFetch(input, options);
+      };
       const VROOT = "";
       let appState = JSON.parse(JSON.stringify(INITIAL_STATE));
       let latestStateVersion = Number(appState.stateVersion || 0);
@@ -3280,6 +3301,7 @@
         currentUploadXhr = xhr;
         xhr.open("POST", "/upload");
         xhr.setRequestHeader("X-Requested-With", "XMLHttpRequest");
+        if(csrfToken) xhr.setRequestHeader("X-CSRF-Token", csrfToken);
         xhr.setRequestHeader("X-DCloud-Upload-Id", uploadId);
         startUploadPolling(uploadId);
         xhr.upload.onprogress = event => {

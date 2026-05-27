@@ -18,6 +18,7 @@ import hashlib
 import hmac
 import ipaddress
 import json
+import base64
 import os
 from pathlib import Path
 import secrets
@@ -25,6 +26,13 @@ import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
+
+try:
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
+    from cryptography.exceptions import InvalidSignature
+except Exception:  # pragma: no cover - optional for tiny relay deployments
+    Ed25519PublicKey = None  # type: ignore[assignment]
+    InvalidSignature = Exception  # type: ignore[assignment]
 from urllib import error as urlerror, request as urlrequest
 
 VERSION = "py-1.1.1"
@@ -87,6 +95,44 @@ def current_token_payload() -> dict[str, Any]:
 def token_valid(value: str) -> bool:
     value = str(value or "").strip()
     return bool(value) and any(hmac.compare_digest(value, _token_for_day(_day(offset))) for offset in (0, -1))
+
+
+def relay_signature_valid(data: dict[str, Any]) -> bool:
+    if Ed25519PublicKey is None:
+        return False
+    action = normalize_action(str(data.get("action") or "health"))
+    node_id = str(data.get("node_id") or "").strip()
+    public_key_b64 = str(data.get("public_key") or "").strip()
+    timestamp_text = str(data.get("relay_signature_timestamp") or "").strip()
+    nonce = str(data.get("relay_signature_nonce") or "").strip()
+    signature_b64 = str(data.get("relay_signature") or "").strip()
+    if not all([action, node_id, public_key_b64, timestamp_text, nonce, signature_b64]):
+        return False
+    try:
+        timestamp = int(timestamp_text)
+    except ValueError:
+        return False
+    if abs(int(time.time()) - timestamp) > 300:
+        return False
+    try:
+        public_key = base64.b64decode(public_key_b64, validate=True)
+        signature = base64.b64decode(signature_b64, validate=True)
+    except Exception:
+        return False
+    if hashlib.sha256(public_key).hexdigest() != node_id:
+        return False
+    canonical = "\n".join([action, node_id, timestamp_text, nonce]).encode("utf-8")
+    try:
+        Ed25519PublicKey.from_public_bytes(public_key).verify(signature, canonical)
+        return True
+    except InvalidSignature:
+        return False
+    except Exception:
+        return False
+
+
+def relay_request_authenticated(data: dict[str, Any]) -> bool:
+    return token_valid(str(data.get("relay_token") or data.get("secret") or "")) or relay_signature_valid(data)
 
 
 def normalize_action(action: str) -> str:
@@ -205,7 +251,7 @@ class Handler(BaseHTTPRequestHandler):
             self.wfile.write(body)
 
     def do_GET(self) -> None:  # noqa: N802
-        self._json({"ok": True, "version": VERSION, "time": _now(), **current_token_payload()})
+        self._json(({"ok": True, "version": VERSION, "time": _now(), "token_public": False, **current_token_payload()} if relay_signature_valid(data) else {"ok": True, "version": VERSION, "time": _now(), "token_public": False}))
 
     def do_HEAD(self) -> None:  # noqa: N802
         self.do_GET()
@@ -223,7 +269,7 @@ class Handler(BaseHTTPRequestHandler):
             if not isinstance(data, dict):
                 data = {}
             action = normalize_action(str(data.get("action", "health")))
-            if action != "health" and not token_valid(str(data.get("relay_token") or data.get("secret") or "")):
+            if action != "health" and not relay_request_authenticated(data):
                 self._json({"ok": False, "message": "Relay-Tages-Token fehlt oder ist abgelaufen", "status": 401})
                 return
             if action == "direct_proxy_request":
@@ -231,7 +277,7 @@ class Handler(BaseHTTPRequestHandler):
                 return
             with LOCK:
                 if action == "health":
-                    self._json({"ok": True, "version": VERSION, "time": _now(), **current_token_payload()})
+                    self._json(({"ok": True, "version": VERSION, "time": _now(), "token_public": False, **current_token_payload()} if relay_signature_valid(data) else {"ok": True, "version": VERSION, "time": _now(), "token_public": False}))
                 elif action == "register":
                     self.handle_register(data)
                 elif action == "enqueue_request":

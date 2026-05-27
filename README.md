@@ -1208,13 +1208,25 @@ Wichtig: Der Backup-Token und die heruntergeladene Token-Datei sind geheim. Nich
 
 ## Sicherheitshinweise
 
-- Dashboard und lokale Verwaltungsaktionen sind loginpflichtig.
+Die v32-Security-Hardening-Version schützt die wichtigsten Verwaltungs- und Peer-Flächen zusätzlich:
+
+- Das Flask-Dashboard nutzt nicht mehr die Node-ID als Session-Secret. Beim ersten Start wird ein zufälliges Secret unter `storage/security/dashboard_secret.key` erzeugt.
+- Dashboard-POST/PUT/PATCH/DELETE-Aktionen nutzen CSRF-Tokens und eine Origin-/Referer-Prüfung.
+- Session-Cookies sind `HttpOnly` und `SameSite=Lax`; `DCLOUD_COOKIE_SECURE=1` aktiviert zusätzlich `Secure` für HTTPS-Betrieb.
+- P2P-API-Anfragen unter `/api/p2p/...` müssen jetzt mit der Ed25519-Node-ID signiert sein. Enthalten sind Timestamp, Nonce, Method, Pfad und Body-Hash. Replay-Angriffe werden über Nonce-Cache blockiert.
+- P2P-Endpunkte haben ein einfaches Rate-Limit und ein Größenlimit.
+- Der Dashboard-Browser-Proxy blockiert SSRF-Ziele wie `localhost`, private LAN-IPs, Link-Local, Multicast und nicht erlaubte Ports. `.dcloud`-Adressen bleiben über die eigene Peer-Auflösung erlaubt.
+- Der Browser-iframe läuft nicht mehr mit `allow-same-origin`, damit fremde Proxy-Webseiten nicht im selben Origin wie das Dashboard laufen.
+- Das PHP-Relay gibt den Tages-Relay-Token nicht mehr öffentlich über `health` aus. Neue Clients bekommen ihn nur über eine signierte Health-Anfrage; normale Relay-Aktionen akzeptieren signierte Node-Anfragen oder den gültigen Relay-Token.
+
+Weitere Hinweise:
+
 - `web.host: 0.0.0.0` macht Dashboard und Peer-API im LAN erreichbar.
-- Stelle den Dienst trotzdem nicht ungeschützt ins Internet, weil P2P-/Relay-Endpunkte weiterhin erreichbar sein müssen.
-- Nutze Firewall, VPN oder Reverse Proxy, wenn du dcloud außerhalb deines LANs bereitstellst.
-- Private Node-Keys niemals teilen.
+- Stelle den Dienst trotzdem nicht ungeschützt ins Internet. Nutze Firewall, VPN oder Reverse Proxy, wenn du dcloud außerhalb deines LANs bereitstellst.
+- Private Node-Keys und Backup-Token niemals teilen.
 - Relay-URLs sollten nach Möglichkeit HTTPS verwenden.
 - Temporäre externe Links sind tokenbasiert, aber jeder mit Link kann bis zum Ablauf herunterladen.
+- Für das PHP-Relay sollte die PHP-Erweiterung `sodium` aktiv sein, damit signierte Relay-Health-Anfragen geprüft werden können.
 
 ## Entwicklungsstatus und Grenzen
 

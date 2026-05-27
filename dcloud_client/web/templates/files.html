@@ -396,6 +396,7 @@
             </div>
 
             <form method="post" action="{{ url_for('upload') }}" enctype="multipart/form-data" id="uploadForm">
+              <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
               <input type="hidden" name="next" value="{{ url_for('files') }}">
               <p><input type="file" name="file" id="uploadFile" required></p>
               <p>
@@ -438,6 +439,7 @@
             </div>
 
             <form method="post" action="{{ url_for('create_folder') }}" id="createFolderForm">
+              <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
               <input type="hidden" name="next" value="{{ url_for('files') }}">
               <p><input type="text" name="folder" id="folderInput" placeholder="Neuer Ordner (z.B. Projekte/Kunde A)" required></p>
               <button type="submit">Ordner erstellen</button>
@@ -499,6 +501,7 @@
 
                       {% if manifest.owner_node_id == identity.node_id %}
                         <form method="post" action="{{ url_for('share_file', manifest_id=manifest.manifest_id) }}">
+                          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
                           <input type="hidden" name="next" value="{{ url_for('files') }}">
                           <label>
                             <input type="checkbox" name="shared"
@@ -510,6 +513,7 @@
 
                         <form method="post" action="{{ url_for('delete_file', manifest_id=manifest.manifest_id) }}"
                               onsubmit="return confirm('Datei wirklich löschen?');">
+                          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
                           <input type="hidden" name="next" value="{{ url_for('files') }}">
                           <button class="delete" type="submit">Löschen</button>
                         </form>
@@ -555,6 +559,7 @@
 
     <!-- Hidden helper form for POST actions from context menu -->
     <form id="actionPost" method="post" style="display:none;">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
       <input type="hidden" name="next" value="{{ url_for('files') }}">
       <input type="hidden" name="shared" id="postShared" value="">
       <input type="hidden" name="folder" id="postFolder" value="">
@@ -875,6 +880,7 @@
         const xhr = new XMLHttpRequest();
         xhr.open('POST', uploadForm.action);
         xhr.setRequestHeader('X-Requested-With', 'XMLHttpRequest');
+        xhr.setRequestHeader('X-CSRF-Token', '{{ csrf_token }}');
         xhr.setRequestHeader('X-DCloud-Upload-Id', uploadId);
         uploadPoll = setInterval(()=> pollUploadProgress(uploadId), 350);
         pollUploadProgress(uploadId);

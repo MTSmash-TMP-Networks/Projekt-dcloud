@@ -11,13 +11,14 @@ from dataclasses import dataclass, field
 import base64
 import json
 import logging
+import secrets
 import time
 from typing import Any, Callable, Mapping
 from urllib import error, parse, request
 
 from .http_relay import RelayError, RelayHttpResponse, HttpRelayClient, RELAY_HOST
 from .peers import Peer
-from ..crypto import b64decode, derive_node_id, sign_bytes, verify_signature
+from ..crypto import b64decode, derive_node_id, sha256_hex, sign_bytes, verify_signature
 from ..identity import NodeIdentity
 from ..manifests import FileManifest, canonical_manifest_bytes
 from ..storage import ChunkStore, StorageError
@@ -213,9 +214,11 @@ class P2PStorageClient:
         default_web_port: int = 8787,
         relay_client: HttpRelayClient | None = None,
         relay_clients: Mapping[str, HttpRelayClient] | None = None,
+        identity: NodeIdentity | None = None,
     ) -> None:
         self.timeout = float(timeout)
         self.default_web_port = int(default_web_port)
+        self.identity = identity
         self.relay_client = relay_client
         self.relay_clients: dict[str, HttpRelayClient] = {}
         if relay_clients:
@@ -234,6 +237,24 @@ class P2PStorageClient:
     def clear_relay_clients(self) -> None:
         self.relay_clients = {}
         self.relay_client = None
+
+    def _signed_headers(self, method: str, path: str, body: bytes = b"", headers: dict[str, str] | None = None) -> dict[str, str]:
+        out = {str(key): str(value) for key, value in (headers or {}).items()}
+        if self.identity is None:
+            return out
+        timestamp = str(int(time.time()))
+        nonce = secrets.token_urlsafe(18)
+        body_hash = sha256_hex(body or b"")
+        canonical = "\n".join([method.upper(), path, timestamp, nonce, body_hash]).encode("utf-8")
+        out.update({
+            "X-DCloud-Node-Id": self.identity.node_id,
+            "X-DCloud-Public-Key": self.identity.public_key_b64,
+            "X-DCloud-Timestamp": timestamp,
+            "X-DCloud-Nonce": nonce,
+            "X-DCloud-Body-SHA256": body_hash,
+            "X-DCloud-Signature": sign_bytes(self.identity.private_key, canonical),
+        })
+        return out
 
     def api_base(self, peer: Peer) -> str:
         host = peer.host
@@ -273,6 +294,7 @@ class P2PStorageClient:
         if relay_client is None:
             raise RelayError("Relay-Client ist nicht konfiguriert")
         request_timeout = relay_client.request_timeout if timeout is None else timeout
+        signed_headers = self._signed_headers(method, path, body, headers or {})
 
         # Fast path: let the PHP relay act as a short-lived HTTP forwarder to
         # the peer's public IP/web port. This avoids writing one mailbox file
@@ -285,7 +307,7 @@ class P2PStorageClient:
                 peer,
                 method=method,
                 path=path,
-                headers=headers or {},
+                headers=signed_headers,
                 body=body,
                 timeout=request_timeout,
             )
@@ -298,7 +320,7 @@ class P2PStorageClient:
                 peer,
                 method=method,
                 path=path,
-                headers=headers or {},
+                headers=signed_headers,
                 body=body,
                 timeout=request_timeout,
             )
@@ -342,7 +364,7 @@ class P2PStorageClient:
         if compression:
             headers["X-DCloud-Chunk-Compression"] = compression
         if peer.host != RELAY_HOST:
-            req = request.Request(url, data=stored_data, headers=headers, method="POST")
+            req = request.Request(url, data=stored_data, headers=self._signed_headers("POST", path, stored_data, headers), method="POST")
             try:
                 with request.urlopen(req, timeout=self.timeout) as response:
                     if 200 <= response.status < 300:
@@ -422,7 +444,7 @@ class P2PStorageClient:
         direct_error: Exception | None = None
         if peer.host != RELAY_HOST:
             url = f"{self.api_base(peer)}{path}"
-            req = request.Request(url, data=data, headers=headers, method="POST")
+            req = request.Request(url, data=data, headers=self._signed_headers("POST", path, data, headers), method="POST")
             try:
                 with request.urlopen(req, timeout=max(self.timeout, 45.0)) as response:
                     if 200 <= response.status < 300:
@@ -484,7 +506,7 @@ class P2PStorageClient:
         response_payload: dict[str, Any] = {}
         if peer.host != RELAY_HOST:
             url = f"{self.api_base(peer)}{path}"
-            req = request.Request(url, data=data, headers=headers, method="POST")
+            req = request.Request(url, data=data, headers=self._signed_headers("POST", path, data, headers), method="POST")
             try:
                 with request.urlopen(req, timeout=max(self.timeout, 45.0)) as response:
                     if 200 <= response.status < 300:
@@ -577,7 +599,7 @@ class P2PStorageClient:
 
         if peer.host != RELAY_HOST:
             url = f"{self.api_base(peer)}{path}"
-            req = request.Request(url, data=data, headers=pack_headers, method="POST")
+            req = request.Request(url, data=data, headers=self._signed_headers("POST", path, data, pack_headers), method="POST")
             try:
                 with request.urlopen(req, timeout=timeout) as response:
                     if not 200 <= response.status < 300:
@@ -593,7 +615,7 @@ class P2PStorageClient:
                 try:
                     relay_timeout = max(45.0, min(float(timeout or 60.0), 120.0))
                     response = relay_client.direct_proxy_request_raw(
-                        peer, method="POST", path=path, headers=pack_headers, body=data, timeout=relay_timeout
+                        peer, method="POST", path=path, headers=self._signed_headers("POST", path, data, pack_headers), body=data, timeout=relay_timeout
                     )
                     if 200 <= response.status_code < 300:
                         return self._decode_chunk_pack_response(response.body)
@@ -646,7 +668,7 @@ class P2PStorageClient:
         path = "/api/p2p/chunks/batch/download"
         if peer.host != RELAY_HOST:
             url = f"{self.api_base(peer)}{path}"
-            req = request.Request(url, data=data, headers=headers, method="POST")
+            req = request.Request(url, data=data, headers=self._signed_headers("POST", path, data, headers), method="POST")
             try:
                 with request.urlopen(req, timeout=request_timeout) as response:
                     if not 200 <= response.status < 300:
@@ -681,7 +703,7 @@ class P2PStorageClient:
         url = f"{self.api_base(peer)}{path}"
         direct_error: Exception | None = None
         if peer.host != RELAY_HOST:
-            req = request.Request(url, headers={"Accept": "application/octet-stream"}, method="GET")
+            req = request.Request(url, headers=self._signed_headers("GET", path, b"", {"Accept": "application/octet-stream"}), method="GET")
             try:
                 with request.urlopen(req, timeout=self.timeout) as response:
                     if response.status != 200:
@@ -713,7 +735,7 @@ class P2PStorageClient:
         headers = {"Content-Type": "application/json", "Accept": "application/json"}
         if peer.host != RELAY_HOST:
             url = f"{self.api_base(peer)}{path}"
-            req = request.Request(url, data=data, headers=headers, method="POST")
+            req = request.Request(url, data=data, headers=self._signed_headers("POST", path, data, headers), method="POST")
             try:
                 with request.urlopen(req, timeout=self.timeout) as response:
                     if 200 <= response.status < 300:
@@ -751,7 +773,7 @@ class P2PStorageClient:
         direct_error: Exception | None = None
         if peer.host != RELAY_HOST:
             url = f"{self.api_base(peer)}{path}"
-            req = request.Request(url, headers=headers, method="GET")
+            req = request.Request(url, headers=self._signed_headers("GET", path, b"", headers), method="GET")
             try:
                 with request.urlopen(req, timeout=max(self.timeout, 8.0)) as response:
                     payload = json.loads(response.read().decode("utf-8", errors="replace"))

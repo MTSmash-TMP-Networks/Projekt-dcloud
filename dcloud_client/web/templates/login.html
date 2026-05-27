@@ -40,6 +40,7 @@
         {% for category, message in messages %}<div class="flash">{{ message }}</div>{% endfor %}
       {% endwith %}
       <form method="post" action="/login">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
         <input type="hidden" name="next" value="{{ next_url }}">
         <label for="username">Benutzername</label>
         <input id="username" name="username" autocomplete="username" required autofocus>

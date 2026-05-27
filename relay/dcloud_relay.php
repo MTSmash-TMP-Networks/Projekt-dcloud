@@ -10,7 +10,7 @@ declare(strict_types=1);
  * Landing page intentionally reveals only minimal information.
  */
 
-const DCLOUD_RELAY_VERSION = '1.5.2';
+const DCLOUD_RELAY_VERSION = '1.6.0-security';
 const DCLOUD_RELAY_TOKEN_ROTATION_SECONDS = 86400;
 const DCLOUD_PEER_TTL_SECONDS = 45;
 const DCLOUD_MESSAGE_TTL_SECONDS = 900;
@@ -596,6 +596,46 @@ function dcloud_relay_token_is_valid(string $provided): bool {
     return $legacySecret !== '' && hash_equals($legacySecret, $provided);
 }
 
+function dcloud_relay_signature_is_valid(array $data): bool {
+    if (!function_exists('sodium_crypto_sign_verify_detached')) {
+        return false;
+    }
+    $action = dcloud_normalize_action((string)($data['action'] ?? ''));
+    $nodeId = trim((string)($data['node_id'] ?? ''));
+    $publicKeyB64 = trim((string)($data['public_key'] ?? ''));
+    $timestampText = trim((string)($data['relay_signature_timestamp'] ?? ''));
+    $nonce = trim((string)($data['relay_signature_nonce'] ?? ''));
+    $signatureB64 = trim((string)($data['relay_signature'] ?? ''));
+    if ($action === '' || $nodeId === '' || $publicKeyB64 === '' || $timestampText === '' || $nonce === '' || $signatureB64 === '') {
+        return false;
+    }
+    if (!preg_match('/^[A-Za-z0-9_.:-]{8,160}$/', $nodeId) || !preg_match('/^[A-Za-z0-9_.:-]{8,128}$/', $nonce)) {
+        return false;
+    }
+    $timestamp = (int)$timestampText;
+    if ($timestamp <= 0 || abs(time() - $timestamp) > 300) {
+        return false;
+    }
+    $publicKey = base64_decode($publicKeyB64, true);
+    $signature = base64_decode($signatureB64, true);
+    if ($publicKey === false || $signature === false || strlen($publicKey) !== SODIUM_CRYPTO_SIGN_PUBLICKEYBYTES || strlen($signature) !== SODIUM_CRYPTO_SIGN_BYTES) {
+        return false;
+    }
+    if (!hash_equals(hash('sha256', $publicKey), $nodeId)) {
+        return false;
+    }
+    $canonical = $action . "\n" . $nodeId . "\n" . $timestampText . "\n" . $nonce;
+    return sodium_crypto_sign_verify_detached($signature, $canonical, $publicKey);
+}
+
+function dcloud_relay_request_is_authenticated(array $data): bool {
+    $provided = (string)($data['relay_token'] ?? ($data['secret'] ?? ''));
+    if (dcloud_relay_token_is_valid($provided)) {
+        return true;
+    }
+    return dcloud_relay_signature_is_valid($data);
+}
+
 function dcloud_request_method(): string {
     return strtoupper((string)($_SERVER['REQUEST_METHOD'] ?? 'POST'));
 }
@@ -942,8 +982,7 @@ function dcloud_read_input(): array {
     $GLOBALS['DCLOUD_CURRENT_INPUT'] = $data;
 
     if ($actionForAuth !== 'health') {
-        $provided = (string)($data['relay_token'] ?? ($data['secret'] ?? ''));
-        if (!dcloud_relay_token_is_valid($provided)) {
+        if (!dcloud_relay_request_is_authenticated($data)) {
             dcloud_fail('Relay-Token fehlt oder ist abgelaufen', 403);
         }
     }
@@ -1870,10 +1909,11 @@ try {
 
     switch ($action) {
         case 'health':
-            dcloud_json_response(array_merge(
-                ['ok' => true, 'version' => DCLOUD_RELAY_VERSION, 'time' => time()],
-                dcloud_current_relay_token()
-            ));
+            $health = ['ok' => true, 'version' => DCLOUD_RELAY_VERSION, 'time' => time(), 'token_public' => false];
+            if (dcloud_relay_signature_is_valid($input)) {
+                $health = array_merge($health, dcloud_current_relay_token(), ['token_public' => false, 'token_delivery' => 'signed-health']);
+            }
+            dcloud_json_response($health);
             break;
 
         case 'register':
