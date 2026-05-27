@@ -1206,6 +1206,10 @@ Sicherheits-/RAID-Schutzfrist: Wenn ein Speicher-Peer eine signierte Löschanwei
 
 Wichtig: Der Backup-Token und die heruntergeladene Token-Datei sind geheim. Nicht in Chats, Tickets, Screenshots oder öffentliche Repositories kopieren.
 
+## Datei-Löschung und Peer-Bereinigung
+
+Ab v34 verschwindet eine gelöschte Datei sofort lokal aus dem Dashboard. Die signierte Löschanweisung an Speicher-Peers wird danach im Hintergrund zugestellt und bei später erreichbaren Peers erneut versucht. Dadurch wartet die Benutzeroberfläche nicht mehr auf Antworten aller Peers. Die Sicherheits-/Recovery-Frist von 15 Tagen für fremde Chunks bleibt weiterhin bestehen.
+
 ## Sicherheitshinweise
 
 Die v33-Security-Hardening-Version schützt die wichtigsten Verwaltungs- und Peer-Flächen zusätzlich:

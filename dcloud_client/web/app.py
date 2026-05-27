@@ -374,6 +374,10 @@ def create_app(
     replication_queue_event = threading.Event()
     replication_worker_started = False
     replication_queued_manifest_ids: set[str] = set()
+    file_deletion_delivery_lock = threading.Lock()
+    file_deletion_delivery_event = threading.Event()
+    file_deletion_delivery_worker_started = False
+    last_file_deletion_delivery_enqueue_at = 0.0
     user_store = UserStore(chunk_store.root / "users.json")
     web_root = chunk_store.root / "web"
     browser_downloads_root = chunk_store.root / BROWSER_DOWNLOADS_FOLDER
@@ -3012,6 +3016,49 @@ def create_app(
                 cleaned.append(node_id)
         return cleaned
 
+    def _ensure_file_deletion_delivery_worker() -> None:
+        """Start the asynchronous peer-delete delivery worker once."""
+        nonlocal file_deletion_delivery_worker_started
+        with file_deletion_delivery_lock:
+            if file_deletion_delivery_worker_started:
+                return
+            file_deletion_delivery_worker_started = True
+        worker = threading.Thread(
+            target=_file_deletion_delivery_worker_loop,
+            name="dcloud-file-delete-delivery",
+            daemon=True,
+        )
+        worker.start()
+
+    def _request_file_deletion_delivery(*, min_interval_seconds: float = 0.0) -> bool:
+        """Ask the background worker to deliver pending delete tombstones.
+
+        File deletion in the dashboard must stay immediate: the local manifest is
+        removed in the request thread, while remote peers are notified later by
+        this worker.  The interval guard prevents the normal dashboard refresh
+        loop from contacting every peer on every poll.
+        """
+        nonlocal last_file_deletion_delivery_enqueue_at
+        now = time.monotonic()
+        with file_deletion_delivery_lock:
+            if min_interval_seconds > 0 and now - last_file_deletion_delivery_enqueue_at < min_interval_seconds:
+                return False
+            last_file_deletion_delivery_enqueue_at = now
+            file_deletion_delivery_event.set()
+        _ensure_file_deletion_delivery_worker()
+        return True
+
+    def _file_deletion_delivery_worker_loop() -> None:
+        while True:
+            file_deletion_delivery_event.wait()
+            with file_deletion_delivery_lock:
+                file_deletion_delivery_event.clear()
+            try:
+                _deliver_pending_file_deletions()
+            except Exception:
+                # Best-effort background cleanup must never kill the dashboard.
+                pass
+
     def _deliver_pending_file_deletions(peers: list[Any] | None = None) -> tuple[int, int]:
         """Best-effort delivery of queued full-file deletions to active peers."""
         active_peers = peers if peers is not None else _list_active_peers()
@@ -3042,23 +3089,26 @@ def create_app(
         return delivered, failed
 
     def _delete_owned_manifest_with_peer_cleanup(manifest: FileManifest) -> dict[str, int]:
-        """Delete an owned manifest locally and ask peers to remove copies/chunks."""
+        """Delete an owned manifest locally and queue remote peer cleanup.
+
+        The dashboard should not wait until every storage peer confirms a delete.
+        The local manifest is removed immediately so the file disappears from the
+        UI, and the signed deletion tombstone is delivered asynchronously.
+        """
         if manifest.owner_node_id != identity.node_id:
             raise StorageError("Only the owner can delete this manifest")
         target_node_ids = _manifest_delete_target_node_ids(manifest)
-        delivered = 0
-        failed = 0
         if target_node_ids:
             deletion = build_manifest_deletion(manifest, identity)
             manifest_store.add_file_deletion(deletion, target_node_ids)
-            delivered, failed = _deliver_pending_file_deletions()
+            _request_file_deletion_delivery()
         manifest_store.delete(manifest.manifest_id)
         _sync_peer_connector_settings()
         return {
             "target_count": len(target_node_ids),
-            "delivered": delivered,
-            "failed": failed,
-            "queued": max(len(target_node_ids) - delivered, 0),
+            "delivered": 0,
+            "failed": 0,
+            "queued": len(target_node_ids),
         }
 
     def _remove_smb_virtual_file(manifest: FileManifest) -> None:
@@ -3119,7 +3169,7 @@ def create_app(
         peers = _list_active_peers()
         _repair_under_replicated_manifests(peers)
         _deliver_pending_share_revocations(peers)
-        _deliver_pending_file_deletions(peers)
+        _request_file_deletion_delivery(min_interval_seconds=8.0)
         manifest_store.purge_expired_remote_chunk_deletions()
         manifests = manifest_store.list_visible_for_node(identity.node_id)
         folders = manifest_store.list_folders_for_node(identity.node_id)
