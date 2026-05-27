@@ -3,6 +3,7 @@ setlocal EnableExtensions
 
 rem dcloud Windows Docker GitHub bootstrap installer for cmd.exe
 rem Downloads the project archive from GitHub with curl and starts Docker installation.
+rem If Docker Desktop is missing, the downloaded installer can install it via Chocolatey.
 rem
 rem Recommended one-liner in Windows CMD:
 rem   curl.exe -fsSL https://raw.githubusercontent.com/MTSmash-TMP-Networks/Projekt-dcloud/main/Script/install_windows_docker_from_github.cmd -o "%TEMP%\install_dcloud_windows_docker.cmd" && cmd /c "%TEMP%\install_dcloud_windows_docker.cmd"
@@ -11,6 +12,7 @@ rem Optional environment variables before running:
 rem   set DCLOUD_NODE_NAME=mein-windows-peer
 rem   set DCLOUD_DASHBOARD_PORT=8787
 rem   set DCLOUD_STORAGE_LIMIT_GB=200
+rem   set DCLOUD_AUTO_INSTALL_DOCKER=1
 
 if not defined DCLOUD_GITHUB_OWNER set "DCLOUD_GITHUB_OWNER=MTSmash-TMP-Networks"
 if not defined DCLOUD_GITHUB_REPO set "DCLOUD_GITHUB_REPO=Projekt-dcloud"
@@ -34,13 +36,6 @@ if errorlevel 1 (
 where powershell >nul 2>nul
 if errorlevel 1 (
   echo [dcloud-github-bootstrap] ERROR: powershell.exe was not found.
-  exit /b 1
-)
-
-where docker >nul 2>nul
-if errorlevel 1 (
-  echo [dcloud-github-bootstrap] ERROR: Docker was not found.
-  echo Please install and start Docker Desktop, then run this command again.
   exit /b 1
 )
 

@@ -30,6 +30,7 @@ dcloud ist ein Python-basierter Storage-Client mit Web-Dashboard im Desktop-Stil
 - Auto-Update-Skripte für systemd, launchd und OpenWrt-Cron
 - Docker-Compose-Variante für Windows mit PowerShell- und CMD-Helfer
 - Windows-Docker-Installation direkt per CMD/`curl` aus GitHub
+- Windows-Installation ohne Docker/Virtualisierung direkt mit Python per CMD/`curl` aus GitHub
 - Synology-Docker-Installation per SSH, lokalem Script oder direktem GitHub-`curl`-Bootstrap
 
 ## Architektur
@@ -309,7 +310,8 @@ Windows PowerShell:
 
 - Python 3.11 oder neuer empfohlen
 - Git
-- optional für Windows: Docker Desktop
+- optional für Windows-Docker: Docker Desktop
+- für Windows ohne Docker: Python 3.10 oder neuer muss vorher installiert sein
 - ausgehende HTTP/HTTPS-Verbindung für Relays und Updates
 - genügend Speicherplatz im gewählten `storage.path`
 
@@ -601,19 +603,93 @@ cd C:\dcloud
 ```
 
 
-## Windows-Installation mit Docker Desktop
 
-Für Windows ist Docker die empfohlene Variante, wenn die native Python-/Scheduled-Task-Installation Probleme macht. dcloud läuft dann in einem Linux-Container; Konfiguration, Identität, Chunks und Manifeste bleiben dauerhaft im lokalen Ordner `docker-data/` erhalten.
+## Windows-Installation ohne Docker mit Python
 
-### Voraussetzungen
-
-1. Docker Desktop für Windows installieren.
-2. Docker Desktop starten und warten, bis die Engine bereit ist.
-3. Projektordner öffnen, zum Beispiel in PowerShell.
+Diese Variante ist für Windows-Systeme gedacht, auf denen Docker Desktop wegen fehlender oder deaktivierter Virtualisierung/WSL2 nicht funktioniert. dcloud läuft dabei direkt in einer normalen Python-Umgebung auf Windows. Python muss vorher installiert sein und über `py -3` oder `python` erreichbar sein.
 
 ### Schnellstart aus CMD mit GitHub-curl
 
-Nach dem Hochladen der aktuellen Dateien ins GitHub-Repository kann Windows direkt aus `cmd.exe` installiert werden. Docker Desktop muss vorher installiert und gestartet sein.
+Nach dem Hochladen der aktuellen Dateien ins GitHub-Repository kann Windows direkt aus `cmd.exe` installiert werden:
+
+```cmd
+curl.exe -fsSL https://raw.githubusercontent.com/MTSmash-TMP-Networks/Projekt-dcloud/main/Script/install_windows_python_from_github.cmd -o "%TEMP%\install_dcloud_windows_python.cmd" && cmd /c "%TEMP%\install_dcloud_windows_python.cmd"
+```
+
+Mit eigenen Werten:
+
+```cmd
+set DCLOUD_NODE_NAME=mein-windows-peer
+set DCLOUD_DASHBOARD_PORT=8787
+set DCLOUD_STORAGE_LIMIT_GB=200
+set DCLOUD_WINDOWS_DATA_DIR=%LOCALAPPDATA%\dcloud\data
+curl.exe -fsSL https://raw.githubusercontent.com/MTSmash-TMP-Networks/Projekt-dcloud/main/Script/install_windows_python_from_github.cmd -o "%TEMP%\install_dcloud_windows_python.cmd" && cmd /c "%TEMP%\install_dcloud_windows_python.cmd"
+```
+
+Das Bootstrap-Skript lädt das GitHub-Archiv herunter, kopiert die App standardmäßig nach `%LOCALAPPDATA%\dcloud\app`, legt die Daten unter `%LOCALAPPDATA%\dcloud\data` ab, erzeugt eine `.venv`, installiert `requirements.txt` und startet dcloud im Hintergrund. Es wird kein Docker, kein WSL2 und keine Virtualisierung benötigt.
+
+### Schnellstart aus CMD im entpackten Projekt
+
+```cmd
+Script\install_windows_python.cmd
+```
+
+Danach öffnen:
+
+```text
+http://127.0.0.1:8787
+```
+
+Beim ersten Öffnen erscheint automatisch die Ersteinrichtung für den ersten Admin-Benutzer.
+
+Das Skript erzeugt automatisch:
+
+```text
+.venv/
+windows-data/config.yml
+windows-data/storage/
+windows-data/logs/
+```
+
+`windows-data/storage/` enthält Identität, Chunks, Manifeste, Webspace und Downloads. Diesen Ordner nicht löschen, wenn Node-ID, Dateien und Manifeste erhalten bleiben sollen. Beim GitHub-Bootstrap liegt der Datenordner standardmäßig unter `%LOCALAPPDATA%\dcloud\data`.
+
+### Verwaltung aus CMD
+
+```cmd
+Script\install_windows_python.cmd -Status
+Script\install_windows_python.cmd -Logs
+Script\install_windows_python.cmd -Restart
+Script\install_windows_python.cmd -Stop
+```
+
+Für Vordergrundbetrieb mit sichtbaren Logs:
+
+```cmd
+Script\install_windows_python.cmd -Run
+```
+
+### Hinweise zur nativen Windows-Python-Variante
+
+- Python 3.10 oder neuer muss vorher installiert sein. Empfohlen ist Python 3.11/3.12 von python.org.
+- Wenn `php-cgi` oder `php` nicht im Windows-`PATH` liegt, funktionieren HTML-Webseiten weiterhin, PHP-Dateien im Webspace aber erst nach einer PHP-Installation.
+- SMB ist in dieser Variante standardmäßig deaktiviert, weil Windows Port `445` meistens selbst nutzt. Es kann später im Dashboard oder vor dem ersten Start mit `set DCLOUD_ENABLE_SMB=1` aktiviert werden.
+- Wenn CMD als Administrator gestartet wird, legt das Skript automatisch Windows-Firewall-Regeln für Dashboard-TCP-Port und UDP-Discovery an. Ohne Administratorrechte funktioniert der lokale Zugriff über `127.0.0.1` trotzdem.
+- Der GitHub-Stand wird beim `curl`-Bootstrap als `.dcloud_git_revision` gespeichert, damit im Dashboard nicht `unbekannt` steht.
+
+## Windows-Installation mit Docker Desktop
+
+Die Docker-Variante ist eine Alternative für Windows-Systeme mit aktivierter Virtualisierung/WSL2 oder wenn dcloud bewusst isoliert in einem Container laufen soll. dcloud läuft dann in einem Linux-Container; Konfiguration, Identität, Chunks und Manifeste bleiben dauerhaft im lokalen Ordner `docker-data/` erhalten.
+
+### Voraussetzungen
+
+1. Windows 10/11 mit aktivierter Virtualisierung/WSL2-Unterstützung.
+2. Für die automatische Docker-Installation: `cmd.exe` als Administrator starten.
+3. Für reine Nutzung ohne automatische Installation: Docker Desktop vorher installieren und starten.
+4. Projektordner öffnen, zum Beispiel in PowerShell oder CMD.
+
+### Schnellstart aus CMD mit GitHub-curl
+
+Nach dem Hochladen der aktuellen Dateien ins GitHub-Repository kann Windows direkt aus `cmd.exe` installiert werden. Wenn Docker Desktop fehlt, installiert das Skript automatisch zuerst Chocolatey und danach Docker Desktop. Dafür muss CMD als Administrator gestartet werden.
 
 ```cmd
 curl.exe -fsSL https://raw.githubusercontent.com/MTSmash-TMP-Networks/Projekt-dcloud/main/Script/install_windows_docker_from_github.cmd -o "%TEMP%\install_dcloud_windows_docker.cmd" && cmd /c "%TEMP%\install_dcloud_windows_docker.cmd"
@@ -628,13 +704,29 @@ set DCLOUD_STORAGE_LIMIT_GB=200
 curl.exe -fsSL https://raw.githubusercontent.com/MTSmash-TMP-Networks/Projekt-dcloud/main/Script/install_windows_docker_from_github.cmd -o "%TEMP%\install_dcloud_windows_docker.cmd" && cmd /c "%TEMP%\install_dcloud_windows_docker.cmd"
 ```
 
-Das Bootstrap-Skript lädt das GitHub-Archiv herunter, entpackt es nach `%TEMP%\dcloud-windows-github-install` und startet danach `Script\install_windows_docker.cmd`. Es wird kein `git` benötigt.
+Das Bootstrap-Skript lädt das GitHub-Archiv herunter, entpackt es nach `%TEMP%\dcloud-windows-github-install` und startet danach `Script\install_windows_docker.cmd`. Es wird kein `git` benötigt. Wenn Docker Desktop fehlt, übernimmt das lokale CMD-Skript die automatische Installation per Chocolatey.
+
+Automatische Docker-Installation deaktivieren:
+
+```cmd
+set DCLOUD_AUTO_INSTALL_DOCKER=0
+```
+
+Docker Desktop wird bei Bedarf automatisch gestartet. Wenn das nicht gewünscht ist:
+
+```cmd
+set DCLOUD_AUTO_START_DOCKER=0
+```
+
+Hinweis: Nach einer frischen Docker-Desktop-Installation kann Windows/WSL2 einen Neustart verlangen. Dann einfach Windows neu starten, Docker Desktop einmal öffnen und denselben dcloud-Befehl erneut ausführen.
 
 ### Schnellstart aus CMD im entpackten Projekt
 
 ```cmd
 Script\install_windows_docker.cmd
 ```
+
+Wenn Docker Desktop noch fehlt, installiert dieses Skript Docker Desktop automatisch über Chocolatey. Dafür CMD als Administrator öffnen.
 
 Verwaltung aus CMD:
 
@@ -1122,7 +1214,7 @@ Die Codebasis ist modular aufgebaut, damit spätere Transport-, Index- und Versc
 | `scripts/install_dcloud_service.sh` | Linux/OpenWrt/Windows-Bootstrap |
 | `scripts/install_dcloud_service_mac.sh` | macOS-launchd-Installer |
 | `scripts/install_dcloud_docker_windows.ps1` | Windows-Docker-Installer/Starter für PowerShell |
-| `Script/install_windows_docker.cmd` | Windows-Docker-Installer/Starter für CMD |
+| `Script/install_windows_docker.cmd` | Windows-Docker-Installer/Starter für CMD, optional mit Chocolatey/Docker-Desktop-Installation |
 | `Script/install_windows_docker_from_github.cmd` | Windows-GitHub-Bootstrap für Installation per CMD und `curl` |
 | `Script/install_synology_docker.sh` | Synology-DSM-Docker-Installer mit persistentem `/volume1/docker/dcloud/data` |
 | `Script/install_synology_docker_from_github.sh` | Synology-GitHub-Bootstrap für Installation per `curl` |
