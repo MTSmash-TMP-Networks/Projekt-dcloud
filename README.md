@@ -1,5 +1,10 @@
 # dcloud – dezentraler Desktop-Speicher mit Peer-Replikation
 
+### Live-Netzwerklast im Dashboard
+
+Unter **Netzwerk** zeigt dcloud jetzt eine Live-Netzwerklast mit Up-/Downloadrate, Gesamtlast, Ø Last pro aktivem Peer und einem Verlaufsgrafen.
+Die Werte kommen aus den Host-Netzwerkzählern (`psutil`, mit Linux-Fallback über `/proc/net/dev`) und helfen zu sehen, wie sich die Last bei mehr Peers und durch den Netzwerk-Effekt entwickelt.
+
 ### Stabile Peer-Reihenfolge
 
 Die Peer-Liste im Dashboard und die Chat-Peer-Liste behalten jetzt eine feste Reihenfolge.
@@ -24,6 +29,7 @@ dcloud ist ein Python-basierter Storage-Client mit Web-Dashboard im Desktop-Stil
 - Adaptive Komprimierung mit `zlib`, optional `zstd`, Mindest-Ersparnis und Skip-Regeln für bereits komprimierte Dateien
 - Automatische LAN-Discovery per UDP auf Port `6881`
 - Peer-Gossip, Bootstrap-Peers und deaktivierbare Peers
+- Live-Netzwerklast im Netzwerk-Fenster mit Up-/Downloadrate, Gesamtlast und Verlaufsgraf
 - PHP-Relay-Unterstützung mit Standard- und Backup-Relay
 - PHP-Forwarder für direkte Peer-API-Aufrufe, Mailbox-Fallback für NAT-Fälle
 - Temporäre externe Download-Links mit maximal 60 Minuten Laufzeit
@@ -77,7 +83,7 @@ Das Dashboard ist als Desktop-Oberfläche aufgebaut. Wichtige Bereiche sind übe
 
 - **Dateien** – Explorer für Upload, Download, Ordner, Löschen, Verschieben, Freigaben, Auslagern, externe Links und umschaltbare Ansichten
 - **Transfer-Center** – erscheint nur während aktiver Uploads oder Downloads und verschwindet danach vollständig
-- **Netzwerk** – aktive Peers, deaktivierte Peers, Relay-Status, Peer-Suche und manuelles Hinzufügen
+- **Netzwerk** – aktive Peers, deaktivierte Peers, Relay-Status, Peer-Suche, manuelles Hinzufügen und Live-Netzwerklast mit Verlaufsgraf
 - **Peer-Chat** – Nachrichten, Emojis, Bilder und Datei-Karten
 - **Benutzer** – lokale Benutzer anlegen, deaktivieren, löschen, Rollen ändern und Passwörter zurücksetzen
 - **SMB** – SMB-Status und SMB-Einstellungen
@@ -634,7 +640,7 @@ set DCLOUD_AUTO_INSTALL_PYTHON=1
 curl.exe -fsSL https://raw.githubusercontent.com/MTSmash-TMP-Networks/Projekt-dcloud/main/Script/install_windows_python_from_github.cmd -o "%TEMP%\install_dcloud_windows_python.cmd" && cmd /c "%TEMP%\install_dcloud_windows_python.cmd"
 ```
 
-Das Bootstrap-Skript lädt das GitHub-Archiv herunter, kopiert die App standardmäßig nach `%LOCALAPPDATA%\dcloud\app`, legt die Daten unter `%LOCALAPPDATA%\dcloud\data` ab, installiert bei Bedarf Python, erzeugt eine `.venv`, installiert die Windows-Basisabhängigkeiten aus `requirements-windows-python.txt` und startet dcloud im Hintergrund. Es wird kein Docker, kein WSL2 und keine Virtualisierung benötigt.
+Das Bootstrap-Skript lädt das GitHub-Archiv herunter, synchronisiert die App standardmäßig nach `%LOCALAPPDATA%\dcloud\app`, legt die Daten unter `%LOCALAPPDATA%\dcloud\data` ab, installiert bei Bedarf Python, erzeugt eine `.venv`, installiert die Windows-Basisabhängigkeiten aus `requirements-windows-python.txt` und startet dcloud im Hintergrund. Es wird kein Docker, kein WSL2 und keine Virtualisierung benötigt. Bei Updates wird eine laufende native Python-Instanz zuerst gestoppt; die `.venv` wird beim Kopieren bewusst nicht gelöscht, damit Windows keine gesperrten `.pyd`/`python.exe`-Dateien blockieren kann.
 
 ### Schnellstart aus CMD im entpackten Projekt
 
@@ -689,6 +695,7 @@ Script\install_windows_python.cmd -Run
 - SMB ist in dieser Variante standardmäßig deaktiviert, weil Windows Port `445` meistens selbst nutzt.
 - Wenn CMD als Administrator gestartet wird, legt das Skript automatisch Windows-Firewall-Regeln für Dashboard-TCP-Port und UDP-Discovery an. Ohne Administratorrechte funktioniert der lokale Zugriff über `127.0.0.1` trotzdem.
 - Der GitHub-Stand wird beim `curl`-Bootstrap als `.dcloud_git_revision` gespeichert, damit im Dashboard nicht `unbekannt` steht.
+- Der GitHub-`curl`-Bootstrap löscht den App-Ordner nicht mehr vollständig. Stattdessen nutzt er eine Spiegel-Synchronisation mit Ausschluss von `.venv`, damit Updates auch dann funktionieren, wenn Windows noch Dateien wie `_rust.pyd`, `_yaml.pyd` oder `python.exe` kurzzeitig gesperrt hält.
 
 ## Windows-Installation mit Docker Desktop
 

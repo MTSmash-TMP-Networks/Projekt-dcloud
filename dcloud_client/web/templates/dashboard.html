@@ -373,6 +373,22 @@
     .status-card h3{ margin:.1rem 0 .5rem; color:#173053; font-size:1rem; }
     .status-kpi{ font-size:1.34rem; font-weight:800; color:var(--accent); overflow-wrap:anywhere; letter-spacing:-.025em; }
     .status-sub{ color:var(--muted); font-size:.87rem; line-height:1.35; }
+    .network-load-card{ grid-column:1 / -1; padding:1rem 1rem .85rem; }
+    .network-load-head{ display:flex; align-items:flex-start; justify-content:space-between; gap:12px; flex-wrap:wrap; }
+    .network-load-kpis{ display:grid; grid-template-columns:repeat(auto-fit, minmax(130px, 1fr)); gap:10px; margin:.8rem 0 .7rem; }
+    .network-load-kpi{ border:1px solid rgba(136,166,212,.24); border-radius:15px; padding:.62rem .7rem; background:rgba(255,255,255,.62); }
+    .network-load-kpi strong{ display:block; color:#123157; font-size:1.05rem; letter-spacing:-.02em; }
+    .network-load-kpi span{ color:var(--muted); font-size:.78rem; }
+    .network-load-chart-wrap{ position:relative; height:154px; border:1px solid rgba(136,166,212,.24); border-radius:16px; background:linear-gradient(180deg, rgba(255,255,255,.68), rgba(232,242,255,.48)); overflow:hidden; }
+    .network-load-chart{ width:100%; height:100%; display:block; }
+    .network-load-chart-grid{ stroke:rgba(84,112,154,.16); stroke-width:1; }
+    .network-load-chart-fill{ fill:rgba(8,102,232,.10); }
+    .network-load-chart-download{ fill:none; stroke:#0b65d8; stroke-width:3; stroke-linecap:round; stroke-linejoin:round; }
+    .network-load-chart-upload{ fill:none; stroke:#19a974; stroke-width:2.4; stroke-linecap:round; stroke-linejoin:round; stroke-dasharray:5 5; }
+    .network-load-chart-empty{ position:absolute; inset:0; display:grid; place-items:center; color:var(--muted); font-size:.9rem; pointer-events:none; }
+    .network-load-legend{ display:flex; align-items:center; gap:12px; flex-wrap:wrap; margin-top:.55rem; color:#345170; font-size:.82rem; }
+    .network-load-dot{ display:inline-block; width:10px; height:10px; border-radius:999px; margin-right:5px; vertical-align:-1px; background:#0b65d8; }
+    .network-load-dot.up{ background:#19a974; }
     .status-list{ margin:.55rem 0 0; padding:0; color:#1c2f4d; font-size:.92rem; list-style:none; }
     .status-list li, .status-list label{
       margin-bottom:.48rem;
@@ -755,6 +771,31 @@
           <section class="status-card"><h3>Verbund-Speicher</h3><div class="status-kpi" id="network-storage-limit">0 B</div><div class="status-sub">Lokale Freigabe plus aktive Speicher-Peers</div></section>
           <section class="status-card"><h3>Verfügbar für neue Daten</h3><div class="status-kpi" id="network-storage-free">0 B</div><div class="status-sub">Freier Speicher im erreichbaren Verbund</div></section>
           <section class="status-card"><h3>Peer-Suche</h3><div class="status-kpi" id="network-auto-discovery">Aktiv</div><div class="status-sub" id="network-auto-discovery-sub">UDP-Discovery sucht erreichbare Peers</div></section>
+          <section class="status-card network-load-card">
+            <div class="network-load-head">
+              <div>
+                <h3>Netzwerklast</h3>
+                <div class="status-sub" id="network-load-sub">Live-Verlauf der aktuellen Host-Netzwerklast</div>
+              </div>
+              <div class="status-sub" id="network-load-sample">wartet auf Messpunkt…</div>
+            </div>
+            <div class="network-load-kpis">
+              <div class="network-load-kpi"><strong id="network-load-down">0 B/s</strong><span>Download / eingehend</span></div>
+              <div class="network-load-kpi"><strong id="network-load-up">0 B/s</strong><span>Upload / ausgehend</span></div>
+              <div class="network-load-kpi"><strong id="network-load-total">0 B/s</strong><span>Gesamt</span></div>
+              <div class="network-load-kpi"><strong id="network-load-per-peer">0 B/s</strong><span>Ø pro aktivem Peer</span></div>
+            </div>
+            <div class="network-load-chart-wrap">
+              <svg class="network-load-chart" id="network-load-chart" viewBox="0 0 640 150" preserveAspectRatio="none" role="img" aria-label="Netzwerklast Verlauf">
+                <g class="network-load-chart-grid" id="network-load-chart-grid"></g>
+                <path class="network-load-chart-fill" id="network-load-chart-fill" d=""></path>
+                <path class="network-load-chart-download" id="network-load-chart-download" d=""></path>
+                <path class="network-load-chart-upload" id="network-load-chart-upload" d=""></path>
+              </svg>
+              <div class="network-load-chart-empty" id="network-load-chart-empty">Noch keine Messdaten vorhanden</div>
+            </div>
+            <div class="network-load-legend"><span><i class="network-load-dot"></i>Download</span><span><i class="network-load-dot up"></i>Upload</span><span id="network-load-max">Skala: 0 B/s</span></div>
+          </section>
         </div>
         <h3>Aktive Peers</h3>
         <p class="settings-note">Speicherziele für neue Uploads und Hintergrund-Replikation auswählen. Deaktivierte Peers bleiben ausgeblendet, bis du sie wieder zulässt.</p>
@@ -1166,6 +1207,7 @@
       stats: {{ stats_json | tojson }},
       settings: {{ settings_json | tojson }},
       network: {{ network_json | tojson }},
+      networkLoad: {{ network_load_json | tojson }},
       webHosting: {{ web_hosting_json | tojson }},
       recovery: {{ recovery_json | tojson }},
       webFiles: {{ web_files_json | tojson }},
@@ -1544,6 +1586,70 @@
           amount /= 1024;
         }
         return `${amount.toFixed(1)} ${unit}`;
+      }
+      function formatRate(value){
+        return `${formatBytes(value || 0)}/s`;
+      }
+      function networkLoadPath(points, key, maxValue, width, height, pad){
+        if(!points.length) return "";
+        const step = points.length > 1 ? (width - pad.left - pad.right) / (points.length - 1) : 0;
+        return points.map((point, index) => {
+          const value = Math.max(0, Number(point[key] || 0));
+          const x = pad.left + step * index;
+          const y = height - pad.bottom - ((value / maxValue) * (height - pad.top - pad.bottom));
+          return `${index === 0 ? "M" : "L"}${x.toFixed(1)} ${y.toFixed(1)}`;
+        }).join(" ");
+      }
+      function renderNetworkLoad(){
+        const load = appState.networkLoad || {};
+        const history = Array.isArray(load.history) ? load.history.slice(-72) : [];
+        const downEl = document.getElementById("network-load-down");
+        const upEl = document.getElementById("network-load-up");
+        const totalEl = document.getElementById("network-load-total");
+        const perPeerEl = document.getElementById("network-load-per-peer");
+        if(downEl) downEl.textContent = formatRate(load.downloadBps);
+        if(upEl) upEl.textContent = formatRate(load.uploadBps);
+        if(totalEl) totalEl.textContent = formatRate(load.totalBps);
+        if(perPeerEl) perPeerEl.textContent = formatRate(load.perPeerBps);
+        const subEl = document.getElementById("network-load-sub");
+        if(subEl) subEl.textContent = load.available === false
+          ? (load.message || "Netzwerklast ist auf diesem System nicht verfügbar.")
+          : "Host-Netzwerklast über alle aktiven Interfaces; hilfreich zum Beobachten des Netzwerk-Effekts.";
+        const sampleEl = document.getElementById("network-load-sample");
+        if(sampleEl){
+          const interval = Number(load.sampleIntervalSeconds || 0);
+          sampleEl.textContent = history.length > 1 ? `${history.length} Messpunkte · ${interval.toFixed(1)}s Intervall` : "wartet auf zweiten Messpunkt…";
+        }
+        const emptyEl = document.getElementById("network-load-chart-empty");
+        const gridEl = document.getElementById("network-load-chart-grid");
+        const fillEl = document.getElementById("network-load-chart-fill");
+        const downPathEl = document.getElementById("network-load-chart-download");
+        const upPathEl = document.getElementById("network-load-chart-upload");
+        const maxEl = document.getElementById("network-load-max");
+        const width = 640;
+        const height = 150;
+        const pad = { left: 14, right: 14, top: 12, bottom: 18 };
+        const maxValue = Math.max(1, ...history.map(point => Math.max(Number(point.downloadBps || 0), Number(point.uploadBps || 0), Number(point.totalBps || 0))));
+        if(gridEl && !gridEl.dataset.ready){
+          gridEl.innerHTML = [0,1,2,3].map(i => {
+            const y = pad.top + ((height - pad.top - pad.bottom) / 3) * i;
+            return `<line x1="${pad.left}" y1="${y.toFixed(1)}" x2="${width - pad.right}" y2="${y.toFixed(1)}"></line>`;
+          }).join("");
+          gridEl.dataset.ready = "1";
+        }
+        if(emptyEl) emptyEl.hidden = history.length > 1;
+        const downPath = networkLoadPath(history, "downloadBps", maxValue, width, height, pad);
+        const upPath = networkLoadPath(history, "uploadBps", maxValue, width, height, pad);
+        if(downPathEl) downPathEl.setAttribute("d", history.length > 1 ? downPath : "");
+        if(upPathEl) upPathEl.setAttribute("d", history.length > 1 ? upPath : "");
+        if(fillEl){
+          if(history.length > 1 && downPath){
+            fillEl.setAttribute("d", `${downPath} L${width - pad.right} ${height - pad.bottom} L${pad.left} ${height - pad.bottom} Z`);
+          }else{
+            fillEl.setAttribute("d", "");
+          }
+        }
+        if(maxEl) maxEl.textContent = `Skala: ${formatRate(maxValue)}`;
       }
       function formatDateTime(value){
         if(!value) return "-";
@@ -1953,6 +2059,7 @@
         document.getElementById("network-storage-free").textContent = formatBytes(capacity.networkFreeBytes || settings.networkFreeBytes || appState.stats.freeLimitBytes);
         document.getElementById("network-auto-discovery").textContent = autoText;
         document.getElementById("network-auto-discovery-sub").textContent = autoSub;
+        renderNetworkLoad();
         document.getElementById("status-node-id").textContent = appState.nodeId.slice(0, 12) + "…";
         document.getElementById("status-discovery-port").textContent = String(network.udpPort || 6881);
         const relayUrls = Array.isArray(network.relayUrls) ? network.relayUrls : (network.relayUrl ? [network.relayUrl] : []);

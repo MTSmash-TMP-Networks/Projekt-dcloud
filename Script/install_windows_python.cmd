@@ -102,6 +102,8 @@ if not exist "%CONFIG_HELPER%" (
   exit /b 1
 )
 
+call :stop_service_silent_for_update
+
 call :find_python
 if errorlevel 1 exit /b 1
 
@@ -113,6 +115,10 @@ if not exist "%VENV_PYTHON%" (
     echo Please install Python with the venv module and try again.
     exit /b 1
   )
+)
+
+if exist "%VENV_PYTHON%" (
+  echo [dcloud-windows-python] Virtual environment: %VENV_DIR%
 )
 
 if not exist "%VENV_PYTHON%" (
@@ -349,16 +355,36 @@ exit /b %ERRORLEVEL%
 
 :stop_service_silent
 call :read_pid
-if not defined DCLOUD_PID (
-  echo [dcloud-windows-python] dcloud is not running.
-  exit /b 0
+if defined DCLOUD_PID (
+  powershell -NoProfile -ExecutionPolicy Bypass -Command "$pidValue=$env:DCLOUD_PID; if ($pidValue) { try { Stop-Process -Id ([int]$pidValue) -Force -ErrorAction SilentlyContinue } catch {} }" >nul 2>nul
 )
-powershell -NoProfile -ExecutionPolicy Bypass -Command "$pidValue=$env:DCLOUD_PID; if ($pidValue) { $p=Get-Process -Id ([int]$pidValue) -ErrorAction SilentlyContinue; if ($p) { Stop-Process -Id $p.Id -Force } }"
-if errorlevel 1 (
-  echo [dcloud-windows-python] WARNING: Could not stop PID %DCLOUD_PID%.
+call :kill_dcloud_processes
+if defined DCLOUD_PID (
+  echo [dcloud-windows-python] dcloud stopped.
+) else (
+  echo [dcloud-windows-python] dcloud is not running.
 )
 del "%PID_FILE%" >nul 2>nul
-echo [dcloud-windows-python] dcloud stopped.
+exit /b 0
+
+:stop_service_silent_for_update
+call :read_pid
+set "DCLOUD_STOP_APP_DIR=%REPO_ROOT%"
+set "DCLOUD_STOP_DATA_DIR=%DCLOUD_WINDOWS_DATA_DIR%"
+if defined DCLOUD_PID (
+  echo [dcloud-windows-python] Existing dcloud instance detected. Stopping it before update/install.
+) else (
+  echo [dcloud-windows-python] Checking for old dcloud Python processes before update/install.
+)
+if defined DCLOUD_PID powershell -NoProfile -ExecutionPolicy Bypass -Command "$pidValue=$env:DCLOUD_PID; if ($pidValue) { try { Stop-Process -Id ([int]$pidValue) -Force -ErrorAction SilentlyContinue } catch {} }" >nul 2>nul
+call :kill_dcloud_processes
+del "%PID_FILE%" >nul 2>nul
+exit /b 0
+
+:kill_dcloud_processes
+set "DCLOUD_STOP_APP_DIR=%REPO_ROOT%"
+set "DCLOUD_STOP_DATA_DIR=%DCLOUD_WINDOWS_DATA_DIR%"
+powershell -NoProfile -ExecutionPolicy Bypass -Command "$app=$env:DCLOUD_STOP_APP_DIR; $data=$env:DCLOUD_STOP_DATA_DIR; Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object { ($_.Name -match '^(python|pythonw)\.exe$') -and $_.CommandLine -and (($_.CommandLine -like '*dcloud_client.main*') -or ($app -and $_.CommandLine -like ('*'+$app+'*')) -or ($data -and $_.CommandLine -like ('*'+$data+'*'))) } | ForEach-Object { try { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue } catch {} }; Start-Sleep -Seconds 2" >nul 2>nul
 exit /b 0
 
 :show_status

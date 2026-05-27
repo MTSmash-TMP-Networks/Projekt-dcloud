@@ -92,21 +92,21 @@ if not exist "%PROJECT_DIR%\Script\install_windows_python.cmd" (
   exit /b 1
 )
 
-if exist "%DCLOUD_WINDOWS_APP_DIR%\Script\install_windows_python.cmd" (
-  echo [dcloud-python-bootstrap] Stopping existing native Python installation if it is running.
-  call "%DCLOUD_WINDOWS_APP_DIR%\Script\install_windows_python.cmd" -Stop >nul 2>nul
-)
-if exist "%DCLOUD_WINDOWS_APP_DIR%" rmdir /s /q "%DCLOUD_WINDOWS_APP_DIR%" 2>nul
-mkdir "%DCLOUD_WINDOWS_APP_DIR%" 2>nul
-if errorlevel 1 (
+echo [dcloud-python-bootstrap] Stopping existing native Python installation if it is running.
+call :stop_existing_dcloud
+
+if not exist "%DCLOUD_WINDOWS_APP_DIR%" mkdir "%DCLOUD_WINDOWS_APP_DIR%" 2>nul
+if not exist "%DCLOUD_WINDOWS_APP_DIR%" (
   echo [dcloud-python-bootstrap] ERROR: Could not create app directory.
+  echo [dcloud-python-bootstrap] Directory: %DCLOUD_WINDOWS_APP_DIR%
   exit /b 1
 )
 
-echo [dcloud-python-bootstrap] Copying project files.
-powershell -NoProfile -ExecutionPolicy Bypass -Command "Copy-Item -Path '%PROJECT_DIR%\*' -Destination '%DCLOUD_WINDOWS_APP_DIR%' -Recurse -Force"
-if errorlevel 1 (
-  echo [dcloud-python-bootstrap] ERROR: Could not copy project files.
+echo [dcloud-python-bootstrap] Syncing project files without touching the locked virtual environment.
+robocopy "%PROJECT_DIR%" "%DCLOUD_WINDOWS_APP_DIR%" /MIR /XD .git .venv __pycache__ windows-data storage /XF *.pyc >nul
+if errorlevel 8 (
+  echo [dcloud-python-bootstrap] ERROR: Could not sync project files.
+  echo [dcloud-python-bootstrap] If antivirus or another process is locking the folder, restart Windows and run this command again.
   exit /b 1
 )
 
@@ -122,3 +122,17 @@ if not exist "%DCLOUD_WINDOWS_APP_DIR%\Script\install_windows_python.cmd" (
 echo [dcloud-python-bootstrap] Starting native Windows Python installation.
 call "%DCLOUD_WINDOWS_APP_DIR%\Script\install_windows_python.cmd" %*
 exit /b %ERRORLEVEL%
+
+:stop_existing_dcloud
+set "DCLOUD_STOP_APP_DIR=%DCLOUD_WINDOWS_APP_DIR%"
+set "DCLOUD_STOP_DATA_DIR=%DCLOUD_WINDOWS_DATA_DIR%"
+if exist "%DCLOUD_WINDOWS_APP_DIR%\Script\install_windows_python.cmd" (
+  call "%DCLOUD_WINDOWS_APP_DIR%\Script\install_windows_python.cmd" -Stop >nul 2>nul
+)
+if exist "%DCLOUD_WINDOWS_DATA_DIR%\dcloud.pid" (
+  for /f "usebackq delims=" %%P in ("%DCLOUD_WINDOWS_DATA_DIR%\dcloud.pid") do set "DCLOUD_OLD_PID=%%P"
+  if defined DCLOUD_OLD_PID powershell -NoProfile -ExecutionPolicy Bypass -Command "try { Stop-Process -Id ([int]$env:DCLOUD_OLD_PID) -Force -ErrorAction SilentlyContinue } catch {}" >nul 2>nul
+)
+powershell -NoProfile -ExecutionPolicy Bypass -Command "$app=$env:DCLOUD_STOP_APP_DIR; $data=$env:DCLOUD_STOP_DATA_DIR; Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object { ($_.Name -match '^(python|pythonw)\.exe$') -and $_.CommandLine -and (($_.CommandLine -like '*dcloud_client.main*') -or ($app -and $_.CommandLine -like ('*'+$app+'*')) -or ($data -and $_.CommandLine -like ('*'+$data+'*'))) } | ForEach-Object { try { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue } catch {} }; Start-Sleep -Seconds 2" >nul 2>nul
+del "%DCLOUD_WINDOWS_DATA_DIR%\dcloud.pid" >nul 2>nul
+exit /b 0

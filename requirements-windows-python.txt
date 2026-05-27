@@ -7,3 +7,4 @@ cryptography>=42.0,<46.0
 # wrappers can fail on some Windows/Python combinations, especially Python 3.14
 # or systemprofile installs. The Windows installer installs impacket only when
 # DCLOUD_ENABLE_SMB=1 is set.
+psutil>=5.9,<8.0

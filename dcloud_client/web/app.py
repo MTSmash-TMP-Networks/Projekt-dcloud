@@ -30,6 +30,11 @@ import unicodedata
 from urllib import error as url_error, parse as url_parse, request as url_request
 import http.cookiejar
 
+try:
+    import psutil  # type: ignore[import-not-found]
+except Exception:  # pragma: no cover - optional dependency fallback
+    psutil = None  # type: ignore[assignment]
+
 from flask import Flask, Response, abort, flash, jsonify, redirect, render_template, request, send_file, session, url_for
 from werkzeug.utils import secure_filename
 
@@ -86,6 +91,120 @@ WEB_EDITABLE_SUFFIXES = {
     ".py", ".sh", ".bat", ".ps1", ".sql", ".rss", ".atom",
 }
 WEB_EDIT_MAX_BYTES = 2 * 1024 * 1024
+NETWORK_LOAD_HISTORY_LIMIT = 72
+NETWORK_LOAD_MIN_SAMPLE_SECONDS = 1.0
+
+
+def _read_system_net_io() -> tuple[int, int] | None:
+    """Return cumulative sent/received bytes for the host network interfaces."""
+    if psutil is not None:
+        try:
+            counters = psutil.net_io_counters(pernic=False)
+            if counters is not None:
+                return int(getattr(counters, "bytes_sent", 0)), int(getattr(counters, "bytes_recv", 0))
+        except Exception:
+            pass
+
+    proc_net_dev = Path("/proc/net/dev")
+    try:
+        lines = proc_net_dev.read_text(encoding="utf-8", errors="replace").splitlines()[2:]
+    except Exception:
+        return None
+
+    sent = 0
+    received = 0
+    for line in lines:
+        if ":" not in line:
+            continue
+        iface, raw_values = line.split(":", 1)
+        if iface.strip() == "lo":
+            continue
+        values = raw_values.split()
+        if len(values) < 16:
+            continue
+        try:
+            received += int(values[0])
+            sent += int(values[8])
+        except ValueError:
+            continue
+    return sent, received
+
+
+class NetworkLoadSampler:
+    """Small in-memory sampler for the dashboard network load graph."""
+
+    def __init__(self, *, history_limit: int = NETWORK_LOAD_HISTORY_LIMIT) -> None:
+        self._history: deque[dict[str, Any]] = deque(maxlen=history_limit)
+        self._last_counter: tuple[float, int, int] | None = None
+        self._last_payload: dict[str, Any] | None = None
+        self._last_sample_at = 0.0
+        self._lock = threading.RLock()
+
+    def sample(self, *, peer_count: int) -> dict[str, Any]:
+        with self._lock:
+            now = time.monotonic()
+            if self._last_payload is not None and now - self._last_sample_at < NETWORK_LOAD_MIN_SAMPLE_SECONDS:
+                payload = dict(self._last_payload)
+                payload["peerCount"] = int(peer_count)
+                return payload
+
+            counters = _read_system_net_io()
+            timestamp_ms = int(time.time() * 1000)
+            if counters is None:
+                payload = {
+                    "available": False,
+                    "message": "Netzwerklast konnte auf diesem System nicht gelesen werden.",
+                    "uploadBps": 0,
+                    "downloadBps": 0,
+                    "totalBps": 0,
+                    "perPeerBps": 0,
+                    "peerCount": int(peer_count),
+                    "history": list(self._history),
+                }
+                self._last_payload = payload
+                self._last_sample_at = now
+                return payload
+
+            sent, received = counters
+            upload_bps = 0.0
+            download_bps = 0.0
+            interval = 0.0
+            if self._last_counter is not None:
+                last_time, last_sent, last_received = self._last_counter
+                interval = max(0.001, now - last_time)
+                sent_delta = max(0, sent - last_sent)
+                received_delta = max(0, received - last_received)
+                upload_bps = sent_delta / interval
+                download_bps = received_delta / interval
+
+            self._last_counter = (now, sent, received)
+            self._last_sample_at = now
+            total_bps = upload_bps + download_bps
+            per_peer_bps = total_bps / max(1, int(peer_count))
+            sample = {
+                "timeMs": timestamp_ms,
+                "uploadBps": round(upload_bps, 2),
+                "downloadBps": round(download_bps, 2),
+                "totalBps": round(total_bps, 2),
+                "perPeerBps": round(per_peer_bps, 2),
+                "peerCount": int(peer_count),
+            }
+            self._history.append(sample)
+            payload = {
+                "available": True,
+                "message": "Host-Netzwerklast über alle aktiven Interfaces.",
+                "uploadBps": sample["uploadBps"],
+                "downloadBps": sample["downloadBps"],
+                "totalBps": sample["totalBps"],
+                "perPeerBps": sample["perPeerBps"],
+                "peerCount": int(peer_count),
+                "sentBytes": int(sent),
+                "receivedBytes": int(received),
+                "sampleIntervalSeconds": round(interval, 2),
+                "history": list(self._history),
+            }
+            self._last_payload = payload
+            return payload
 
 
 def human_bytes(value: int) -> str:
@@ -203,6 +322,7 @@ def create_app(
     p2p_client = P2PStorageClient(default_web_port=config.web.port)
     upload_progress = UploadProgressTracker(persist_dir=chunk_store.tmp_dir / "upload_progress")
     download_progress = UploadProgressTracker(persist_dir=chunk_store.tmp_dir / "download_progress")
+    network_load_sampler = NetworkLoadSampler()
     download_results: dict[str, dict[str, Any]] = {}
     download_lock = threading.RLock()
     external_link_lock = threading.RLock()
@@ -2684,6 +2804,7 @@ def create_app(
             "stats": stats_payload(stats),
             "settings": settings_payload(stats, peers),
             "network": network_payload(),
+            "networkLoad": network_load_sampler.sample(peer_count=len(peers)),
             "networkCapacity": _network_storage_capacity(stats, peers),
             "webHosting": web_hosting_payload(peers),
             "recovery": recovery_payload(),
@@ -2912,6 +3033,7 @@ def create_app(
             disabled_peers_json=_disabled_peers_payload(),
             settings_json=settings_payload(stats, peers),
             network_json=network_payload(),
+            network_load_json=network_load_sampler.sample(peer_count=len(peers)),
             web_hosting_json=web_hosting_payload(peers),
             recovery_json=recovery_payload(),
             web_files_json=web_files_payload(),
