@@ -39,7 +39,6 @@ network:
   relay_url: https://support.tmp-networks.de/dcstorage/dcloud_relay.php
   relay_urls:
   - https://support.tmp-networks.de/dcstorage/dcloud_relay.php
-  - http://dcloud.byethost12.com/dcloud_relay.php
   relay_secret: ''
   relay_poll_interval_seconds: 1
   relay_request_timeout_seconds: 180

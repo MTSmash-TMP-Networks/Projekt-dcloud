@@ -25,8 +25,8 @@ DEFAULT_RELAY_POLL_INTERVAL_SECONDS = 1
 DEFAULT_RELAY_REQUEST_TIMEOUT_SECONDS = 180
 DEFAULT_RELAY_CHUNK_SIZE_BYTES = 512 * 1024
 DEFAULT_PUBLIC_RELAY_URL = "https://support.tmp-networks.de/dcstorage/dcloud_relay.php"
-DEFAULT_BACKUP_RELAY_URL = "http://dcloud.byethost12.com/dcloud_relay.php"
-DEFAULT_PUBLIC_RELAY_URLS = [DEFAULT_PUBLIC_RELAY_URL, DEFAULT_BACKUP_RELAY_URL]
+DEPRECATED_PUBLIC_RELAY_HOSTS = {"dcloud.byethost12.com"}
+DEFAULT_PUBLIC_RELAY_URLS = [DEFAULT_PUBLIC_RELAY_URL]
 VALID_COMPRESSION_MODES = {"auto", "fast", "balanced", "max", "off"}
 VALID_COMPRESSION_ALGORITHMS = {"auto", "zstd", "zlib", "none"}
 DEFAULT_COMPRESSION_MODE = "auto"
@@ -266,13 +266,22 @@ def _iter_relay_url_candidates(value: Any) -> list[str]:
     return [item for item in re.split(r"[\s,;]+", text) if item.strip()]
 
 
+def is_deprecated_relay_url(url: str) -> bool:
+    normalized = normalize_relay_url(url).lower()
+    match = re.match(r"^https?://([^/:]+)", normalized)
+    host = match.group(1) if match else ""
+    return host in DEPRECATED_PUBLIC_RELAY_HOSTS
+
+
 def normalize_relay_urls(values: Any, *, include_default: bool = True) -> list[str]:
     result: list[str] = []
     if include_default:
         result.extend(DEFAULT_PUBLIC_RELAY_URLS)
     for raw in _iter_relay_url_candidates(values):
         url = normalize_relay_url(raw)
-        if url and url not in result:
+        if not url or is_deprecated_relay_url(url):
+            continue
+        if url not in result:
             result.append(url)
     return result
 
@@ -349,8 +358,8 @@ def load_config(config_path: str | Path = "config.yml", *, create_if_missing: bo
     if relay_urls_key_present:
         # `relay_urls: []` is an explicit user choice from the dashboard to
         # disable PHP relay usage. For non-empty relay lists, keep the built-in
-        # primary + backup relays available so existing installations gain new
-        # default relays without manually editing config.yml.
+        # primary relay available and filter deprecated relays so old configs do
+        # not keep using offline providers.
         relay_values = network_raw.get("relay_urls", [])
         relay_urls_loaded = normalize_relay_urls(relay_values, include_default=bool(_iter_relay_url_candidates(relay_values)))
     elif relay_url_key_present:

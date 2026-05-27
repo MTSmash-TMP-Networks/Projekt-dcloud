@@ -277,10 +277,9 @@ Die Konfiguration enthält standardmäßig:
 ```yaml
 relay_urls:
   - "https://support.tmp-networks.de/dcstorage/dcloud_relay.php"
-  - "http://dcloud.byethost12.com/dcloud_relay.php"
 ```
 
-Wenn PHP-Vermittlung bewusst deaktiviert werden soll, muss `relay_urls: []` gesetzt werden. Bestehende Installationen mit alter Konfiguration bekommen das Backup-Relay automatisch ergänzt, solange die Relay-Funktion nicht ausdrücklich deaktiviert wurde.
+Wenn PHP-Vermittlung bewusst deaktiviert werden soll, muss `relay_urls: []` gesetzt werden. Das frühere ByetHost-Relay ist als veraltet markiert und wird auch aus bestehenden Konfigurationen automatisch herausgefiltert, weil der Provider zeitweise offline geht.
 
 ## Komprimierung
 
@@ -1029,8 +1028,7 @@ network:
   relay_url: "https://support.tmp-networks.de/dcstorage/dcloud_relay.php"
   relay_urls:
     - "https://support.tmp-networks.de/dcstorage/dcloud_relay.php"
-    - "http://dcloud.byethost12.com/dcloud_relay.php"
-  relay_secret: ""
+    relay_secret: ""
   relay_poll_interval_seconds: 1
   relay_request_timeout_seconds: 180
   relay_chunk_size_bytes: 524288
