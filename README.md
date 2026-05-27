@@ -1024,6 +1024,7 @@ Die Codebasis ist modular aufgebaut, damit spätere Transport-, Index- und Versc
 | `scripts/install_dcloud_service.sh` | Linux/OpenWrt/Windows-Bootstrap |
 | `scripts/install_dcloud_service_mac.sh` | macOS-launchd-Installer |
 | `scripts/install_dcloud_docker_windows.ps1` | Windows-Docker-Installer/Starter |
+| `Script/install_synology_docker.sh` | Synology-DSM-Docker-Installer mit persistentem `/volume1/docker/dcloud/data` |
 | `scripts/docker-entrypoint.sh` | Docker-Entrypoint für persistente Config unter `/data` |
 | `Dockerfile` | Docker-Image für dcloud |
 | `docker-compose.windows.yml` | Docker-Compose für Windows ohne SMB |
