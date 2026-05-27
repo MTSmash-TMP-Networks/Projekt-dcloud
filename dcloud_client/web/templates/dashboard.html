@@ -1210,6 +1210,56 @@
         selectedStoragePeerIds = storedStoragePeerSelection;
         storagePeerSelectionTouched = true;
       }
+      const peerOrderKey = `dcloud.peerOrder.${appState.nodeId || "local"}`;
+      let stablePeerOrder = loadStablePeerOrder();
+      function loadStablePeerOrder(){
+        try{
+          const raw = localStorage.getItem(peerOrderKey);
+          const parsed = raw ? JSON.parse(raw) : [];
+          return Array.isArray(parsed) ? parsed.map(String).filter(Boolean) : [];
+        }catch(error){
+          return [];
+        }
+      }
+      function saveStablePeerOrder(){
+        try{
+          localStorage.setItem(peerOrderKey, JSON.stringify(stablePeerOrder.slice(-1000)));
+        }catch(error){
+          // UI order stability is best-effort when localStorage is unavailable.
+        }
+      }
+      function stablePeerId(peer){ return String((peer && peer.node_id) || ""); }
+      function stablePeerLabel(peer){
+        return String((peer && (peer.display_name || peer.name || peer.node_id)) || "Peer");
+      }
+      function applyStablePeerOrder(peers){
+        const list = Array.isArray(peers) ? peers.slice() : [];
+        if(!list.length) return list;
+        const known = new Set(stablePeerOrder);
+        list.forEach(peer => {
+          const id = stablePeerId(peer);
+          if(id && !known.has(id)){
+            stablePeerOrder.push(id);
+            known.add(id);
+          }
+        });
+        const order = new Map(stablePeerOrder.map((id, index) => [id, index]));
+        list.sort((a, b) => {
+          const aId = stablePeerId(a);
+          const bId = stablePeerId(b);
+          const aPos = order.has(aId) ? order.get(aId) : Number.MAX_SAFE_INTEGER;
+          const bPos = order.has(bId) ? order.get(bId) : Number.MAX_SAFE_INTEGER;
+          if(aPos !== bPos) return aPos - bPos;
+          return stablePeerLabel(a).localeCompare(stablePeerLabel(b), "de", { sensitivity:"base", numeric:true });
+        });
+        saveStablePeerOrder();
+        return list;
+      }
+      function normalizePeerOrderInState(state){
+        if(state && Array.isArray(state.peers)) state.peers = applyStablePeerOrder(state.peers);
+        return state;
+      }
+      appState = normalizePeerOrderInState(appState);
       const uploadQueue = [];
       let uploadWorkerRunning = false;
       let lastTransferPercent = 0;
@@ -1626,7 +1676,7 @@
           if(incomingFileCount < currentFileCount && Date.now() < suppressShrinkUntil){
             return;
           }
-          appState = Object.assign({}, appState, nextState);
+          appState = normalizePeerOrderInState(Object.assign({}, appState, nextState));
         }
         buildFileSystem();
         if(explorerPath && !fsMap.has(explorerPath)) explorerPath = parentPath(explorerPath);

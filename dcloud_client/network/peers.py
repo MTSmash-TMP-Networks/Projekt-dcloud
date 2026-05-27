@@ -234,8 +234,13 @@ class InMemoryPeerProvider:
         now = datetime.now(timezone.utc)
         with self._lock:
             self._purge_stale_locked(now)
-            peers = list(self._peers.values())
-        return sorted(peers, key=lambda item: item.last_seen, reverse=True)
+            # Keep insertion order stable for the dashboard.  Previously the list
+            # was sorted by ``last_seen`` which made peers jump to the top every
+            # time they announced themselves via UDP/relay/API.  Python dicts
+            # preserve insertion order, and assigning an existing node_id does
+            # not move it, so existing rows keep their visible position while
+            # newly discovered peers are appended at the end.
+            return list(self._peers.values())
 
     def remove(self, node_id: str) -> Peer | None:
         with self._lock:

@@ -1,5 +1,12 @@
 # dcloud – dezentraler Desktop-Speicher mit Peer-Replikation
 
+### Stabile Peer-Reihenfolge
+
+Die Peer-Liste im Dashboard und die Chat-Peer-Liste behalten jetzt eine feste Reihenfolge.
+Aktualisierungen über LAN, Relay oder API ändern nur Status/IP/Metadaten, verschieben aber den Peer nicht mehr nach oben.
+Neu entdeckte Peers werden am Ende angehängt.
+
+
 dcloud ist ein Python-basierter Storage-Client mit Web-Dashboard im Desktop-Stil. Jeder Knoten kann Dateien lokal speichern, automatisch im LAN oder über PHP-Relays andere Peers finden und Dateien zur Ausfallsicherheit auf aktive Peers replizieren. Das Dashboard enthält Datei-Explorer, integrierte Datei-Vorschau, Transfer-Center, Peer-Netzwerk, Chat, SMB-Freigabe, Audit-Logs, Einstellungen und temporäre externe Download-Links.
 
 > Aktueller Status: Das Projekt ist ein funktionsfähiger MVP/Prototyp. Die Web-UI besitzt jetzt eine lokale Benutzerverwaltung mit Login, Admin-Rollen und erster Setup-Seite. Für produktive Nutzung bleiben Firewall, VPN, Reverse Proxy oder ein separates internes Netz sinnvoll, weil Peer-/Relay-Endpunkte weiterhin erreichbar sein müssen.
