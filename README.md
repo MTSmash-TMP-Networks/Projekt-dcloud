@@ -60,7 +60,7 @@ Flask Web-UI + Peer-API (:8787)
               └── SMB-Zugriff auf den lokalen Speicherpfad
 ```
 
-Die Dateiübertragung nutzt nach Möglichkeit direkte Peer-Verbindungen. Wenn das nicht klappt, wird ein PHP-Forwarder versucht. Als letzte Stufe dient die Relay-Mailbox, bei der der nicht direkt erreichbare Peer aktiv beim Relay nach Aufgaben fragt und Antworten zurückschiebt.
+Die Dateiübertragung nutzt nach Möglichkeit direkte Peer-Verbindungen. Wenn das nicht klappt, wird ein PHP-Forwarder versucht. Als letzte Stufe dient die Relay-Mailbox, bei der der nicht direkt erreichbare Peer aktiv beim Relay nach Aufgaben fragt und Antworten zurückschiebt. Wenn derselbe Peer gleichzeitig per LAN-Discovery und über Relay/API sichtbar ist, bleibt die LAN-Adresse stabil die bevorzugte Route; Relay- und Public-IP-Informationen werden nur als Fallback gemerkt. Dadurch wechseln Peers im internen Netzwerk nicht mehr laufend zwischen interner und externer Adresse.
 
 ## Hauptfunktionen im Dashboard
 

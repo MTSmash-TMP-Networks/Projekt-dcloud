@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
+import ipaddress
 import threading
 from typing import Protocol
 
@@ -34,6 +35,43 @@ def display_name_for_peer(node_id: str, configured_name: str | None = None) -> s
     noun = _NOUNS[(number // len(_ADJECTIVES)) % len(_NOUNS)]
     suffix = (digest[-4:] or "0000").upper()
     return f"{adjective} {noun} {suffix}"
+
+
+def _address_is_lan_or_local(host: str | None) -> bool:
+    """Return True when *host* is a local/LAN endpoint worth preferring.
+
+    Relay/API discovery can report the same peer through an external route while
+    UDP discovery sees it directly in the same LAN.  The direct LAN address is
+    faster and more stable, so the peer registry keeps it as the primary route
+    and stores relay metadata only as fallback.
+    """
+    value = (host or "").strip().strip("[]")
+    if not value or value == "__relay__":
+        return False
+    if value.lower() in {"localhost", "host.docker.internal"}:
+        return True
+    try:
+        address = ipaddress.ip_address(value)
+    except ValueError:
+        return value.endswith(".local") or ".local." in value
+    return bool(
+        address.is_private
+        or address.is_loopback
+        or address.is_link_local
+        or address.is_reserved
+        or address.is_unspecified
+    )
+
+
+def _route_preference(peer: "Peer") -> int:
+    """Higher value means the peer route should be kept as primary."""
+    if peer.host == "__relay__":
+        return 0
+    if peer.route_via_node_id:
+        return 1
+    if _address_is_lan_or_local(peer.host):
+        return 3
+    return 2
 
 
 @dataclass
@@ -134,7 +172,9 @@ class InMemoryPeerProvider:
             existing = self._peers.get(peer.node_id)
             if existing is not None:
                 # Preserve useful metadata if an older peer did not advertise a
-                # field in this heartbeat, but always trust the latest route.
+                # field in this heartbeat.  Route selection is intentionally not
+                # "last write wins": LAN/direct discovery must stay primary when
+                # the same peer is also visible through relay/API/public routes.
                 peer.name = peer.name if peer.name is not None else existing.name
                 peer.client_type = peer.client_type if peer.client_type is not None else existing.client_type
                 peer.shared_storage_bytes = (
@@ -148,14 +188,29 @@ class InMemoryPeerProvider:
                 peer.free_storage_bytes = (
                     peer.free_storage_bytes if peer.free_storage_bytes is not None else existing.free_storage_bytes
                 )
-                # Keep the fast LAN endpoint when it exists, but remember the
-                # relay as a fallback for peers behind NAT or outside the LAN.
-                if peer.relay_url and not existing.relay_url:
+
+                existing_relay_url = existing.relay_url
+                incoming_relay_url = peer.relay_url
+                existing_priority = _route_preference(existing)
+                incoming_priority = _route_preference(peer)
+
+                if existing_priority > incoming_priority:
+                    # Example: existing 192.168.x.x route, incoming __relay__ or
+                    # public/API route.  Keep the LAN endpoint and merge only the
+                    # fresh metadata/relay fallback.
                     peer.host = existing.host
                     peer.udp_port = existing.udp_port
                     peer.route_via_node_id = existing.route_via_node_id
-                elif existing.relay_url and not peer.relay_url:
-                    peer.relay_url = existing.relay_url
+                elif existing_priority == incoming_priority and _address_is_lan_or_local(existing.host) and not _address_is_lan_or_local(peer.host):
+                    # Same class, but avoid replacing a LAN host with a public
+                    # address when both announcements describe the same node.
+                    peer.host = existing.host
+                    peer.udp_port = existing.udp_port
+                    peer.route_via_node_id = existing.route_via_node_id
+
+                # Always keep a relay URL as fallback, regardless of which route
+                # won above.  The active host stays LAN/direct when available.
+                peer.relay_url = incoming_relay_url or existing_relay_url
 
             endpoint_key = peer.endpoint_key()
             duplicate_ids = [
