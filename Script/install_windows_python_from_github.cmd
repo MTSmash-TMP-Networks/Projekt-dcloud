@@ -26,6 +26,8 @@ if not defined DCLOUD_GITHUB_BRANCH set "DCLOUD_GITHUB_BRANCH=main"
 if not defined DCLOUD_BOOTSTRAP_DIR set "DCLOUD_BOOTSTRAP_DIR=%TEMP%\dcloud-windows-python-github-install"
 if not defined DCLOUD_WINDOWS_APP_DIR set "DCLOUD_WINDOWS_APP_DIR=%LOCALAPPDATA%\dcloud\app"
 if not defined DCLOUD_WINDOWS_DATA_DIR set "DCLOUD_WINDOWS_DATA_DIR=%LOCALAPPDATA%\dcloud\data"
+if not defined DCLOUD_UPDATE_ONLY set "DCLOUD_UPDATE_ONLY=0"
+if not defined DCLOUD_FORCE_UPDATE set "DCLOUD_FORCE_UPDATE=0"
 
 set "BOOTSTRAP_DIR=%DCLOUD_BOOTSTRAP_DIR%"
 set "ARCHIVE_FILE=%BOOTSTRAP_DIR%\project.zip"
@@ -54,6 +56,21 @@ if not defined DCLOUD_GIT_REVISION set "DCLOUD_GIT_REVISION=unbekannt"
 echo [dcloud-python-bootstrap] GitHub revision: %DCLOUD_GIT_REVISION% (%DCLOUD_GIT_BRANCH%)
 echo [dcloud-python-bootstrap] App directory: %DCLOUD_WINDOWS_APP_DIR%
 echo [dcloud-python-bootstrap] Data directory: %DCLOUD_WINDOWS_DATA_DIR%
+
+set "DCLOUD_CURRENT_REVISION="
+if exist "%DCLOUD_WINDOWS_APP_DIR%\.dcloud_git_revision" set /p DCLOUD_CURRENT_REVISION=<"%DCLOUD_WINDOWS_APP_DIR%\.dcloud_git_revision"
+if /I "%DCLOUD_UPDATE_ONLY%"=="1" if /I not "%DCLOUD_FORCE_UPDATE%"=="1" if /I not "%DCLOUD_GIT_REVISION%"=="unbekannt" if defined DCLOUD_CURRENT_REVISION if /I not "%DCLOUD_CURRENT_REVISION%"=="unbekannt" if /I "%DCLOUD_CURRENT_REVISION%"=="%DCLOUD_GIT_REVISION%" (
+  echo [dcloud-python-bootstrap] No GitHub update available. Current revision is already %DCLOUD_CURRENT_REVISION%.
+  if exist "%DCLOUD_WINDOWS_APP_DIR%\Script\install_windows_python.cmd" (
+    call "%DCLOUD_WINDOWS_APP_DIR%\Script\install_windows_python.cmd" -Status >nul 2>nul
+    if errorlevel 1 (
+      echo [dcloud-python-bootstrap] dcloud is not running. Starting existing installation.
+      call "%DCLOUD_WINDOWS_APP_DIR%\Script\install_windows_python.cmd"
+      exit /b %ERRORLEVEL%
+    )
+  )
+  exit /b 0
+)
 
 if exist "%BOOTSTRAP_DIR%" rmdir /s /q "%BOOTSTRAP_DIR%" 2>nul
 mkdir "%BOOTSTRAP_DIR%" 2>nul

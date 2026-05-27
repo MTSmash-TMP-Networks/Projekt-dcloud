@@ -102,6 +102,11 @@ DCLOUD_DISCOVERY_UDP_PORT="${DCLOUD_DISCOVERY_UDP_PORT:-6881}"
 DCLOUD_NODE_NAME="${DCLOUD_NODE_NAME:-$DEFAULT_INSTANCE_NAME}"
 DCLOUD_STORAGE_LIMIT_GB="${DCLOUD_STORAGE_LIMIT_GB:-50}"
 DCLOUD_RELAY_URLS="${DCLOUD_RELAY_URLS:-}"
+DCLOUD_GITHUB_OWNER="${DCLOUD_GITHUB_OWNER:-MTSmash-TMP-Networks}"
+DCLOUD_GITHUB_REPO="${DCLOUD_GITHUB_REPO:-Projekt-dcloud}"
+DCLOUD_GITHUB_BRANCH="${DCLOUD_GITHUB_BRANCH:-main}"
+DCLOUD_ENABLE_AUTO_UPDATE="${DCLOUD_ENABLE_AUTO_UPDATE:-1}"
+DCLOUD_AUTO_UPDATE_INTERVAL_MINUTES="${DCLOUD_AUTO_UPDATE_INTERVAL_MINUTES:-5}"
 
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 PROJECT_ROOT=$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd)
@@ -110,6 +115,8 @@ DATA_DIR="$INSTALL_DIR/data"
 COMPOSE_FILE="$APP_DIR/docker-compose.synology.yml"
 ENV_FILE="$APP_DIR/.env"
 DOCKERFILE="$APP_DIR/Dockerfile.synology"
+LOG_DIR="$INSTALL_DIR/logs"
+UPDATE_SCRIPT="$INSTALL_DIR/update_dcloud_synology.sh"
 
 DCLOUD_GIT_REVISION="$(read_git_revision)"
 DCLOUD_GIT_BRANCH="$(read_git_branch)"
@@ -148,7 +155,7 @@ log "Installationsordner: $INSTALL_DIR"
 log "Node-Name: $DCLOUD_NODE_NAME"
 log "Container-Name: $CONTAINER_NAME"
 log "GitHub-Stand: $DCLOUD_GIT_REVISION ($DCLOUD_GIT_BRANCH)"
-mkdir -p "$APP_DIR" "$DATA_DIR" "$DATA_DIR/storage" "$DATA_DIR/logs"
+mkdir -p "$APP_DIR" "$DATA_DIR" "$DATA_DIR/storage" "$DATA_DIR/logs" "$LOG_DIR"
 
 log "Projektdateien werden nach $APP_DIR kopiert."
 if [ "$PROJECT_ROOT" != "$APP_DIR" ]; then
@@ -228,6 +235,63 @@ services:
       - ../data:/data
 COMPOSE_EOF
 
+
+setup_synology_auto_update() {
+    if [ "${DCLOUD_ENABLE_AUTO_UPDATE:-1}" != "1" ]; then
+        log "Auto-Update ist deaktiviert."
+        return 0
+    fi
+    mkdir -p "$LOG_DIR"
+    cat > "$UPDATE_SCRIPT" <<UPDATE_EOF
+#!/bin/sh
+export INSTALL_DIR="$INSTALL_DIR"
+export DCLOUD_GITHUB_OWNER="$DCLOUD_GITHUB_OWNER"
+export DCLOUD_GITHUB_REPO="$DCLOUD_GITHUB_REPO"
+export DCLOUD_GITHUB_BRANCH="$DCLOUD_GITHUB_BRANCH"
+export CONTAINER_NAME="$CONTAINER_NAME"
+export DCLOUD_NODE_NAME="$DCLOUD_NODE_NAME"
+export DCLOUD_DASHBOARD_PORT="$DCLOUD_DASHBOARD_PORT"
+export DCLOUD_DISCOVERY_UDP_PORT="$DCLOUD_DISCOVERY_UDP_PORT"
+export DCLOUD_STORAGE_LIMIT_GB="$DCLOUD_STORAGE_LIMIT_GB"
+export DCLOUD_RELAY_URLS="$DCLOUD_RELAY_URLS"
+export DCLOUD_ENABLE_AUTO_UPDATE="1"
+export DCLOUD_UPDATE_ONLY="1"
+LOG_FILE="$LOG_DIR/autoupdate.log"
+echo "[\$(date -u +%Y-%m-%dT%H:%M:%SZ)] Suche nach dcloud GitHub-Update..." >> "\$LOG_FILE"
+if command -v curl >/dev/null 2>&1; then
+    curl -fsSL "https://raw.githubusercontent.com/\$DCLOUD_GITHUB_OWNER/\$DCLOUD_GITHUB_REPO/\$DCLOUD_GITHUB_BRANCH/Script/install_synology_docker_from_github.sh" | sh >> "\$LOG_FILE" 2>&1
+elif command -v wget >/dev/null 2>&1; then
+    wget -qO - "https://raw.githubusercontent.com/\$DCLOUD_GITHUB_OWNER/\$DCLOUD_GITHUB_REPO/\$DCLOUD_GITHUB_BRANCH/Script/install_synology_docker_from_github.sh" | sh >> "\$LOG_FILE" 2>&1
+else
+    echo "curl/wget fehlt; Auto-Update kann nicht ausgefuehrt werden." >> "\$LOG_FILE"
+    exit 1
+fi
+UPDATE_EOF
+    chmod +x "$UPDATE_SCRIPT"
+    log "Auto-Update-Skript: $UPDATE_SCRIPT"
+
+    if [ -w /etc/crontab ]; then
+        cron_line="*/$DCLOUD_AUTO_UPDATE_INTERVAL_MINUTES * * * * root /bin/sh $UPDATE_SCRIPT >> $LOG_DIR/autoupdate.log 2>&1"
+        tmp_cron="$(mktemp)"
+        grep -v "${UPDATE_SCRIPT}" /etc/crontab > "$tmp_cron" 2>/dev/null || true
+        printf '%s\n' "$cron_line" >> "$tmp_cron"
+        cat "$tmp_cron" > /etc/crontab
+        rm -f "$tmp_cron"
+        if command -v synoservice >/dev/null 2>&1; then
+            synoservice --restart crond >/dev/null 2>&1 || true
+        elif [ -x /usr/syno/sbin/synoservice ]; then
+            /usr/syno/sbin/synoservice --restart crond >/dev/null 2>&1 || true
+        elif command -v crond >/dev/null 2>&1; then
+            killall crond >/dev/null 2>&1 || true
+            crond >/dev/null 2>&1 || true
+        fi
+        log "Auto-Update aktiv: alle $DCLOUD_AUTO_UPDATE_INTERVAL_MINUTES Minuten."
+    else
+        log "Auto-Update-Skript wurde erstellt, aber /etc/crontab ist nicht beschreibbar."
+        log "Manuelles Update: sh $UPDATE_SCRIPT"
+    fi
+}
+
 log "Umgebungsdatei wird erstellt."
 cat > "$ENV_FILE" <<ENV_EOF
 CONTAINER_NAME=$CONTAINER_NAME
@@ -239,6 +303,8 @@ DCLOUD_RELAY_URLS=$DCLOUD_RELAY_URLS
 DCLOUD_GIT_REVISION=$DCLOUD_GIT_REVISION
 DCLOUD_GIT_BRANCH=$DCLOUD_GIT_BRANCH
 ENV_EOF
+
+setup_synology_auto_update
 
 log "Container wird gebaut und gestartet."
 cd "$APP_DIR"

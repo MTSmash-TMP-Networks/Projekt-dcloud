@@ -20,6 +20,9 @@ REPO_OWNER="${DCLOUD_GITHUB_OWNER:-MTSmash-TMP-Networks}"
 REPO_NAME="${DCLOUD_GITHUB_REPO:-Projekt-dcloud}"
 REPO_BRANCH="${DCLOUD_GITHUB_BRANCH:-main}"
 BOOTSTRAP_DIR="${DCLOUD_BOOTSTRAP_DIR:-/tmp/dcloud-synology-github-install}"
+INSTALL_DIR="${INSTALL_DIR:-/volume1/docker/dcloud}"
+DCLOUD_UPDATE_ONLY="${DCLOUD_UPDATE_ONLY:-0}"
+DCLOUD_FORCE_UPDATE="${DCLOUD_FORCE_UPDATE:-0}"
 ARCHIVE_FILE="$BOOTSTRAP_DIR/project.tar.gz"
 DOWNLOAD_URL="https://github.com/$REPO_OWNER/$REPO_NAME/archive/refs/heads/$REPO_BRANCH.tar.gz"
 REF_API_URL="https://api.github.com/repos/$REPO_OWNER/$REPO_NAME/git/ref/heads/$REPO_BRANCH"
@@ -73,6 +76,11 @@ lookup_github_revision() {
 require_cmd tar
 require_cmd docker
 
+CURRENT_REVISION=""
+if [ -f "$INSTALL_DIR/app/.dcloud_git_revision" ]; then
+    CURRENT_REVISION=$(head -n 1 "$INSTALL_DIR/app/.dcloud_git_revision" 2>/dev/null | tr -d '\r\n' || true)
+fi
+
 log "Bootstrap-Verzeichnis: $BOOTSTRAP_DIR"
 rm -rf "$BOOTSTRAP_DIR"
 mkdir -p "$BOOTSTRAP_DIR"
@@ -81,6 +89,18 @@ log "Projekt wird von GitHub geladen: $REPO_OWNER/$REPO_NAME ($REPO_BRANCH)"
 DCLOUD_GIT_REVISION="${DCLOUD_GIT_REVISION:-$(lookup_github_revision)}"
 DCLOUD_GIT_BRANCH="${DCLOUD_GIT_BRANCH:-$REPO_BRANCH}"
 log "GitHub-Stand: $DCLOUD_GIT_REVISION ($DCLOUD_GIT_BRANCH)"
+if [ "$DCLOUD_UPDATE_ONLY" = "1" ] && [ "$DCLOUD_FORCE_UPDATE" != "1" ] && [ -n "$CURRENT_REVISION" ] && [ "$CURRENT_REVISION" != "unbekannt" ] && [ "$DCLOUD_GIT_REVISION" != "unbekannt" ] && [ "$CURRENT_REVISION" = "$DCLOUD_GIT_REVISION" ]; then
+    log "Kein GitHub-Update verfuegbar. Aktueller Stand ist bereits $CURRENT_REVISION."
+    if [ -f "$INSTALL_DIR/app/docker-compose.synology.yml" ]; then
+        cd "$INSTALL_DIR/app"
+        if docker compose version >/dev/null 2>&1; then
+            docker compose -f docker-compose.synology.yml ps >/dev/null 2>&1 || true
+        elif command -v docker-compose >/dev/null 2>&1; then
+            docker-compose -f docker-compose.synology.yml ps >/dev/null 2>&1 || true
+        fi
+    fi
+    exit 0
+fi
 download_file "$DOWNLOAD_URL" "$ARCHIVE_FILE"
 
 log "Archiv wird entpackt."

@@ -20,6 +20,8 @@ rem   set DCLOUD_AUTO_INSTALL_PYTHON=1   rem default: 1, install Python automati
 rem   set DCLOUD_PYTHON_WINGET_ID=Python.Python.3.12
 rem   set DCLOUD_PYTHON_CHOCO_PACKAGE=python312
 rem   set DCLOUD_INSTALL_IMPACKET=0    rem default: follows DCLOUD_ENABLE_SMB; install optional SMB package
+rem   set DCLOUD_ENABLE_AUTO_UPDATE=1
+rem   set DCLOUD_AUTO_UPDATE_MINUTES=5
 rem
 rem Management examples:
 rem   Script\install_windows_python.cmd -Logs
@@ -44,6 +46,11 @@ if not defined DCLOUD_PYTHON_WINGET_ID set "DCLOUD_PYTHON_WINGET_ID=Python.Pytho
 if not defined DCLOUD_PYTHON_CHOCO_PACKAGE set "DCLOUD_PYTHON_CHOCO_PACKAGE=python312"
 if not defined DCLOUD_INSTALL_IMPACKET if /I "%DCLOUD_ENABLE_SMB%"=="1" set "DCLOUD_INSTALL_IMPACKET=1"
 if not defined DCLOUD_INSTALL_IMPACKET set "DCLOUD_INSTALL_IMPACKET=0"
+if not defined DCLOUD_ENABLE_AUTO_UPDATE set "DCLOUD_ENABLE_AUTO_UPDATE=1"
+if not defined DCLOUD_AUTO_UPDATE_MINUTES set "DCLOUD_AUTO_UPDATE_MINUTES=5"
+if not defined DCLOUD_GITHUB_OWNER set "DCLOUD_GITHUB_OWNER=MTSmash-TMP-Networks"
+if not defined DCLOUD_GITHUB_REPO set "DCLOUD_GITHUB_REPO=Projekt-dcloud"
+if not defined DCLOUD_GITHUB_BRANCH set "DCLOUD_GITHUB_BRANCH=main"
 
 set "VENV_DIR=%REPO_ROOT%\.venv"
 set "VENV_PYTHON=%VENV_DIR%\Scripts\python.exe"
@@ -52,6 +59,8 @@ set "LOG_DIR=%DCLOUD_WINDOWS_DATA_DIR%\logs"
 set "LOG_FILE=%LOG_DIR%\dcloud.log"
 set "ERR_FILE=%LOG_DIR%\dcloud.err.log"
 set "PID_FILE=%DCLOUD_WINDOWS_DATA_DIR%\dcloud.pid"
+set "AUTO_UPDATE_SCRIPT=%DCLOUD_WINDOWS_DATA_DIR%\update_dcloud_windows_python.cmd"
+set "AUTO_UPDATE_LOG=%LOG_DIR%\autoupdate.log"
 set "CONFIG_HELPER=%REPO_ROOT%\scripts\configure_dcloud_windows_python.py"
 set "REQUIREMENTS_FILE=%REPO_ROOT%\requirements.txt"
 if exist "%REPO_ROOT%\requirements-windows-python.txt" set "REQUIREMENTS_FILE=%REPO_ROOT%\requirements-windows-python.txt"
@@ -67,6 +76,10 @@ if /I "%~1"=="-Status" set "COMMAND=status"
 if /I "%~1"=="/Status" set "COMMAND=status"
 if /I "%~1"=="-Run" set "COMMAND=run"
 if /I "%~1"=="/Run" set "COMMAND=run"
+if /I "%~1"=="-Update" set "COMMAND=update"
+if /I "%~1"=="/Update" set "COMMAND=update"
+if /I "%~1"=="-AutoUpdate" set "COMMAND=update"
+if /I "%~1"=="/AutoUpdate" set "COMMAND=update"
 if /I "%~1"=="-InstallOnly" set "COMMAND=installonly"
 if /I "%~1"=="/InstallOnly" set "COMMAND=installonly"
 
@@ -74,6 +87,7 @@ if "%COMMAND%"=="stop" goto :stop_service
 if "%COMMAND%"=="logs" goto :show_logs
 if "%COMMAND%"=="status" goto :show_status
 if "%COMMAND%"=="restart" goto :restart_service
+if "%COMMAND%"=="update" goto :run_update_now
 
 call :install_python_app
 if errorlevel 1 exit /b 1
@@ -157,6 +171,7 @@ set "DCLOUD_CONFIG_FILE=%CONFIG_FILE%"
 if errorlevel 1 exit /b 1
 
 call :maybe_add_firewall_rules
+call :setup_auto_update
 
 where php-cgi >nul 2>nul
 if errorlevel 1 where php >nul 2>nul
@@ -294,6 +309,66 @@ if exist "%ProgramFiles%\Python310" set "PATH=%ProgramFiles%\Python310;%ProgramF
 if exist "%ProgramFiles%\Python313" set "PATH=%ProgramFiles%\Python313;%ProgramFiles%\Python313\Scripts;%PATH%"
 if exist "%ProgramData%\chocolatey\bin" set "PATH=%ProgramData%\chocolatey\bin;%PATH%"
 exit /b 0
+
+:setup_auto_update
+if /I "%DCLOUD_ENABLE_AUTO_UPDATE%"=="0" (
+  echo [dcloud-windows-python] Auto-Update ist deaktiviert.
+  exit /b 0
+)
+where schtasks >nul 2>nul
+if errorlevel 1 (
+  echo [dcloud-windows-python] Hinweis: schtasks wurde nicht gefunden. Auto-Update wird nicht eingerichtet.
+  exit /b 0
+)
+where curl >nul 2>nul
+if errorlevel 1 (
+  echo [dcloud-windows-python] Hinweis: curl.exe wurde nicht gefunden. Auto-Update wird nicht eingerichtet.
+  exit /b 0
+)
+mkdir "%LOG_DIR%" 2>nul
+(
+  echo @echo off
+  echo setlocal EnableExtensions
+  echo set "DCLOUD_GITHUB_OWNER=%DCLOUD_GITHUB_OWNER%"
+  echo set "DCLOUD_GITHUB_REPO=%DCLOUD_GITHUB_REPO%"
+  echo set "DCLOUD_GITHUB_BRANCH=%DCLOUD_GITHUB_BRANCH%"
+  echo set "DCLOUD_WINDOWS_APP_DIR=%REPO_ROOT%"
+  echo set "DCLOUD_WINDOWS_DATA_DIR=%DCLOUD_WINDOWS_DATA_DIR%"
+  echo set "DCLOUD_DASHBOARD_PORT=%DCLOUD_DASHBOARD_PORT%"
+  echo set "DCLOUD_DISCOVERY_UDP_PORT=%DCLOUD_DISCOVERY_UDP_PORT%"
+  echo set "DCLOUD_STORAGE_LIMIT_GB=%DCLOUD_STORAGE_LIMIT_GB%"
+  echo set "DCLOUD_ENABLE_SMB=%DCLOUD_ENABLE_SMB%"
+  echo set "DCLOUD_INSTALL_IMPACKET=%DCLOUD_INSTALL_IMPACKET%"
+  echo set "DCLOUD_ENABLE_AUTO_UPDATE=1"
+  echo set "DCLOUD_UPDATE_ONLY=1"
+  echo set "BOOTSTRAP_CMD=%%TEMP%%\dcloud_windows_python_update.cmd"
+  echo set "UPDATE_LOG=%AUTO_UPDATE_LOG%"
+  echo if not exist "%%DCLOUD_WINDOWS_DATA_DIR%%\logs" mkdir "%%DCLOUD_WINDOWS_DATA_DIR%%\logs" 2^>nul
+  echo echo [%%date%% %%time%%] Suche nach dcloud GitHub-Update... ^>^> "%%UPDATE_LOG%%"
+  echo curl.exe -fsSL https://raw.githubusercontent.com/%%DCLOUD_GITHUB_OWNER%%/%%DCLOUD_GITHUB_REPO%%/%%DCLOUD_GITHUB_BRANCH%%/Script/install_windows_python_from_github.cmd -o "%%BOOTSTRAP_CMD%%" ^>^> "%%UPDATE_LOG%%" 2^>^&1
+  echo if errorlevel 1 exit /b 1
+  echo cmd /c "%%BOOTSTRAP_CMD%%" ^>^> "%%UPDATE_LOG%%" 2^>^&1
+  echo exit /b %%ERRORLEVEL%%
+) > "%AUTO_UPDATE_SCRIPT%"
+
+set "AUTO_UPDATE_TASK=cmd.exe /c ""%AUTO_UPDATE_SCRIPT%"""
+schtasks /Create /TN "dcloud Python AutoUpdate" /SC MINUTE /MO %DCLOUD_AUTO_UPDATE_MINUTES% /TR "%AUTO_UPDATE_TASK%" /F >nul 2>nul
+if errorlevel 1 (
+  echo [dcloud-windows-python] Hinweis: Auto-Update-Aufgabe konnte nicht erstellt werden. Manuelles Update weiter moeglich mit: Script\install_windows_python.cmd -Update
+  exit /b 0
+)
+echo [dcloud-windows-python] Auto-Update aktiv: alle %DCLOUD_AUTO_UPDATE_MINUTES% Minuten ueber %AUTO_UPDATE_SCRIPT%
+exit /b 0
+
+:run_update_now
+call :setup_auto_update
+if not exist "%AUTO_UPDATE_SCRIPT%" (
+  echo [dcloud-windows-python] ERROR: Auto-Update-Skript konnte nicht erstellt werden.
+  exit /b 1
+)
+echo [dcloud-windows-python] Suche jetzt nach GitHub-Update...
+call "%AUTO_UPDATE_SCRIPT%"
+exit /b %ERRORLEVEL%
 
 :start_service
 call :is_running

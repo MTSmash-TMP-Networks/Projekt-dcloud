@@ -667,6 +667,19 @@ curl.exe -fsSL https://raw.githubusercontent.com/MTSmash-TMP-Networks/Projekt-dc
 
 Das Bootstrap-Skript lädt das GitHub-Archiv herunter, synchronisiert die App standardmäßig nach `%LOCALAPPDATA%\dcloud\app`, legt die Daten unter `%LOCALAPPDATA%\dcloud\data` ab, installiert bei Bedarf Python, erzeugt eine `.venv`, installiert die Windows-Basisabhängigkeiten aus `requirements-windows-python.txt` und startet dcloud im Hintergrund. Es wird kein Docker, kein WSL2 und keine Virtualisierung benötigt. Bei Updates wird eine laufende native Python-Instanz zuerst gestoppt; die `.venv` wird beim Kopieren bewusst nicht gelöscht, damit Windows keine gesperrten `.pyd`/`python.exe`-Dateien blockieren kann.
 
+**Auto-Update:** Die Windows-Python-Installation richtet jetzt zusätzlich eine geplante Aufgabe `dcloud Python AutoUpdate` ein. Diese prüft standardmäßig alle 5 Minuten den GitHub-Commit, lädt bei Änderung den aktuellen Bootstrap neu, synchronisiert die App, aktualisiert Abhängigkeiten und startet dcloud danach neu. Manuell kann sofort geprüft werden mit:
+
+```cmd
+%LOCALAPPDATA%\dcloud\app\Script\install_windows_python.cmd -Update
+```
+
+Auto-Update kann deaktiviert oder das Intervall geändert werden:
+
+```cmd
+set DCLOUD_ENABLE_AUTO_UPDATE=0
+set DCLOUD_AUTO_UPDATE_MINUTES=15
+```
+
 ### Schnellstart aus CMD im entpackten Projekt
 
 ```cmd
@@ -721,6 +734,8 @@ Script\install_windows_python.cmd -Run
 - Wenn CMD als Administrator gestartet wird, legt das Skript automatisch Windows-Firewall-Regeln für Dashboard-TCP-Port und UDP-Discovery an. Ohne Administratorrechte funktioniert der lokale Zugriff über `127.0.0.1` trotzdem.
 - Der GitHub-Stand wird beim `curl`-Bootstrap als `.dcloud_git_revision` gespeichert, damit im Dashboard nicht `unbekannt` steht.
 - Der GitHub-`curl`-Bootstrap löscht den App-Ordner nicht mehr vollständig. Stattdessen nutzt er eine Spiegel-Synchronisation mit Ausschluss von `.venv`, damit Updates auch dann funktionieren, wenn Windows noch Dateien wie `_rust.pyd`, `_yaml.pyd` oder `python.exe` kurzzeitig gesperrt hält.
+- Der Auto-Updater vergleicht `.dcloud_git_revision` mit dem aktuellen GitHub-Commit und führt nur bei Änderung ein echtes Update aus.
+- Das Update-Log liegt unter `%LOCALAPPDATA%\dcloud\data\logs\autoupdate.log`.
 
 ## Windows-Installation mit Docker Desktop
 
@@ -913,6 +928,21 @@ curl -fsSL https://raw.githubusercontent.com/MTSmash-TMP-Networks/Projekt-dcloud
 Das Bootstrap-Skript lädt das Repository von GitHub als Archiv herunter und startet danach automatisch `Script/install_synology_docker.sh`. Es wird kein `git` benötigt; `curl` oder alternativ `wget`, `tar`, Docker/Container Manager und Docker Compose müssen auf der Synology verfügbar sein.
 
 **GitHub-Stand im Dashboard:** Das Docker-Image installiert `git` und der Bootstrap schreibt zusätzlich `.dcloud_git_revision`/`.dcloud_git_branch` als Build-Metadaten. Dadurch zeigt das Dashboard auch bei Installation per GitHub-Archiv nicht mehr dauerhaft `unbekannt`, obwohl das Archiv selbst keinen `.git`-Ordner enthält.
+
+**Auto-Update:** Die Synology-Docker-Installation erstellt `/volume1/docker/dcloud/update_dcloud_synology.sh` und trägt diese Aufgabe, wenn `/etc/crontab` beschreibbar ist, automatisch in den Synology-Cron ein. Standardmäßig wird alle 5 Minuten geprüft, ob auf GitHub ein neuer Commit vorhanden ist. Nur bei Änderung wird das Archiv neu geladen, das Docker-Image neu gebaut und der Container neu gestartet. Das Log liegt unter `/volume1/docker/dcloud/logs/autoupdate.log`.
+
+Manuelles Update jederzeit:
+
+```bash
+sh /volume1/docker/dcloud/update_dcloud_synology.sh
+```
+
+Auto-Update kann deaktiviert oder das Intervall geändert werden:
+
+```bash
+DCLOUD_ENABLE_AUTO_UPDATE=0 sh Script/install_synology_docker.sh
+DCLOUD_AUTO_UPDATE_INTERVAL_MINUTES=15 sh Script/install_synology_docker.sh
+```
 
 Standardwerte:
 
