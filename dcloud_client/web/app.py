@@ -609,40 +609,36 @@ def create_app(
         request.environ["dcloud.p2p_node_id"] = node_id
         return None
 
-    def _host_is_private_or_local(hostname: str) -> bool:
+    def _env_flag(name: str, default: bool = False) -> bool:
+        raw = os.environ.get(name)
+        if raw is None or str(raw).strip() == "":
+            return default
+        return str(raw).strip().lower() in {"1", "true", "yes", "on", "enabled", "ja"}
+
+    def _resolve_browser_host_addresses(hostname: str) -> tuple[bool, list[ipaddress._BaseAddress]]:
         host = (hostname or "").strip().strip("[]").lower().rstrip(".")
         if not host:
-            return True
-        if host in {"localhost", "localhost.localdomain", "host.docker.internal"} or host.endswith(".local"):
-            return True
+            return False, []
         try:
-            addresses = [ipaddress.ip_address(host)]
+            return True, [ipaddress.ip_address(host)]
         except ValueError:
+            pass
+        try:
+            infos = socket.getaddrinfo(host, None)
+        except socket.gaierror:
+            raise StorageError("Hostname konnte nicht aufgelöst werden")
+        addresses: list[ipaddress._BaseAddress] = []
+        for info in infos:
+            sockaddr = info[4]
+            if not sockaddr:
+                continue
             try:
-                infos = socket.getaddrinfo(host, None)
-            except socket.gaierror:
-                raise StorageError("Hostname konnte nicht aufgelöst werden")
-            addresses = []
-            for info in infos:
-                sockaddr = info[4]
-                if sockaddr:
-                    try:
-                        addresses.append(ipaddress.ip_address(str(sockaddr[0]).strip("[]")))
-                    except ValueError:
-                        pass
-        if not addresses:
-            return True
-        for address in addresses:
-            if (
-                address.is_private
-                or address.is_loopback
-                or address.is_link_local
-                or address.is_multicast
-                or address.is_reserved
-                or address.is_unspecified
-            ):
-                return True
-        return False
+                candidate = ipaddress.ip_address(str(sockaddr[0]).strip("[]"))
+            except ValueError:
+                continue
+            if candidate not in addresses:
+                addresses.append(candidate)
+        return False, addresses
 
     def _validate_external_browser_target(url: str) -> None:
         parsed = url_parse.urlsplit(url)
@@ -653,10 +649,34 @@ def create_app(
             raise StorageError("URL enthält keinen Hostnamen")
         if hostname.endswith(".dcloud"):
             return
-        if _host_is_private_or_local(hostname):
-            raise StorageError("Diese Adresse wurde aus Sicherheitsgründen blockiert, weil sie auf ein lokales oder privates Netzwerk zeigt.")
+
+        host = hostname.strip().strip("[]").lower().rstrip(".")
+        if host in {"localhost", "localhost.localdomain", "host.docker.internal"} or host.endswith(".local"):
+            raise StorageError("Diese lokale Adresse wurde aus Sicherheitsgründen blockiert. Nutze für dcloud-Peers bitte peername.dcloud oder die direkte LAN-IP.")
+
+        literal_ip, addresses = _resolve_browser_host_addresses(hostname)
+        if not addresses:
+            raise StorageError("Hostname konnte nicht aufgelöst werden")
+
+        allow_lan_literals = _env_flag("DCLOUD_BROWSER_ALLOW_LAN_IPS", True)
+        for address in addresses:
+            if address.is_loopback or address.is_link_local or address.is_multicast or address.is_reserved or address.is_unspecified:
+                raise StorageError("Diese Adresse wurde aus Sicherheitsgründen blockiert.")
+            if address.is_private:
+                # LAN IPs such as 192.168.x.x are useful for managing Windows peers
+                # from the dashboard browser.  To keep the SSRF protection meaningful,
+                # only literal private IPs are allowed by default; DNS names that resolve
+                # into private networks stay blocked unless the administrator explicitly
+                # enables DCLOUD_BROWSER_ALLOW_PRIVATE_DNS=1.
+                if literal_ip and allow_lan_literals:
+                    continue
+                if (not literal_ip) and _env_flag("DCLOUD_BROWSER_ALLOW_PRIVATE_DNS", False):
+                    continue
+                raise StorageError("Diese Adresse wurde aus Sicherheitsgründen blockiert, weil sie auf ein lokales oder privates Netzwerk zeigt. Direkte LAN-IPs können mit DCLOUD_BROWSER_ALLOW_LAN_IPS=1 erlaubt werden.")
+
         port = parsed.port
-        if port is not None and port not in {80, 443, 8080, 8443}:
+        allowed_ports = {80, 443, 8080, 8443, int(config.web.port)}
+        if port is not None and port not in allowed_ports:
             raise StorageError("Dieser Port ist im Dashboard-Browser nicht erlaubt.")
 
     def _is_ajax_request() -> bool:

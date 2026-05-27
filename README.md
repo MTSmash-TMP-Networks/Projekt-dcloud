@@ -1305,3 +1305,9 @@ Die Codebasis ist modular aufgebaut, damit spätere Transport-, Index- und Versc
 ## Lizenz
 
 Siehe `LICENSE`.
+
+### Hinweis v39: Windows-Rechner per LAN-IP erreichen
+
+Der Dashboard-Browser blockiert weiterhin gefaehrliche lokale Ziele wie `localhost`, `127.0.0.1`, Link-Local, Multicast und reservierte Adressen. Direkte LAN-IP-Adressen wie `192.168.x.x`, `10.x.x.x` oder `172.16-31.x.x` sind wieder erlaubt, damit Windows-Peers und lokale Geraete im internen Netzwerk erreichbar bleiben. Dieses Verhalten kann mit `DCLOUD_BROWSER_ALLOW_LAN_IPS=0` deaktiviert werden. DNS-Namen, die auf private IPs zeigen, bleiben standardmaessig blockiert; sie koennen bei Bedarf mit `DCLOUD_BROWSER_ALLOW_PRIVATE_DNS=1` erlaubt werden.
+
+Bei nativer Windows-Python-Installation setzt `Script\\install_windows_python.cmd` die Firewall-Regeln fuer Dashboard-TCP-Port und Discovery-UDP-Port nun neu und zeigt nach dem Start die erreichbaren LAN-URLs an. Wenn keine Administratorrechte vorhanden sind, funktioniert lokal weiterhin `http://127.0.0.1:<Port>`, aber fuer Zugriff von anderen Rechnern muss das Skript einmal als Administrator mit `-Restart` ausgefuehrt werden.

@@ -329,7 +329,8 @@ if errorlevel 1 (
 )
 call :read_pid
 echo [dcloud-windows-python] dcloud started with PID %DCLOUD_PID%.
-echo [dcloud-windows-python] Dashboard: http://127.0.0.1:%DCLOUD_DASHBOARD_PORT%
+echo [dcloud-windows-python] Dashboard lokal: http://127.0.0.1:%DCLOUD_DASHBOARD_PORT%
+for /f "usebackq tokens=*" %%I in (`powershell -NoProfile -Command "Get-NetIPAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue | Where-Object { $_.IPAddress -notlike '127.*' -and $_.IPAddress -notlike '169.254.*' } | ForEach-Object { 'http://' + $_.IPAddress + ':' + $env:DCLOUD_DASHBOARD_PORT }" 2^>nul`) do echo [dcloud-windows-python] Dashboard LAN: %%I
 echo [dcloud-windows-python] Data: %DCLOUD_WINDOWS_DATA_DIR%
 echo [dcloud-windows-python] Logs: Script\install_windows_python.cmd -Logs
 exit /b 0
@@ -428,8 +429,13 @@ net session >nul 2>nul
 if errorlevel 1 (
   echo [dcloud-windows-python] Hinweis: Keine Administratorrechte. Windows-Firewall-Regeln werden nicht automatisch gesetzt.
   echo [dcloud-windows-python] Lokal funktioniert das Dashboard trotzdem ueber http://127.0.0.1:%DCLOUD_DASHBOARD_PORT%
+  echo [dcloud-windows-python] Fuer Zugriff von anderen PCs CMD als Administrator starten und Script\install_windows_python.cmd -Restart ausfuehren.
   exit /b 0
 )
-netsh advfirewall firewall add rule name="dcloud Dashboard %DCLOUD_DASHBOARD_PORT%" dir=in action=allow protocol=TCP localport=%DCLOUD_DASHBOARD_PORT% >nul 2>nul
-netsh advfirewall firewall add rule name="dcloud UDP Discovery %DCLOUD_DISCOVERY_UDP_PORT%" dir=in action=allow protocol=UDP localport=%DCLOUD_DISCOVERY_UDP_PORT% >nul 2>nul
+netsh advfirewall firewall delete rule name="dcloud Dashboard %DCLOUD_DASHBOARD_PORT%" >nul 2>nul
+netsh advfirewall firewall delete rule name="dcloud UDP Discovery %DCLOUD_DISCOVERY_UDP_PORT%" >nul 2>nul
+netsh advfirewall firewall delete rule name="dcloud Python Runtime" >nul 2>nul
+netsh advfirewall firewall add rule name="dcloud Dashboard %DCLOUD_DASHBOARD_PORT%" dir=in action=allow protocol=TCP localport=%DCLOUD_DASHBOARD_PORT% profile=any enable=yes >nul 2>nul
+netsh advfirewall firewall add rule name="dcloud UDP Discovery %DCLOUD_DISCOVERY_UDP_PORT%" dir=in action=allow protocol=UDP localport=%DCLOUD_DISCOVERY_UDP_PORT% profile=any enable=yes >nul 2>nul
+if exist "%VENV_PYTHON%" netsh advfirewall firewall add rule name="dcloud Python Runtime" dir=in action=allow program="%VENV_PYTHON%" profile=any enable=yes >nul 2>nul
 exit /b 0
