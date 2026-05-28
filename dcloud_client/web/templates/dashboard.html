@@ -447,6 +447,14 @@
     .pill.danger{ background:rgba(201,28,46,.1); color:#a51223; }
     .settings-inline{ display:flex; align-items:center; gap:.65rem; flex-wrap:wrap; }
     .settings-inline input[type="number"]{ max-width:150px; }
+    .settings-port-grid{ display:grid; grid-template-columns:repeat(auto-fit,minmax(180px,1fr)); gap:.72rem; margin:.72rem 0; }
+    .settings-port-card{ border:1px solid rgba(91,130,187,.2); border-radius:14px; padding:.78rem; background:rgba(255,255,255,.72); box-shadow:inset 0 1px 0 rgba(255,255,255,.9); }
+    .settings-port-card strong{ display:block; font-size:1.1rem; color:#14365f; margin-bottom:.15rem; }
+    .settings-port-card span{ color:#56708d; font-size:.88rem; line-height:1.35; }
+    .settings-checklist{ margin:.55rem 0 0; padding-left:1.15rem; color:#34516f; line-height:1.48; }
+    .settings-url-list{ display:grid; gap:.35rem; margin-top:.55rem; }
+    .settings-url-list code{ display:block; padding:.42rem .55rem; border-radius:10px; background:rgba(26,66,116,.08); color:#17365a; overflow:auto; }
+    .settings-badge{ display:inline-flex; align-items:center; gap:.35rem; border-radius:999px; padding:.22rem .55rem; background:rgba(29,125,74,.11); color:#17603a; font-weight:700; font-size:.84rem; }
 
     .chat-shell{ display:grid; grid-template-columns:230px minmax(0, 1fr); min-height:0; height:100%; }
     .chat-peer-list{ border-right:1px solid var(--line); background:linear-gradient(180deg, rgba(232,243,255,.78), rgba(232,239,252,.58)); overflow:auto; padding:12px; }
@@ -943,6 +951,45 @@
               <input id="settings-compression-skip" type="checkbox" name="compression_skip_incompressible" {% if settings_json.compressionSkipIncompressible %}checked{% endif %}> Bereits komprimierte Dateien automatisch überspringen
             </label>
             <p class="settings-note">Aktiv: <strong id="settings-compression-active">{{ settings_json.compressionActiveLabel }}</strong>. Auto prüft Dateityp und Stichprobe, damit große Videos, ZIPs, PDFs usw. nicht unnötig CPU kosten. Zstd nur aktivieren, wenn alle Speicher-Peers das Paket zstandard haben.</p>
+          </section>
+
+          <section class="settings-panel" id="direct-connection-panel">
+            <h3>Direktverbindung & Portfreigaben</h3>
+            <div class="settings-inline">
+              <span class="settings-badge" id="settings-direct-mode">{{ settings_json.directConnectionModeLabel }}</span>
+              <span class="settings-note" style="margin:0;">Wenn PHP-Relay aus ist, müssen andere Peers diesen Knoten direkt erreichen können.</span>
+            </div>
+            <div class="settings-port-grid" id="settings-direct-ports">
+              <div class="settings-port-card">
+                <strong>TCP {{ settings_json.dashboardTcpPort }}</strong>
+                <span>Dashboard, P2P-API, Dateiübertragung, Chat und Webspace. Für direkte Internet-Peers freigeben oder per Reverse Proxy weiterleiten.</span>
+              </div>
+              <div class="settings-port-card">
+                <strong>UDP {{ settings_json.discoveryUdpPort }}</strong>
+                <span>Automatische LAN-Erkennung. Nur im lokalen Netzwerk/VPN sinnvoll, nicht zwingend für Internet-Peers.</span>
+              </div>
+              <div class="settings-port-card">
+                <strong>HTTPS 443</strong>
+                <span>Empfohlen für öffentliche Nutzung: Reverse Proxy auf TCP {{ settings_json.dashboardTcpPort }}. Dann muss öffentlich nur 443 offen sein.</span>
+              </div>
+              <div class="settings-port-card">
+                <strong>TCP 445</strong>
+                <span>SMB nur lokal verwenden. Nicht öffentlich ins Internet freigeben.</span>
+              </div>
+            </div>
+            <p class="settings-note"><strong>Merksatz:</strong> Ohne PHP-Relay brauchst du für jeden öffentlich erreichbaren Peer entweder <strong>TCP {{ settings_json.dashboardTcpPort }}</strong> direkt oder einen HTTPS-Reverse-Proxy auf diesen Port.</p>
+            <ul class="settings-checklist">
+              <li><strong>Im LAN/VPN:</strong> TCP {{ settings_json.dashboardTcpPort }} reicht, UDP {{ settings_json.discoveryUdpPort }} hilft bei automatischer Suche.</li>
+              <li><strong>Über das Internet:</strong> Router-Portweiterleitung oder Reverse Proxy auf den dcloud-Port einrichten.</li>
+              <li><strong>Mehrere Peers hinter einem Router:</strong> extern unterschiedliche Ports verwenden, intern jeweils auf TCP {{ settings_json.dashboardTcpPort }} weiterleiten.</li>
+            </ul>
+            <div>
+              <p class="settings-note"><strong>Mögliche lokale Dashboard-Adressen:</strong></p>
+              <div class="settings-url-list" id="settings-lan-urls">
+                {% for url in settings_json.lanDashboardUrls %}<code>{{ url }}</code>{% else %}<code>Keine LAN-Adresse erkannt</code>{% endfor %}
+              </div>
+            </div>
+            <p class="settings-note" id="settings-direct-summary">{{ settings_json.directFirewallSummary }}</p>
           </section>
 
           <section class="settings-panel">
@@ -2180,6 +2227,27 @@
         if(compressionSkipInput && document.activeElement !== compressionSkipInput && !settingsFormDirty) compressionSkipInput.checked = settings.compressionSkipIncompressible !== false;
         const compressionActive = document.getElementById("settings-compression-active");
         if(compressionActive) compressionActive.textContent = settings.compressionActiveLabel || `${settings.compressionMode || "auto"} · ${settings.compressionAlgorithm || "auto"}`;
+        const directMode = document.getElementById("settings-direct-mode");
+        if(directMode) directMode.textContent = settings.directConnectionModeLabel || (settings.relayEnabled ? "Direkt bevorzugt + PHP-Relay-Fallback" : "Nur Direktverbindung");
+        const directPorts = document.getElementById("settings-direct-ports");
+        if(directPorts){
+          const tcpPort = Number(settings.dashboardTcpPort || network.webPort || 8787);
+          const udpPort = Number(settings.discoveryUdpPort || network.udpPort || 6881);
+          directPorts.innerHTML = `
+            <div class="settings-port-card"><strong>TCP ${tcpPort}</strong><span>Dashboard, P2P-API, Dateiübertragung, Chat und Webspace. Für direkte Internet-Peers freigeben oder per Reverse Proxy weiterleiten.</span></div>
+            <div class="settings-port-card"><strong>UDP ${udpPort}</strong><span>Automatische LAN-Erkennung. Nur im lokalen Netzwerk/VPN sinnvoll, nicht zwingend für Internet-Peers.</span></div>
+            <div class="settings-port-card"><strong>HTTPS 443</strong><span>Empfohlen für öffentliche Nutzung: Reverse Proxy auf TCP ${tcpPort}. Dann muss öffentlich nur 443 offen sein.</span></div>
+            <div class="settings-port-card"><strong>TCP 445</strong><span>SMB nur lokal verwenden. Nicht öffentlich ins Internet freigeben.</span></div>`;
+        }
+        const lanUrls = document.getElementById("settings-lan-urls");
+        if(lanUrls){
+          const urls = Array.isArray(settings.lanDashboardUrls) ? settings.lanDashboardUrls : [];
+          lanUrls.innerHTML = urls.length
+            ? urls.map(url => `<code>${escapeHtml(url)}</code>`).join("")
+            : `<code>Keine LAN-Adresse erkannt</code>`;
+        }
+        const directSummary = document.getElementById("settings-direct-summary");
+        if(directSummary) directSummary.textContent = settings.directFirewallSummary || `TCP ${settings.dashboardTcpPort || 8787} freigeben; UDP ${settings.discoveryUdpPort || 6881} nur für LAN-Erkennung; optional HTTPS 443 per Reverse Proxy`;
         const relayUrlInput = document.getElementById("settings-relay-url");
         if(relayUrlInput) relayUrlInput.value = settings.fixedRelayUrlsText || settings.fixedRelayUrl || settings.relayUrl || "";
         const relayUrlsInput = document.getElementById("settings-relay-urls");

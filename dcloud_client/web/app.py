@@ -2592,6 +2592,58 @@ def create_app(
             "storagePeerCount": len(eligible),
         }
 
+
+
+    def _detect_lan_dashboard_urls() -> list[str]:
+        """Return likely LAN dashboard URLs for the settings help card."""
+        urls: list[str] = []
+        seen: set[str] = set()
+        port = int(getattr(config.web, "port", 8787) or 8787)
+
+        def add_host(host: str) -> None:
+            host = str(host or "").strip()
+            if not host or host in {"0.0.0.0", "::"}:
+                return
+            try:
+                ip_obj = ipaddress.ip_address(host)
+            except ValueError:
+                return
+            if ip_obj.is_loopback or ip_obj.is_unspecified or ip_obj.is_multicast:
+                return
+            if ip_obj.version != 4:
+                return
+            if not (ip_obj.is_private or ip_obj.is_global):
+                return
+            url = f"http://{ip_obj}:{port}"
+            if url not in seen:
+                seen.add(url)
+                urls.append(url)
+
+        try:
+            if psutil is not None:
+                for addrs in psutil.net_if_addrs().values():
+                    for addr in addrs:
+                        if getattr(addr, "family", None) == socket.AF_INET:
+                            add_host(getattr(addr, "address", ""))
+        except Exception:
+            pass
+
+        try:
+            hostname = socket.gethostname()
+            for info in socket.getaddrinfo(hostname, None, family=socket.AF_INET):
+                add_host(info[4][0])
+        except Exception:
+            pass
+
+        if not urls:
+            try:
+                with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+                    sock.connect(("8.8.8.8", 80))
+                    add_host(sock.getsockname()[0])
+            except Exception:
+                pass
+        return urls[:8]
+
     def settings_payload(stats: StorageStats | None = None, peers: list[Any] | None = None) -> dict[str, Any]:
         current_stats = stats or chunk_store.stats()
         current_peers = peers if peers is not None else _list_active_peers()
@@ -2640,6 +2692,14 @@ def create_app(
             "relaySecretSet": False,
             "relayTokenMode": "automatic-daily",
             "relayTokenLabel": "Automatisch, tägliche Rotation",
+            "directConnectionModeLabel": ("Direkt bevorzugt + PHP-Relay-Fallback" if config.network.relay_urls else "Nur Direktverbindung"),
+            "dashboardTcpPort": int(getattr(config.web, "port", 8787) or 8787),
+            "p2pApiTcpPort": int(getattr(config.web, "port", 8787) or 8787),
+            "discoveryUdpPort": int(getattr(config.network, "udp_port", 6881) or 6881),
+            "discoveryUdpPorts": list(getattr(config.network, "auto_discovery_ports", [6881]) or [int(getattr(config.network, "udp_port", 6881) or 6881)]),
+            "lanDashboardUrls": _detect_lan_dashboard_urls(),
+            "reverseProxyPublicPort": 443,
+            "directFirewallSummary": f"TCP {int(getattr(config.web, 'port', 8787) or 8787)} freigeben; UDP {int(getattr(config.network, 'udp_port', 6881) or 6881)} nur fuer LAN-Erkennung; optional HTTPS 443 per Reverse Proxy",
             "chatEnabled": _chat_enabled(),
             "chatAlias": _chat_alias(),
             "smbEnabled": bool(config.smb.enabled),
@@ -2799,6 +2859,8 @@ def create_app(
         relay_statuses = _relay_statuses()
         relay_status, relay_error = _relay_overall_status(relay_statuses)
         return {
+            "webHost": config.web.host,
+            "webPort": config.web.port,
             "udpHost": config.network.udp_host,
             "udpPort": config.network.udp_port,
             "autoDiscoveryEnabled": config.network.auto_discovery_enabled,

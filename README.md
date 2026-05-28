@@ -1,5 +1,9 @@
 # dcloud – dezentraler Desktop-Speicher mit Peer-Replikation
 
+### v43 Direktverbindungs-Hilfe in den Einstellungen
+
+Unter **Einstellungen → Direktverbindung & Portfreigaben** zeigt das Dashboard jetzt verständlich an, welche Ports für LAN, VPN, direkte Internet-Peers und Reverse Proxy benötigt werden. Angezeigt werden TCP-Dashboard/P2P-Port, UDP-Discovery-Port, HTTPS-443-Empfehlung, SMB-Warnung und erkannte lokale Dashboard-Adressen. Dadurch muss man die Portlogik nicht mehr aus dem README zusammensuchen.
+
 ### v40 Chat-Alias über PHP-Relay
 
 Der PHP-Relay und die Python-Relay-Alternative übertragen jetzt auch `chat_enabled` und `chat_alias` in den Peer-Metadaten. Dadurch wird der Chat-Alias auch bei Peers korrekt angezeigt, die nur über das PHP-Relay sichtbar sind. Vorhandene Relay-Installationen müssen dafür die aktuelle `relay/dcloud_relay.php` aus diesem Paket bekommen.
@@ -289,14 +293,17 @@ storage/
 
 ## Netzwerk und Ports
 
+Die wichtigste Übersicht steht jetzt direkt im Dashboard unter **Einstellungen → Direktverbindung & Portfreigaben**. Dort zeigt dcloud den tatsächlich verwendeten Dashboard-/P2P-Port, den UDP-Discovery-Port und erkannte lokale Dashboard-Adressen an.
+
 | Zweck | Standard | Protokoll | Hinweis |
 | --- | ---: | --- | --- |
-| Dashboard und Peer-API | `8787` | TCP/HTTP | Standardhost `0.0.0.0`, lokal über `127.0.0.1` erreichbar |
-| LAN-Discovery | `6881` | UDP | nutzt bei belegtem Port Range `6881-6891` |
-| SMB | `445` | TCP | optional, benötigt oft Root/Admin-Rechte |
-| PHP-Relay | extern | HTTP/HTTPS | `dcloud_relay.php` auf Webspace oder Server |
+| Dashboard, Peer-API, Dateiübertragung, Chat, Webspace | `8787` | TCP/HTTP | Wichtigster Port für direkte Peer-Verbindungen |
+| LAN-Discovery | `6881` | UDP | nur für automatische Suche im LAN/VPN nötig; nutzt bei belegtem Port Range `6881-6891` |
+| Öffentlicher Reverse Proxy | `443` | HTTPS/TCP | empfohlen für Internetbetrieb: öffentlich 443, intern weiter auf dcloud `8787` |
+| SMB | `445` | TCP | optional; nur lokal verwenden, nicht öffentlich freigeben |
+| PHP-Relay | extern | HTTP/HTTPS | `dcloud_relay.php` auf Webspace oder Server; optionaler Fallback, wenn keine direkte Erreichbarkeit besteht |
 
-Für LAN-Betrieb müssen TCP `8787` und UDP `6881-6891` im lokalen Netz erlaubt sein. Für reine Relay-Nutzung reicht ausgehender HTTP/HTTPS-Zugriff vom dcloud-Node zum Relay.
+Für LAN/VPN-Betrieb reicht normalerweise TCP `8787`; UDP `6881` hilft nur bei der automatischen Peer-Suche. Wenn PHP-Relay deaktiviert ist und Peers über das Internet direkt kommunizieren sollen, muss jeder Peer entweder über TCP `8787` erreichbar sein oder über einen HTTPS-Reverse-Proxy auf diesen internen Port weitergeleitet werden.
 
 ## Standard-Relays
 
