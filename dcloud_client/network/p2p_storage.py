@@ -100,11 +100,39 @@ def _direct_peer_candidates(peer: Peer) -> list[Peer]:
     for address in getattr(peer, "lan_addresses", []) or []:
         add(address)
 
-    # If the peer has a port-forward/DDNS-like public route and was discovered
-    # through the relay, try that endpoint directly from the client before using
-    # the PHP forwarder/mailbox.  The relay records the observed public IP as
-    # metadata; with web_port set, this gives unterwegs -> peer direct transfer
-    # when the router forwards the dcloud HTTP port.
+    # If the peer has a manually configured public URL/DDNS/port-forward route,
+    # try it before the PHP mailbox. This supports routers where the external
+    # port differs from the local dcloud web_port.
+    for public_url in getattr(peer, "public_urls", []) or []:
+        try:
+            parsed = parse.urlparse(str(public_url))
+            if parsed.hostname:
+                candidate = replace(
+                    peer,
+                    host=parsed.hostname.strip("[]"),
+                    web_port=parsed.port or (443 if parsed.scheme == "https" else 80),
+                    route_via_node_id=None,
+                )
+                add(candidate.host)
+                if candidates:
+                    candidates[-1] = candidate
+        except Exception:
+            continue
+
+    public_host = str(getattr(peer, "public_host", "") or "").strip().strip("[]")
+    if public_host:
+        try:
+            public_port = int(getattr(peer, "public_port", 0) or getattr(peer, "web_port", 0) or 0)
+        except (TypeError, ValueError):
+            public_port = 0
+        candidate = replace(peer, host=public_host, web_port=public_port or peer.web_port, route_via_node_id=None)
+        add(candidate.host)
+        if candidates:
+            candidates[-1] = candidate
+
+    # If the peer has a port-forward-like public route and was discovered
+    # through the relay, try the relay-observed public IP directly before using
+    # the PHP forwarder/mailbox.
     public_ip = str(getattr(peer, "public_ip", "") or "").strip().strip("[]")
     if public_ip:
         add(public_ip)

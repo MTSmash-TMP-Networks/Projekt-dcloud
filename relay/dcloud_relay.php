@@ -10,7 +10,7 @@ declare(strict_types=1);
  * Landing page intentionally reveals only minimal information.
  */
 
-const DCLOUD_RELAY_VERSION = '1.6.1-chat-alias';
+const DCLOUD_RELAY_VERSION = '1.6.2-tracker-public-routes';
 const DCLOUD_RELAY_TOKEN_ROTATION_SECONDS = 86400;
 const DCLOUD_PEER_TTL_SECONDS = 45;
 const DCLOUD_MESSAGE_TTL_SECONDS = 900;
@@ -1166,6 +1166,67 @@ function dcloud_sanitize_string_list($value, int $maxItems = 32, int $maxLength 
     return $out;
 }
 
+
+function dcloud_sanitize_public_host($value): string {
+    $host = trim((string)$value);
+    $host = preg_replace('/[\r\n\t\s]+/', '', $host);
+    $host = trim($host, '[]');
+    if ($host === '') return '';
+    if (filter_var($host, FILTER_VALIDATE_IP) !== false) return substr($host, 0, 120);
+    if (preg_match('/^[A-Za-z0-9.-]{1,253}$/', $host) !== 1) return '';
+    if (strpos($host, '.') === false) return '';
+    return substr($host, 0, 253);
+}
+
+function dcloud_public_host_resolves_publicly(string $host): bool {
+    $host = trim($host, '[]');
+    if ($host === '') return false;
+    if (filter_var($host, FILTER_VALIDATE_IP) !== false) {
+        return dcloud_is_public_ip($host);
+    }
+    $ips = [];
+    if (function_exists('dns_get_record')) {
+        $records = @dns_get_record($host, DNS_A + DNS_AAAA);
+        if (is_array($records)) {
+            foreach ($records as $record) {
+                foreach (['ip', 'ipv6'] as $key) {
+                    if (!empty($record[$key])) $ips[] = (string)$record[$key];
+                }
+            }
+        }
+    }
+    if (!$ips && function_exists('gethostbynamel')) {
+        $resolved = @gethostbynamel($host);
+        if (is_array($resolved)) $ips = array_merge($ips, $resolved);
+    }
+    foreach ($ips as $ip) {
+        if (!dcloud_is_public_ip((string)$ip)) return false;
+    }
+    return count($ips) > 0;
+}
+
+function dcloud_sanitize_public_urls($value): array {
+    if ($value === null) return [];
+    $items = is_array($value) ? $value : preg_split('/[\s,;]+/', (string)$value);
+    $out = [];
+    foreach ($items ?: [] as $raw) {
+        $url = rtrim(trim((string)$raw), '/');
+        if ($url === '' || !preg_match('/^https?:\/\//i', $url)) continue;
+        $parts = @parse_url($url);
+        if (!is_array($parts) || empty($parts['host'])) continue;
+        $host = dcloud_sanitize_public_host($parts['host']);
+        if ($host === '') continue;
+        $scheme = strtolower((string)($parts['scheme'] ?? 'http')) === 'https' ? 'https' : 'http';
+        $port = isset($parts['port']) ? max(0, min(65535, (int)$parts['port'])) : ($scheme === 'https' ? 443 : 80);
+        if ($port <= 0) continue;
+        $hostPart = strpos($host, ':') !== false ? '[' . $host . ']' : $host;
+        $clean = $scheme . '://' . $hostPart . ':' . $port;
+        if (!in_array($clean, $out, true)) $out[] = $clean;
+        if (count($out) >= 8) break;
+    }
+    return $out;
+}
+
 function dcloud_sanitize_inventory($value): array {
     if (!is_array($value)) return ['manifests' => [], 'updated_at' => time()];
     $rawManifests = $value['manifests'] ?? $value;
@@ -1216,6 +1277,9 @@ function dcloud_sanitize_peer($peer, string $nodeId): array {
         'relay_url' => $relayUrls[0] ?? '',
         'relay_urls' => $relayUrls,
         'relay_tokens' => dcloud_sanitize_relay_tokens($peer['relay_tokens'] ?? []),
+        'public_host' => dcloud_sanitize_public_host($peer['public_host'] ?? ($peer['public_hostname'] ?? '')),
+        'public_port' => max(0, min(65535, (int)($peer['public_port'] ?? 0))),
+        'public_urls' => dcloud_sanitize_public_urls($peer['public_urls'] ?? ($peer['public_routes'] ?? [])),
         'lan_addresses' => dcloud_sanitize_string_list($peer['lan_addresses'] ?? ($peer['local_addresses'] ?? []), 8, 80),
         'inventory' => dcloud_sanitize_inventory($peer['inventory'] ?? ($peer['chunk_inventory'] ?? [])),
         'public_ip' => substr((string)($peer['public_ip'] ?? ''), 0, 80),
@@ -1260,13 +1324,17 @@ function dcloud_is_public_ip(string $ip): bool {
 }
 
 function dcloud_forward_target_url(array $peer, string $path): string {
-    $host = trim((string)($peer['public_ip'] ?? ''));
-    $port = (int)($peer['web_port'] ?? 0);
+    $host = dcloud_sanitize_public_host($peer['public_host'] ?? '');
+    $port = (int)($peer['public_port'] ?? 0);
+    if ($host === '' || $port <= 0 || $port > 65535) {
+        $host = trim((string)($peer['public_ip'] ?? ''));
+        $port = (int)($peer['web_port'] ?? 0);
+    }
     if ($host === '' || $port <= 0 || $port > 65535) {
         dcloud_fail('Ziel-Peer hat keine oeffentliche Web-Adresse registriert', 404);
     }
-    if (!dcloud_is_public_ip($host)) {
-        dcloud_fail('Ziel-Peer-Adresse ist nicht oeffentlich routbar; PHP-Forwarder wird aus Sicherheitsgruenden nicht verwendet', 404, ['public_ip' => $host]);
+    if (!dcloud_public_host_resolves_publicly($host)) {
+        dcloud_fail('Ziel-Peer-Adresse ist nicht oeffentlich routbar; PHP-Forwarder wird aus Sicherheitsgruenden nicht verwendet', 404, ['public_host' => $host]);
     }
     if (filter_var($host, FILTER_VALIDATE_IP, FILTER_FLAG_IPV6)) {
         $host = '[' . $host . ']';
@@ -1747,7 +1815,7 @@ function dcloud_register(array $input): void {
 
         $sanitized['public_ip'] = dcloud_public_client_ip();
 
-        foreach (['public_key', 'client_type', 'shared_storage_bytes', 'free_storage_bytes', 'accepts_peer_storage', 'chat_alias', 'relay_url', 'relay_urls', 'relay_tokens', 'lan_addresses', 'web_port', 'udp_port', 'public_ip'] as $key) {
+        foreach (['public_key', 'client_type', 'shared_storage_bytes', 'free_storage_bytes', 'accepts_peer_storage', 'chat_alias', 'relay_url', 'relay_urls', 'relay_tokens', 'public_host', 'public_port', 'public_urls', 'lan_addresses', 'inventory', 'web_port', 'udp_port', 'public_ip'] as $key) {
             $newValue = $sanitized[$key] ?? null;
             $emptyNewValue = $newValue === null || $newValue === '' || $newValue === [] || $newValue === 0 || $newValue === false;
             if ($emptyNewValue && array_key_exists($key, $existing)) {
@@ -1956,7 +2024,7 @@ try {
 
     switch ($action) {
         case 'health':
-            $health = ['ok' => true, 'version' => DCLOUD_RELAY_VERSION, 'time' => time(), 'token_public' => false];
+            $health = ['ok' => true, 'version' => DCLOUD_RELAY_VERSION, 'time' => time(), 'token_public' => false, 'capabilities' => ['tracker_inventory' => true, 'lan_addresses' => true, 'public_routes' => true, 'external_stream_mailbox' => true]];
             if (dcloud_relay_signature_is_valid($input)) {
                 $health = array_merge($health, dcloud_current_relay_token(), ['token_public' => false, 'token_delivery' => 'signed-health']);
             }

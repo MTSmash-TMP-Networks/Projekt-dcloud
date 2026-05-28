@@ -11,6 +11,7 @@ from dataclasses import dataclass
 import base64
 import json
 import logging
+import os
 import re
 import secrets
 import socket
@@ -92,6 +93,52 @@ def local_lan_addresses() -> list[str]:
         pass
 
     return candidates[:8]
+
+
+def _env_public_urls(web_port: int | None = None) -> list[str]:
+    """Return manually configured public routes for this peer.
+
+    Useful when the router forwards a different external port or a DDNS name is
+    used. Values can be supplied as comma/semicolon separated URLs via
+    DCLOUD_PUBLIC_URLS or as DCLOUD_PUBLIC_HOST + DCLOUD_PUBLIC_PORT.
+    """
+    values: list[str] = []
+    raw_urls = os.environ.get("DCLOUD_PUBLIC_URLS", "")
+    for item in re.split(r"[\s,;]+", raw_urls):
+        url = item.strip().rstrip("/")
+        if url and re.match(r"^https?://", url, flags=re.IGNORECASE) and url not in values:
+            values.append(url)
+    host = os.environ.get("DCLOUD_PUBLIC_HOST", "").strip()
+    if host:
+        port_raw = os.environ.get("DCLOUD_PUBLIC_PORT", "").strip()
+        try:
+            port = int(port_raw) if port_raw else int(web_port or 0)
+        except (TypeError, ValueError):
+            port = int(web_port or 0)
+        scheme = os.environ.get("DCLOUD_PUBLIC_SCHEME", "http").strip().lower()
+        if scheme not in {"http", "https"}:
+            scheme = "http"
+        if port > 0:
+            host_part = host.strip("[]")
+            if ":" in host_part and not host_part.startswith("["):
+                host_part = f"[{host_part}]"
+            url = f"{scheme}://{host_part}:{port}"
+            if url not in values:
+                values.append(url)
+    return values[:8]
+
+
+def _env_public_host() -> str:
+    return os.environ.get("DCLOUD_PUBLIC_HOST", "").strip()
+
+
+def _env_public_port(web_port: int | None = None) -> int | None:
+    raw = os.environ.get("DCLOUD_PUBLIC_PORT", "").strip()
+    try:
+        value = int(raw) if raw else int(web_port or 0)
+    except (TypeError, ValueError):
+        value = 0
+    return value if 0 < value <= 65535 else None
 
 
 class RelayError(RuntimeError):
@@ -716,6 +763,9 @@ def peer_from_relay_payload(raw: object, *, relay_url: str, own_node_id: str | N
         free_storage_bytes=optional_int("free_storage_bytes"),
         relay_url=relay_url.rstrip("/"),
         public_ip=str(raw.get("public_ip") or raw.get("remote_addr") or "").strip() or None,
+        public_host=str(raw.get("public_host") or "").strip() or None,
+        public_port=optional_int("public_port"),
+        public_urls=normalize_lan_addresses(raw.get("public_urls") or []),
         lan_addresses=lan_addresses,
         chunk_inventory=normalize_chunk_inventory(raw.get("inventory") or raw.get("chunk_inventory") or {}),
         chat_enabled=bool(raw.get("chat_enabled", True)),
@@ -862,6 +912,9 @@ class HttpRelayTransport:
             "relay_url": self.relay_url,
             "relay_urls": self.relay_urls,
             "lan_addresses": local_lan_addresses(),
+            "public_host": _env_public_host(),
+            "public_port": _env_public_port(self.web_port),
+            "public_urls": _env_public_urls(self.web_port),
             "inventory": inventory,
             # Distributed as metadata so clients can see which relay day-token a
             # peer currently uses. Clients can always refresh directly via the

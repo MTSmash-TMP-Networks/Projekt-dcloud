@@ -178,6 +178,9 @@ class Peer:
     free_storage_bytes: int | None = None
     relay_url: str | None = None
     public_ip: str | None = None
+    public_host: str | None = None
+    public_port: int | None = None
+    public_urls: list[str] = field(default_factory=list)
     lan_addresses: list[str] = field(default_factory=list)
     chunk_inventory: dict[str, list[str]] = field(default_factory=dict)
     chat_enabled: bool = True
@@ -212,6 +215,9 @@ class Peer:
             "free_storage_bytes": self.free_storage_bytes,
             "relay_url": self.relay_url,
             "public_ip": self.public_ip,
+            "public_host": self.public_host,
+            "public_port": self.public_port,
+            "public_urls": list(self.public_urls),
             "lan_addresses": list(self.lan_addresses),
             # The full digest inventory can be very large.  Keep dashboard/API and
             # LAN peer-list payloads small by default and expose only counters; the
@@ -293,6 +299,9 @@ class InMemoryPeerProvider:
                 )
                 peer.web_port = peer.web_port if peer.web_port is not None else existing.web_port
                 peer.public_ip = peer.public_ip if peer.public_ip is not None else existing.public_ip
+                peer.public_host = peer.public_host if peer.public_host is not None else existing.public_host
+                peer.public_port = peer.public_port if peer.public_port is not None else existing.public_port
+                peer.public_urls = merge_lan_addresses(peer.public_urls, existing.public_urls)
                 peer.lan_addresses = merge_lan_addresses(peer.lan_addresses, existing.lan_addresses, [peer.host, existing.host])
                 peer.chunk_inventory = merge_chunk_inventory(peer.chunk_inventory, existing.chunk_inventory)
                 peer.free_storage_bytes = (
