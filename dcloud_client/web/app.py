@@ -5277,6 +5277,7 @@ def create_app(
         restored_digests: set[str] = set()
         missing_lock = threading.RLock()
         peer_candidates: dict[str, list[str]] = defaultdict(list)
+        peer_candidate_load: dict[str, int] = defaultdict(int)
         peer_order: list[str] = []
 
         for chunk in missing.values():
@@ -5285,15 +5286,29 @@ def create_app(
             candidate_ids.extend(str(node_id) for node_id in chunk.get("locations", []) if str(node_id))
             # If the manifest is stale, a chunk may already exist on a newer
             # mirror that is not listed yet. Try tracker/listed mirrors first,
-            # then every active peer, but sort the final peer order by current
-            # response time.
+            # then every active peer, but sort by current response time.
             candidate_ids.extend(peer.node_id for peer in ranked_download_peers)
             seen: set[str] = set()
-            for node_id in candidate_ids:
+            ordered_candidates: list[str] = []
+            for node_id in sorted(candidate_ids, key=lambda value: peer_rank.get(str(value), 9999)):
+                node_id = str(node_id)
                 if node_id == identity.node_id or node_id in seen or node_id not in peers_by_id:
                     continue
                 seen.add(node_id)
-                peer_candidates[node_id].append(digest)
+                ordered_candidates.append(node_id)
+            if not ordered_candidates:
+                continue
+            estimated_size = int(chunk.get("stored_size") or chunk.get("size") or 1)
+            # Assign each missing chunk to exactly one primary worker. This keeps
+            # the download BitTorrent-like (many peers in parallel) without making
+            # every peer fetch the same chunk. The single-chunk fallback below still
+            # tries all candidate peers if the assigned worker cannot provide it.
+            primary_node_id = min(
+                ordered_candidates,
+                key=lambda node_id: (peer_candidate_load[node_id], peer_rank.get(node_id, 9999)),
+            )
+            peer_candidates[primary_node_id].append(digest)
+            peer_candidate_load[primary_node_id] += max(1, estimated_size)
         peer_order = sorted(peer_candidates, key=lambda node_id: peer_rank.get(node_id, 9999))
 
         def write_restored_chunk(digest: str, stored_data: bytes) -> bool:

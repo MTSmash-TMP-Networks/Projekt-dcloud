@@ -94,11 +94,21 @@ def _direct_peer_candidates(peer: Peer) -> list[Peer]:
         seen.add(value)
         candidates.append(replace(peer, host=value, route_via_node_id=None))
 
-    # Prefer LAN candidates before the active host.  A peer learned through a
-    # public/API/relay route may still be in the same subnet, and local HTTP is
-    # much faster than routing bulk upload/download data through PHP.
+    # Prefer LAN candidates before public routes.  A peer learned through the
+    # relay may still be in the same subnet, and local HTTP is much faster than
+    # routing bulk upload/download data through PHP.
     for address in getattr(peer, "lan_addresses", []) or []:
         add(address)
+
+    # If the peer has a port-forward/DDNS-like public route and was discovered
+    # through the relay, try that endpoint directly from the client before using
+    # the PHP forwarder/mailbox.  The relay records the observed public IP as
+    # metadata; with web_port set, this gives unterwegs -> peer direct transfer
+    # when the router forwards the dcloud HTTP port.
+    public_ip = str(getattr(peer, "public_ip", "") or "").strip().strip("[]")
+    if public_ip:
+        add(public_ip)
+
     if peer.host != RELAY_HOST:
         add(peer.host)
     return candidates
