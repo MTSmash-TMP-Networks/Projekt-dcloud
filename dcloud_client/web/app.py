@@ -398,6 +398,11 @@ def create_app(
     file_deletion_delivery_event = threading.Event()
     file_deletion_delivery_worker_started = False
     last_file_deletion_delivery_enqueue_at = 0.0
+    share_delivery_lock = threading.Lock()
+    share_delivery_attempts: dict[str, float] = {}
+    SHARE_DELIVERY_RETRY_SECONDS = int(os.environ.get("DCLOUD_SHARE_DELIVERY_RETRY_SECONDS", "120"))
+    SHARE_DELIVERY_SUCCESS_REFRESH_SECONDS = int(os.environ.get("DCLOUD_SHARE_DELIVERY_SUCCESS_REFRESH_SECONDS", "1800"))
+    SHARE_DELIVERY_MAX_PER_PASS = int(os.environ.get("DCLOUD_SHARE_DELIVERY_MAX_PER_PASS", "12"))
     user_store = UserStore(chunk_store.root / "users.json")
     web_root = chunk_store.root / "web"
     browser_downloads_root = chunk_store.root / BROWSER_DOWNLOADS_FOLDER
@@ -3024,8 +3029,8 @@ def create_app(
                     _persist_external_download_links()
                 raise StorageError("Dieser Download-Link ist abgelaufen")
             manifest = manifest_store.load(str(item.get("manifest_id") or ""))
-            if manifest.owner_node_id != identity.node_id:
-                raise StorageError("Nur der Eigentümer kann diesen externen Download bereitstellen")
+            if not manifest_store.may_access(manifest, identity.node_id):
+                raise StorageError("Keine Berechtigung für diesen externen Download")
             _ensure_manifest_chunks_available(manifest)
             output_path = manifest_store.restore(manifest.manifest_id)
             file_size = output_path.stat().st_size if output_path.exists() else manifest.file_size
@@ -3281,6 +3286,81 @@ def create_app(
                     failed += 1
         return delivered, failed
 
+    def _deliver_active_manifest_shares(peers: list[Any] | None = None, *, min_interval_seconds: int | None = None) -> dict[str, int]:
+        """Best-effort sync for peer shares when recipients appear later via Relay/Internet.
+
+        The interactive share action sends the manifest to peers that are active at
+        that moment. Remote peers can be offline, behind NAT, or only visible a
+        few relay polling cycles later. This refresher treats the PHP relay as a
+        tracker/signaling channel and periodically re-pushes still-shared owned
+        manifests to currently active authorized peers. The chunks themselves
+        remain fetched via direct LAN/Public/Gateway routes first.
+        """
+        active_peers = [peer for peer in (peers if peers is not None else _list_active_peers()) if peer.node_id != identity.node_id]
+        if not active_peers:
+            return {"eligible": 0, "delivered": 0, "failed": 0, "skipped": 0}
+
+        now = time.time()
+        retry_seconds = max(10, int(min_interval_seconds or SHARE_DELIVERY_RETRY_SECONDS))
+        success_refresh_seconds = max(retry_seconds, int(SHARE_DELIVERY_SUCCESS_REFRESH_SECONDS))
+        max_per_pass = max(1, int(SHARE_DELIVERY_MAX_PER_PASS))
+        eligible = 0
+        delivered = 0
+        failed = 0
+        skipped = 0
+        sent_this_pass = 0
+
+        owned_shared: list[FileManifest] = []
+        for manifest in manifest_store.list_manifests():
+            if manifest.owner_node_id != identity.node_id:
+                continue
+            access = manifest.access or {}
+            if access.get("visibility") not in {"shared", "public"}:
+                continue
+            if manifest_store.is_file_deleted(manifest.manifest_id, manifest.owner_node_id):
+                continue
+            owned_shared.append(manifest)
+
+        for manifest in owned_shared:
+            access = manifest.access or {}
+            shared_with = {str(item) for item in access.get("shared_with", []) if str(item)}
+            wildcard = access.get("visibility") == "public" or "*" in shared_with or not shared_with
+            for peer in active_peers:
+                if not wildcard and peer.node_id not in shared_with:
+                    continue
+                eligible += 1
+                key = f"{manifest.manifest_id}:{manifest.signature}:{peer.node_id}"
+                last_attempt = share_delivery_attempts.get(key, 0.0)
+                # Successful deliveries are refreshed occasionally so a restarted
+                # remote peer can recover a shared manifest without the owner having
+                # to toggle the share again. Failed attempts retry much sooner.
+                cooldown = success_refresh_seconds if last_attempt > 0 else retry_seconds
+                if last_attempt and now - last_attempt < cooldown:
+                    skipped += 1
+                    continue
+                if sent_this_pass >= max_per_pass:
+                    skipped += 1
+                    continue
+
+                result = p2p_client.post_manifest(peer, manifest)
+                sent_this_pass += 1
+                if result.ok:
+                    delivered += 1
+                    share_delivery_attempts[key] = now
+                else:
+                    failed += 1
+                    # Retry failures on the shorter retry interval.
+                    share_delivery_attempts[key] = now - max(0, success_refresh_seconds - retry_seconds)
+
+        # Keep the in-memory throttle bounded; old manifest ids naturally become
+        # irrelevant after toggles, deletes or file updates.
+        if len(share_delivery_attempts) > 5000:
+            cutoff = now - max(success_refresh_seconds * 2, 3600)
+            for key, ts in list(share_delivery_attempts.items()):
+                if ts < cutoff:
+                    share_delivery_attempts.pop(key, None)
+        return {"eligible": eligible, "delivered": delivered, "failed": failed, "skipped": skipped}
+
     def _manifest_delete_target_node_ids(manifest: FileManifest) -> list[str]:
         """Return every peer that may hold a manifest copy or stored chunks."""
         targets: list[str] = []
@@ -3453,6 +3533,11 @@ def create_app(
         peers = _list_active_peers()
         _repair_under_replicated_manifests(peers)
         _deliver_pending_share_revocations(peers)
+        if share_delivery_lock.acquire(blocking=False):
+            try:
+                _deliver_active_manifest_shares(peers)
+            finally:
+                share_delivery_lock.release()
         _request_file_deletion_delivery(min_interval_seconds=8.0)
         manifest_store.purge_expired_remote_chunk_deletions()
         manifests = manifest_store.list_visible_for_node(identity.node_id)
@@ -4939,8 +5024,18 @@ def create_app(
                     result = p2p_client.post_manifest(peer, manifest)
                     if result.ok:
                         delivered += 1
+                        share_delivery_attempts[f"{manifest.manifest_id}:{manifest.signature}:{peer.node_id}"] = time.time()
                     else:
                         failed += 1
+                # Also trigger the relay-aware share refresher. This covers peers
+                # that appeared through the tracker a moment after the dialog was
+                # opened or that are reachable only via Relay/Internet.
+                try:
+                    refresh = _deliver_active_manifest_shares(_list_active_peers(), min_interval_seconds=1)
+                    delivered += int(refresh.get("delivered", 0))
+                    failed += int(refresh.get("failed", 0))
+                except Exception:
+                    LOG.debug("Immediate shared-manifest refresh failed", exc_info=True)
             else:
                 delivered, failed = _deliver_pending_share_revocations()
 
@@ -5851,13 +5946,18 @@ def create_app(
 
     @app.post("/api/external-links/<manifest_id>")
     def api_create_external_download_link(manifest_id: str) -> Response:
-        """Create a temporary public download link for an owned file."""
+        """Create a temporary public download link for any file visible on this node.
+
+        Incoming peer shares are allowed as well: the current node acts as a
+        gateway and restores missing chunks through LAN/Public/Gateway/Relay
+        routes before streaming the file to the public relay link.
+        """
         try:
             manifest = manifest_store.load(manifest_id)
         except StorageError as exc:
             return jsonify({"ok": False, "message": str(exc)}), 404
-        if manifest.owner_node_id != identity.node_id:
-            return jsonify({"ok": False, "message": "Nur der Eigentümer kann einen externen Download-Link erstellen"}), 403
+        if not manifest_store.may_access(manifest, identity.node_id):
+            return jsonify({"ok": False, "message": "Keine Berechtigung für diese Datei"}), 403
         payload = request.get_json(silent=True) or {}
         if not isinstance(payload, dict):
             payload = {}
@@ -5923,6 +6023,8 @@ def create_app(
             manifest = manifest_store.load(str(item.get("manifest_id") or ""))
         except StorageError:
             abort(404)
+        if not manifest_store.may_access(manifest, identity.node_id):
+            abort(403, "Keine Berechtigung für diese Datei")
         try:
             _ensure_manifest_chunks_available(manifest)
             output = manifest_store.restore(manifest.manifest_id)

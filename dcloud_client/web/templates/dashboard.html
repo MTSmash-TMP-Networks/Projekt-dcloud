@@ -1161,7 +1161,7 @@
           <p class="settings-note" id="shareFileLabel">Datei auswählen…</p>
           <label for="sharePeerSelect">Peer auswählen</label>
           <select id="sharePeerSelect" name="peer_node_id"></select>
-          <p class="settings-note" id="sharePeerHelp">Das Manifest wird direkt an den ausgewählten Peer übertragen. Die Chunks bleiben verteilt auf den im Manifest genannten Speicher-Knoten.</p>
+          <p class="settings-note" id="sharePeerHelp">Das Manifest wird an den ausgewählten Peer übertragen. Ist der Peer nicht im LAN, läuft die Zustellung über Relay/Signaling; fehlende Chunks werden später per LAN/Public/Gateway oder Relay-Fallback geholt.</p>
           <div class="dialog-actions">
             <button type="button" class="explorer-btn" id="shareDialogCancel">Abbrechen</button>
             <button type="submit" class="explorer-btn">Freigeben</button>
@@ -2892,7 +2892,7 @@
         const editBtn = document.getElementById("ctxEdit");
         if(editBtn) editBtn.hidden = !(isWebFile && selectedTarget.file.editable);
         document.getElementById("ctxDownload").hidden = !isFile;
-        document.getElementById("ctxExternalLink").hidden = !isOwnerFile;
+        document.getElementById("ctxExternalLink").hidden = !(isFile && !isWebFile && !isBrowserDownloadFile);
         document.getElementById("ctxShare").hidden = !isOwnerFile;
         document.getElementById("ctxOffload").hidden = !isOwnerFile;
         const moveFolderBtn = document.getElementById("ctxMoveFolder");
@@ -3643,7 +3643,7 @@
         return data;
       }
       async function createExternalDownloadLink(file){
-        if(!file || !file.owner) throw new Error("Nur der Eigentümer kann externe Download-Links erstellen");
+        if(!file) throw new Error("Keine Datei ausgewählt");
         const answer = prompt(`Wie lange soll der externe Download-Link gültig sein?\n${file.name}\n\nMinuten eingeben, maximal 60:`, "60");
         if(answer === null) return;
         const minutes = Math.max(1, Math.min(60, Number.parseInt(answer, 10) || 60));
