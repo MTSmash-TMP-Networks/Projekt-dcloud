@@ -195,9 +195,11 @@ class Peer:
             return (f"relay:{self.relay_url}", 0, self.node_id)
         return (self.host, self.udp_port, self.route_via_node_id)
 
-    def to_dict(self) -> dict[str, str | int | bool | float | None]:
+    def to_dict(self, *, include_chunk_inventory: bool = False) -> dict[str, Any]:
         age = max(0.0, (datetime.now(timezone.utc) - self.last_seen).total_seconds())
-        return {
+        inventory_manifest_count = len(self.chunk_inventory)
+        inventory_chunk_count = sum(len(chunks) for chunks in self.chunk_inventory.values())
+        payload: dict[str, Any] = {
             "node_id": self.node_id,
             "host": self.host,
             "udp_port": self.udp_port,
@@ -211,9 +213,12 @@ class Peer:
             "relay_url": self.relay_url,
             "public_ip": self.public_ip,
             "lan_addresses": list(self.lan_addresses),
-            "chunk_inventory": {manifest_id: list(chunks) for manifest_id, chunks in self.chunk_inventory.items()},
-            "tracker_manifest_count": len(self.chunk_inventory),
-            "tracker_chunk_count": sum(len(chunks) for chunks in self.chunk_inventory.values()),
+            # The full digest inventory can be very large.  Keep dashboard/API and
+            # LAN peer-list payloads small by default and expose only counters; the
+            # in-memory Peer object still keeps the full tracker inventory for
+            # download source selection.
+            "tracker_manifest_count": inventory_manifest_count,
+            "tracker_chunk_count": inventory_chunk_count,
             "chat_enabled": bool(self.chat_enabled),
             "chat_alias": self.chat_alias,
             "transport": "relay" if self.host == "__relay__" else ("direct+relay" if self.relay_url else "direct"),
@@ -222,6 +227,9 @@ class Peer:
             "last_seen_age_seconds": round(age, 1),
             "status": "active",
         }
+        if include_chunk_inventory:
+            payload["chunk_inventory"] = {manifest_id: list(chunks) for manifest_id, chunks in self.chunk_inventory.items()}
+        return payload
 
 
 class PeerProvider(Protocol):
