@@ -10,12 +10,13 @@ declare(strict_types=1);
  * Landing page intentionally reveals only minimal information.
  */
 
-const DCLOUD_RELAY_VERSION = '1.6.2-tracker-public-routes';
+const DCLOUD_RELAY_VERSION = '1.6.3-hardened-relay';
 const DCLOUD_RELAY_TOKEN_ROTATION_SECONDS = 86400;
 const DCLOUD_PEER_TTL_SECONDS = 45;
 const DCLOUD_MESSAGE_TTL_SECONDS = 900;
 const DCLOUD_MAX_REQUESTS_PER_POLL = 64;
 const DCLOUD_MAX_ENCODED_BODY_BYTES = 268435456; // 256 MiB base64 payload
+const DCLOUD_MAX_RAW_POST_BYTES = 285212672; // 272 MiB JSON envelope safety guard before reading php://input
 const DCLOUD_DIRECT_PROXY_MAX_ENCODED_BODY_BYTES = 67108864; // 64 MiB base64 payload per non-persistent forward
 const DCLOUD_DIRECT_PROXY_CONNECT_TIMEOUT_SECONDS = 4;
 const DCLOUD_DIRECT_PROXY_TIMEOUT_SECONDS = 90;
@@ -884,7 +885,7 @@ function dcloud_json_response(array $payload, int $status = 200): void {
 }
 
 function dcloud_fail(string $message, int $status = 200, array $details = []): void {
-    $safeStatus = ($status >= 500 || $status === 413) ? $status : 200;
+    $safeStatus = ($status >= 400 && $status <= 599) ? $status : 200;
     $input = $GLOBALS['DCLOUD_CURRENT_INPUT'] ?? [];
     $action = is_array($input) ? (string)($input['action'] ?? '') : '';
     if ($action === '') {
@@ -915,6 +916,64 @@ function dcloud_log_event(string $type, array $payload): void {
     }
 }
 
+function dcloud_client_ip(): string {
+    $ip = (string)($_SERVER['REMOTE_ADDR'] ?? '');
+    if ($ip === '') return 'unknown';
+    return preg_replace('/[^A-Fa-f0-9:.]/', '_', $ip) ?: 'unknown';
+}
+
+function dcloud_request_content_type(): string {
+    return strtolower(trim((string)($_SERVER['CONTENT_TYPE'] ?? ($_SERVER['HTTP_CONTENT_TYPE'] ?? ''))));
+}
+
+function dcloud_rate_limit_bad_request(string $scope, int $maxHits, int $windowSeconds): void {
+    // Lightweight file based throttle for unauthenticated garbage traffic.
+    // It is intentionally best-effort: if the host cannot write, we still handle the request normally.
+    try {
+        $dir = dcloud_storage_dir() . DIRECTORY_SEPARATOR . 'rate-limit';
+        if (!is_dir($dir)) {
+            @mkdir($dir, 0700, true);
+        }
+        if (!is_dir($dir)) return;
+        $key = dcloud_safe_filename($scope . '-' . dcloud_client_ip());
+        $file = $dir . DIRECTORY_SEPARATOR . $key . '.json';
+        $now = time();
+        $data = dcloud_read_json_file($file, ['window_start' => $now, 'hits' => 0]);
+        $start = (int)($data['window_start'] ?? $now);
+        $hits = (int)($data['hits'] ?? 0);
+        if ($now - $start >= $windowSeconds) {
+            $start = $now;
+            $hits = 0;
+        }
+        $hits++;
+        @file_put_contents($file, json_encode(['window_start' => $start, 'hits' => $hits]), LOCK_EX);
+        @chmod($file, 0600);
+        if ($hits > $maxHits) {
+            dcloud_json_response(['ok' => false, 'message' => 'Zu viele ungueltige Relay-Anfragen', 'status' => 429], 429);
+        }
+    } catch (Throwable $exception) {
+        // ignore limiter failures
+    }
+}
+
+function dcloud_preflight_post_envelope(): void {
+    $contentLengthRaw = $_SERVER['CONTENT_LENGTH'] ?? '0';
+    $contentLength = is_numeric($contentLengthRaw) ? (int)$contentLengthRaw : 0;
+    if ($contentLength > DCLOUD_MAX_RAW_POST_BYTES) {
+        dcloud_rate_limit_bad_request('oversize', 20, 300);
+        dcloud_fail('Request ist zu gross fuer das Relay', 413, ['content_length' => $contentLength, 'max_bytes' => DCLOUD_MAX_RAW_POST_BYTES]);
+    }
+
+    $contentType = dcloud_request_content_type();
+    if ($contentType !== '') {
+        $isJson = str_starts_with($contentType, 'application/json') || str_starts_with($contentType, 'application/dcloud+json');
+        if (!$isJson) {
+            dcloud_rate_limit_bad_request('bad-content-type', 12, 300);
+            dcloud_fail('Relay akzeptiert fuer POST nur application/json', 415, ['content_type' => substr($contentType, 0, 120)]);
+        }
+    }
+}
+
 function dcloud_read_input(): array {
     $method = dcloud_request_method();
 
@@ -941,6 +1000,8 @@ function dcloud_read_input(): array {
         }
         dcloud_fail('Nur POST JSON wird unterstuetzt', 405);
     }
+
+    dcloud_preflight_post_envelope();
 
     $raw = file_get_contents('php://input');
     $contentLength = (int)($_SERVER['CONTENT_LENGTH'] ?? 0);

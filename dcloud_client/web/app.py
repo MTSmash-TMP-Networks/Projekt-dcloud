@@ -400,9 +400,13 @@ def create_app(
     last_file_deletion_delivery_enqueue_at = 0.0
     share_delivery_lock = threading.Lock()
     share_delivery_attempts: dict[str, float] = {}
+    incoming_share_sync_lock = threading.Lock()
+    incoming_share_sync_attempts: dict[str, float] = {}
     SHARE_DELIVERY_RETRY_SECONDS = int(os.environ.get("DCLOUD_SHARE_DELIVERY_RETRY_SECONDS", "120"))
     SHARE_DELIVERY_SUCCESS_REFRESH_SECONDS = int(os.environ.get("DCLOUD_SHARE_DELIVERY_SUCCESS_REFRESH_SECONDS", "1800"))
     SHARE_DELIVERY_MAX_PER_PASS = int(os.environ.get("DCLOUD_SHARE_DELIVERY_MAX_PER_PASS", "12"))
+    INCOMING_SHARE_SYNC_SECONDS = int(os.environ.get("DCLOUD_INCOMING_SHARE_SYNC_SECONDS", "60"))
+    INCOMING_SHARE_SYNC_MAX_PEERS_PER_PASS = int(os.environ.get("DCLOUD_INCOMING_SHARE_SYNC_MAX_PEERS_PER_PASS", "4"))
     user_store = UserStore(chunk_store.root / "users.json")
     web_root = chunk_store.root / "web"
     browser_downloads_root = chunk_store.root / BROWSER_DOWNLOADS_FOLDER
@@ -2919,6 +2923,98 @@ def create_app(
         _restart_current_process_delayed()
         return {"ok": True, "message": message, "nodeId": recovered.node_id, "restart": True}
 
+    def _sync_incoming_shared_manifests_from_peers(
+        peers: list[Any] | None = None,
+        *,
+        min_interval_seconds: int | None = None,
+    ) -> dict[str, Any]:
+        """Pull shared manifests from active peers so remote shares are not push-only.
+
+        A share click on the owner node tries to push the signed manifest to the
+        selected peer.  That can still fail when the target is remote, wakes up
+        later, or is only reachable through the relay mailbox.  This receiver-side
+        refresher asks visible peers for manifests owned by that peer and imports
+        only those whose signed access section allows this local node.  The file
+        chunks are not transferred here; downloads still use LAN/Public/Gateway
+        and relay fallback.
+        """
+        active_peers = [peer for peer in (peers if peers is not None else _list_active_peers()) if peer.node_id != identity.node_id]
+        if not active_peers:
+            return {"scanned": 0, "imported": 0, "already_present": 0, "failed": 0, "skipped": 0}
+
+        now = time.time()
+        interval = max(10, int(min_interval_seconds or INCOMING_SHARE_SYNC_SECONDS))
+        max_peers = max(1, int(INCOMING_SHARE_SYNC_MAX_PEERS_PER_PASS))
+        scanned = 0
+        imported = 0
+        already_present = 0
+        failed = 0
+        skipped = 0
+
+        for peer in active_peers:
+            peer_node_id = str(getattr(peer, "node_id", "") or "")
+            if not peer_node_id:
+                skipped += 1
+                continue
+            last_attempt = incoming_share_sync_attempts.get(peer_node_id, 0.0)
+            if last_attempt and now - last_attempt < interval:
+                skipped += 1
+                continue
+            if scanned >= max_peers:
+                skipped += 1
+                continue
+            incoming_share_sync_attempts[peer_node_id] = now
+            scanned += 1
+            try:
+                try:
+                    raw_manifests = p2p_client.get_shared_manifests(peer)
+                except Exception:
+                    # Older peers may not yet expose /api/p2p/manifests/shared.
+                    # Fall back to the owner-specific endpoint so mixed-version
+                    # meshes still learn newly shared files from the owner peer.
+                    raw_manifests = p2p_client.get_manifests_for_owner(peer, peer_node_id)
+            except Exception:
+                failed += 1
+                LOG.debug("Incoming share manifest pull from peer %s failed", peer_node_id, exc_info=True)
+                continue
+            for raw_manifest in raw_manifests:
+                try:
+                    manifest = FileManifest.from_dict(raw_manifest)
+                    if manifest.owner_node_id == identity.node_id:
+                        continue
+                    if not manifest_store.may_access(manifest, identity.node_id):
+                        continue
+                    if manifest_store.is_share_revoked(manifest.manifest_id, manifest.owner_node_id):
+                        continue
+                    if manifest_store.is_file_deleted(manifest.manifest_id, manifest.owner_node_id):
+                        continue
+                    try:
+                        manifest_store.load(manifest.manifest_id)
+                        already_present += 1
+                        continue
+                    except StorageError:
+                        pass
+                    manifest_store.save_imported(manifest)
+                    imported += 1
+                except Exception:
+                    failed += 1
+                    LOG.debug("Incoming shared manifest import from peer %s failed", peer_node_id, exc_info=True)
+
+        if imported:
+            _sync_peer_connector_settings()
+        if len(incoming_share_sync_attempts) > 2000:
+            cutoff = now - max(interval * 4, 3600)
+            for key, ts in list(incoming_share_sync_attempts.items()):
+                if ts < cutoff:
+                    incoming_share_sync_attempts.pop(key, None)
+        return {
+            "scanned": scanned,
+            "imported": imported,
+            "already_present": already_present,
+            "failed": failed,
+            "skipped": skipped,
+        }
+
     def _recover_owned_manifests_from_peers(peers: list[Any] | None = None) -> dict[str, Any]:
         active_peers = peers if peers is not None else _list_active_peers()
         imported = 0
@@ -3538,6 +3634,11 @@ def create_app(
                 _deliver_active_manifest_shares(peers)
             finally:
                 share_delivery_lock.release()
+        if incoming_share_sync_lock.acquire(blocking=False):
+            try:
+                _sync_incoming_shared_manifests_from_peers(peers)
+            finally:
+                incoming_share_sync_lock.release()
         _request_file_deletion_delivery(min_interval_seconds=8.0)
         manifest_store.purge_expired_remote_chunk_deletions()
         manifests = manifest_store.list_visible_for_node(identity.node_id)
@@ -3764,6 +3865,11 @@ def create_app(
     def dashboard() -> str:
         stats = chunk_store.stats()
         peers = _list_active_peers()
+        if incoming_share_sync_lock.acquire(blocking=False):
+            try:
+                _sync_incoming_shared_manifests_from_peers(peers, min_interval_seconds=10)
+            finally:
+                incoming_share_sync_lock.release()
         manifests = manifest_store.list_visible_for_node(identity.node_id)
         folders = manifest_store.list_folders_for_node(identity.node_id)
         tree = build_folder_tree(manifests, folders, identity.node_id)
@@ -3798,6 +3904,12 @@ def create_app(
 
     @app.get("/files")
     def files() -> str:
+        peers = _list_active_peers()
+        if incoming_share_sync_lock.acquire(blocking=False):
+            try:
+                _sync_incoming_shared_manifests_from_peers(peers, min_interval_seconds=10)
+            finally:
+                incoming_share_sync_lock.release()
         manifests = manifest_store.list_visible_for_node(identity.node_id)
         folders = manifest_store.list_folders_for_node(identity.node_id)
         return render_template(
@@ -6422,16 +6534,44 @@ def create_app(
         except (ValueError, TypeError, StorageError) as exc:
             return jsonify({"ok": False, "message": str(exc), "state": state_payload()}), 400
 
+    @app.get("/api/p2p/manifests/shared")
+    def api_p2p_shared_manifests() -> Response:
+        requester_node_id = str(request.environ.get("dcloud.p2p_node_id") or "").strip()
+        if not requester_node_id:
+            return jsonify({"ok": False, "message": "P2P requester missing"}), 403
+        manifests = []
+        for manifest in manifest_store.list_manifests():
+            if manifest.owner_node_id == requester_node_id:
+                continue
+            if manifest_store.is_file_deleted(manifest.manifest_id, manifest.owner_node_id):
+                continue
+            if manifest_store.is_share_revoked(manifest.manifest_id, manifest.owner_node_id):
+                continue
+            if not manifest_store.may_access(manifest, requester_node_id):
+                continue
+            manifests.append(manifest.to_dict())
+        return jsonify({"ok": True, "manifests": manifests, "count": len(manifests)})
+
     @app.get("/api/p2p/manifests/owner/<owner_node_id>")
     def api_p2p_owner_manifests(owner_node_id: str) -> Response:
         owner = str(owner_node_id or "").strip()
         if not owner:
             return jsonify({"ok": False, "message": "Owner node id missing"}), 400
-        manifests = [
-            manifest.to_dict()
-            for manifest in manifest_store.list_manifests()
-            if manifest.owner_node_id == owner and not manifest_store.is_file_deleted(manifest.manifest_id, manifest.owner_node_id)
-        ]
+        requester_node_id = str(request.environ.get("dcloud.p2p_node_id") or "").strip()
+        manifests = []
+        for manifest in manifest_store.list_manifests():
+            if manifest.owner_node_id != owner:
+                continue
+            if manifest_store.is_file_deleted(manifest.manifest_id, manifest.owner_node_id):
+                continue
+            # Owners may recover their own manifests. Other peers only receive
+            # manifests that are actually shared with them, which is also what the
+            # receiver-side Freigaben-sync imports.
+            if requester_node_id and requester_node_id != owner and not manifest_store.may_access(manifest, requester_node_id):
+                continue
+            if requester_node_id and requester_node_id != owner and manifest_store.is_share_revoked(manifest.manifest_id, manifest.owner_node_id):
+                continue
+            manifests.append(manifest.to_dict())
         return jsonify({"ok": True, "owner_node_id": owner, "manifests": manifests, "count": len(manifests)})
 
     @app.post("/api/p2p/manifests")
