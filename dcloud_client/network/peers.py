@@ -63,6 +63,41 @@ def _address_is_lan_or_local(host: str | None) -> bool:
     )
 
 
+
+
+def normalize_lan_addresses(values: object) -> list[str]:
+    """Return clean direct-address candidates advertised by a peer.
+
+    Peers discovered only through the PHP relay still announce their local
+    interface addresses.  We keep those candidates separate from the active
+    route so transfers can probe LAN HTTP first and use PHP only as fallback.
+    """
+    raw_items: list[object]
+    if values is None:
+        raw_items = []
+    elif isinstance(values, (list, tuple, set)):
+        raw_items = list(values)
+    else:
+        raw_items = [values]
+    result: list[str] = []
+    for item in raw_items:
+        value = str(item or "").strip().strip("[]")
+        if not value or value == "__relay__" or value in result:
+            continue
+        if _address_is_lan_or_local(value):
+            result.append(value)
+    return result
+
+
+def merge_lan_addresses(*groups: object) -> list[str]:
+    merged: list[str] = []
+    for group in groups:
+        for address in normalize_lan_addresses(group):
+            if address not in merged:
+                merged.append(address)
+    return merged
+
+
 def _route_preference(peer: "Peer") -> int:
     """Higher value means the peer route should be kept as primary."""
     if peer.host == "__relay__":
@@ -88,6 +123,7 @@ class Peer:
     free_storage_bytes: int | None = None
     relay_url: str | None = None
     public_ip: str | None = None
+    lan_addresses: list[str] = field(default_factory=list)
     chat_enabled: bool = True
     chat_alias: str | None = None
     last_seen: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
@@ -118,6 +154,7 @@ class Peer:
             "free_storage_bytes": self.free_storage_bytes,
             "relay_url": self.relay_url,
             "public_ip": self.public_ip,
+            "lan_addresses": list(self.lan_addresses),
             "chat_enabled": bool(self.chat_enabled),
             "chat_alias": self.chat_alias,
             "transport": "relay" if self.host == "__relay__" else ("direct+relay" if self.relay_url else "direct"),
@@ -189,6 +226,7 @@ class InMemoryPeerProvider:
                 )
                 peer.web_port = peer.web_port if peer.web_port is not None else existing.web_port
                 peer.public_ip = peer.public_ip if peer.public_ip is not None else existing.public_ip
+                peer.lan_addresses = merge_lan_addresses(peer.lan_addresses, existing.lan_addresses, [peer.host, existing.host])
                 peer.free_storage_bytes = (
                     peer.free_storage_bytes if peer.free_storage_bytes is not None else existing.free_storage_bytes
                 )
@@ -218,6 +256,7 @@ class InMemoryPeerProvider:
                 # won above.  The active host stays LAN/direct when available.
                 peer.relay_url = incoming_relay_url or existing_relay_url
 
+            peer.lan_addresses = merge_lan_addresses(peer.lan_addresses, [peer.host])
             endpoint_key = peer.endpoint_key()
             duplicate_ids = [
                 node_id

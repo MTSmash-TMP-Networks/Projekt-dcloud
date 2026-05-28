@@ -2415,6 +2415,105 @@ def create_app(
         selected = [peer for peer in active_peers if peer.node_id in wanted]
         return selected or active_peers
 
+    def _manifest_clone_with_chunks(manifest: FileManifest, chunks: list[dict[str, Any]], placement: dict[str, Any] | None = None) -> FileManifest:
+        data = manifest.to_dict()
+        data["chunks"] = [dict(chunk) for chunk in chunks]
+        if placement is not None:
+            data["placement"] = dict(placement)
+        return FileManifest.from_dict(data)
+
+    def _merge_peer_delegation_payload(result: Any, payload: dict[str, Any]) -> Any:
+        chunks = payload.get("chunks")
+        if isinstance(chunks, list) and len(chunks) == len(result.chunks) and all(isinstance(chunk, dict) for chunk in chunks):
+            result.chunks = [dict(chunk) for chunk in chunks]
+        targets = payload.get("targets")
+        if isinstance(targets, list):
+            result.targets = list(dict.fromkeys([
+                *[str(item) for item in getattr(result, "targets", []) if str(item)],
+                *[str(item) for item in targets if str(item)],
+            ]))
+        result.remote_successes += max(0, int(payload.get("remote_successes") or 0))
+        result.remote_failures += max(0, int(payload.get("remote_failures") or 0))
+        if "desired_replicas" in payload:
+            result.desired_replicas = max(1, int(payload.get("desired_replicas") or result.desired_replicas))
+        if "replicated_chunks" in payload:
+            result.replicated_chunks = max(0, int(payload.get("replicated_chunks") or 0))
+        if "under_replicated_chunks" in payload:
+            result.under_replicated_chunks = max(0, int(payload.get("under_replicated_chunks") or 0))
+        return result
+
+    def _replicate_via_primary_peer(
+        *,
+        manifest: FileManifest,
+        peers: list[Any],
+        require_primary: bool = False,
+        progress_callback: Any = None,
+    ) -> tuple[Any, dict[str, Any]]:
+        """Send chunks to one peer first; that peer fans out the RAID mirrors.
+
+        This keeps the starter node from uploading the same chunk data to every
+        mirror.  If the delegated endpoint is not available yet, the primary
+        copy is still created and the caller can decide whether that is enough.
+        """
+        ranked = rank_peers_by_speed(peers, p2p_client) if peers else []
+        if not ranked:
+            raise StorageError("Keine aktiven Speicher-Peers verfügbar")
+        primary = ranked[0]
+        initial = replicate_manifest_chunks(
+            manifest=manifest,
+            chunk_store=chunk_store,
+            local_node_id=identity.node_id,
+            peers=[primary],
+            p2p_client=p2p_client,
+            progress_callback=progress_callback,
+            required_peer_node_ids=[primary.node_id] if require_primary else None,
+        )
+        primary_locations = 0
+        for chunk in initial.chunks:
+            locations = [str(node_id) for node_id in chunk.get("locations", []) if str(node_id)]
+            if primary.node_id in locations:
+                primary_locations += 1
+        info: dict[str, Any] = {
+            "delegated": False,
+            "primary_peer_id": primary.node_id,
+            "primary_chunks": primary_locations,
+            "candidate_peer_count": len(ranked),
+        }
+        if primary_locations <= 0:
+            raise StorageError("Auslagerung zum ersten Peer ist fehlgeschlagen")
+
+        remaining_peer_ids = [peer.node_id for peer in ranked[1:]]
+        if remaining_peer_ids:
+            delegation_manifest = _manifest_clone_with_chunks(
+                manifest,
+                initial.chunks,
+                placement={
+                    **dict(manifest.placement or {}),
+                    "strategy": "delegated_peer_replication_source",
+                    "delegation_primary_peer": primary.node_id,
+                },
+            )
+            try:
+                payload = p2p_client.post_replication_delegation(
+                    primary,
+                    manifest=delegation_manifest,
+                    exclude_node_ids=[identity.node_id],
+                )
+                initial = _merge_peer_delegation_payload(initial, payload)
+                info.update({
+                    "delegated": True,
+                    "delegated_peer_count": int(payload.get("peer_count") or 0),
+                    "delegated_remote_successes": int(payload.get("remote_successes") or 0),
+                    "delegated_remote_failures": int(payload.get("remote_failures") or 0),
+                })
+            except StorageError as exc:
+                # Compatibility with peers that do not yet implement delegated
+                # replication: keep the primary copy instead of falling back to
+                # fan-out from the starter, because avoiding starter traffic is
+                # the purpose of this path.
+                info["delegation_error"] = str(exc)
+        return initial, info
+
     def _process_background_replication_job(job: dict[str, Any]) -> None:
         manifest_id = str(job.get("manifest_id") or "")
         upload_id = str(job.get("upload_id") or "")
@@ -2440,17 +2539,15 @@ def create_app(
                         "peerTargets": [peer.to_dict().get("display_name") or peer.node_id[:12] for peer in peers],
                     },
                 )
-            result = replicate_manifest_chunks(
+            result, delegation_info = _replicate_via_primary_peer(
                 manifest=manifest,
-                chunk_store=chunk_store,
-                local_node_id=identity.node_id,
                 peers=peers,
-                p2p_client=p2p_client,
                 progress_callback=_background_replication_progress(upload_id) if upload_id else None,
             )
             placement = dict(manifest.placement or {})
             placement.update({
-                "strategy": "local_first_background_replication",
+                "strategy": "local_first_delegated_peer_replication",
+                "delegated_replication": delegation_info,
                 "target_count": len(result.targets),
                 "targets": result.targets,
                 "transfer_status": result.transfer_status,
@@ -4666,18 +4763,13 @@ def create_app(
             if not peers:
                 raise StorageError("Keine aktiven Speicher-Peers verfügbar")
 
-            # Use the same fast binary batch path as background replication. The
-            # old implementation used put_chunk() per chunk and then tried to
-            # delete via delete_chunks_if_unreferenced(), which never removed the
-            # local files because the offloaded manifest still references the
-            # chunk hashes.
-            result = replicate_manifest_chunks(
+            # First transfer the chunks to one primary peer.  That peer then
+            # performs the remaining RAID fan-out, so the starter does not upload
+            # the same data to every mirror.
+            result, delegation_info = _replicate_via_primary_peer(
                 manifest=manifest,
-                chunk_store=chunk_store,
-                local_node_id=identity.node_id,
                 peers=peers,
-                p2p_client=p2p_client,
-                required_peer_node_ids=[target_peer_id] if target_peer_id else None,
+                require_primary=True,
             )
 
             updated_chunks: list[dict[str, Any]] = []
@@ -4715,7 +4807,8 @@ def create_app(
             new_targets = list(dict.fromkeys(location for chunk in updated_chunks for location in chunk.get("locations", [])))
             placement = dict(manifest.placement or {})
             placement.update({
-                "strategy": "peer_additional_replica" if add_only else "peer_offload",
+                "strategy": "peer_additional_replica" if add_only else "delegated_peer_offload",
+                "delegated_replication": delegation_info,
                 "targets": new_targets,
                 "target_count": len(new_targets),
                 "transfer_status": "replicated_with_local_copy" if add_only else ("stored_on_peers" if removal_candidates else "local_only"),
@@ -5040,9 +5133,14 @@ def create_app(
         return redirect(url_for("dashboard"))
 
     def _ensure_manifest_chunks_available(manifest: FileManifest, progress_callback: Any | None = None) -> None:
-        peers_by_id = {peer.node_id: peer for peer in _list_active_peers()}
-        all_peers = list(peers_by_id.values())
+        discovered_peers_by_id = {peer.node_id: peer for peer in _list_active_peers()}
+        all_peers = list(discovered_peers_by_id.values())
         ranked_download_peers = rank_peers_by_speed(all_peers, p2p_client) if all_peers else []
+        # Prefer the ranked transfer route over the raw discovery entry.  This is
+        # important for relay-discovered peers that advertise LAN candidates: the
+        # ranker returns a direct clone once /healthz answers on the LAN address.
+        peers_by_id = dict(discovered_peers_by_id)
+        peers_by_id.update({peer.node_id: peer for peer in ranked_download_peers})
         peer_rank = {peer.node_id: index for index, peer in enumerate(ranked_download_peers)}
         chunks = sorted(manifest.chunks, key=lambda item: int(item["index"]))
         total_chunks = len(chunks)
@@ -5925,6 +6023,77 @@ def create_app(
             _sync_peer_connector_settings()
             return jsonify({"ok": True, "stored": stored, "stored_count": len(stored), "state": state_payload()})
         except (ValueError, StorageError, TypeError) as exc:
+            return jsonify({"ok": False, "message": str(exc), "state": state_payload()}), 400
+
+    @app.post("/api/p2p/replication/delegate")
+    def api_p2p_delegate_replication() -> Response:
+        """Continue RAID fan-out on the peer that received the first copy.
+
+        The owner/start node uploads each chunk only once to this node.  This
+        endpoint then uses this node's local chunk copy as source and mirrors it
+        to other active peers.
+        """
+        try:
+            payload = request.get_json(force=True)
+            if not isinstance(payload, dict):
+                raise StorageError("Delegations-Payload muss ein JSON-Objekt sein")
+            manifest_payload = payload.get("manifest")
+            if not isinstance(manifest_payload, dict):
+                raise StorageError("Delegations-Payload enthält kein Manifest")
+            manifest = FileManifest.from_dict(manifest_payload)
+            requester_node_id = str(request.environ.get("dcloud.p2p_node_id") or "").strip()
+            exclude_ids = {str(item) for item in payload.get("exclude_node_ids", []) if str(item)}
+            if requester_node_id:
+                exclude_ids.add(requester_node_id)
+            exclude_ids.add(identity.node_id)
+
+            delegated_chunks: list[dict[str, Any]] = []
+            local_sources = 0
+            for chunk in manifest.chunks:
+                entry = dict(chunk)
+                digest = str(entry.get("hash") or "")
+                locations = [str(node_id) for node_id in entry.get("locations", []) if str(node_id)]
+                if digest and chunk_store.chunk_path(digest).exists():
+                    local_sources += 1
+                    if identity.node_id not in locations:
+                        locations.append(identity.node_id)
+                entry["locations"] = list(dict.fromkeys(locations))
+                delegated_chunks.append(entry)
+            if local_sources <= 0:
+                raise StorageError("Dieser Peer hat noch keine lokale Kopie der zu replizierenden Chunks")
+
+            local_manifest = _manifest_clone_with_chunks(
+                manifest,
+                delegated_chunks,
+                placement={
+                    **dict(manifest.placement or {}),
+                    "strategy": "delegated_peer_replication",
+                    "delegated_by": requester_node_id,
+                    "delegation_primary_peer": identity.node_id,
+                },
+            )
+            peers = [peer for peer in _eligible_storage_peers() if peer.node_id not in exclude_ids]
+            result = replicate_manifest_chunks(
+                manifest=local_manifest,
+                chunk_store=chunk_store,
+                local_node_id=identity.node_id,
+                peers=peers,
+                p2p_client=p2p_client,
+            )
+            return jsonify({
+                "ok": True,
+                "chunks": result.chunks,
+                "targets": result.targets,
+                "remote_successes": result.remote_successes,
+                "remote_failures": result.remote_failures,
+                "desired_replicas": result.desired_replicas,
+                "replicated_chunks": result.replicated_chunks,
+                "under_replicated_chunks": result.under_replicated_chunks,
+                "peer_count": len(peers),
+                "primary_peer_id": identity.node_id,
+                "state": state_payload(),
+            })
+        except (ValueError, TypeError, StorageError) as exc:
             return jsonify({"ok": False, "message": str(exc), "state": state_payload()}), 400
 
     @app.post("/api/p2p/manifests/revoke")

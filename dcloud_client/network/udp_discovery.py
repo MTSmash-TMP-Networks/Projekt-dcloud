@@ -10,8 +10,8 @@ import time
 from dataclasses import dataclass
 from typing import Any, Callable
 
-from .http_relay import normalize_relay_urls
-from .peers import Peer, PeerProvider
+from .http_relay import local_lan_addresses, normalize_relay_urls
+from .peers import Peer, PeerProvider, normalize_lan_addresses
 from ..identity import NodeIdentity
 
 LOG = logging.getLogger(__name__)
@@ -359,6 +359,7 @@ class UdpDiscoveryTransport:
             free_storage_bytes=int(message["free_storage_bytes"]) if str(message.get("free_storage_bytes", "")).isdigit() else None,
             relay_url=relay_urls[0] if relay_urls else None,
             public_ip=str(message.get("public_ip") or "").strip() or None,
+            lan_addresses=normalize_lan_addresses(message.get("lan_addresses") or []),
             chat_enabled=bool(message.get("chat_enabled", True)),
             chat_alias=str(message.get("chat_alias") or "").strip() or None,
         )
@@ -410,6 +411,7 @@ class UdpDiscoveryTransport:
                 free_storage_bytes=int(raw_peer["free_storage_bytes"]) if str(raw_peer.get("free_storage_bytes", "")).isdigit() else None,
                 relay_url=relay_urls[0] if relay_urls else None,
                 public_ip=str(raw_peer.get("public_ip") or "").strip() or None,
+                lan_addresses=normalize_lan_addresses(raw_peer.get("lan_addresses") or []),
                 chat_enabled=bool(raw_peer.get("chat_enabled", True)),
                 chat_alias=str(raw_peer.get("chat_alias") or "").strip() or None,
             )
@@ -483,6 +485,7 @@ class UdpDiscoveryTransport:
             "chat_alias": self.chat_alias,
             "web_port": self.web_port,
             "relay_urls": self.relay_urls,
+            "lan_addresses": local_lan_addresses(),
             "peers": self._known_peers_payload(for_peer=for_peer),
             "timestamp": int(time.time()),
         }

@@ -7,7 +7,7 @@ larger than one safe UDP datagram.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 import base64
 import json
 import logging
@@ -74,6 +74,31 @@ class DistributedUploadResult:
         if self.remote_successes:
             return "stored_on_peers"
         return "local_only"
+
+
+def _direct_peer_candidates(peer: Peer) -> list[Peer]:
+    """Return direct HTTP routes to probe before PHP relay fallback.
+
+    A peer learned through the PHP relay may still be on the same LAN.  Newer
+    nodes advertise LAN address candidates in their relay heartbeat; transfers
+    clone the peer with each candidate host and health-check those direct routes
+    before using the relay mailbox/forwarder.
+    """
+    candidates: list[Peer] = []
+    seen: set[str] = set()
+
+    def add(host: object) -> None:
+        value = str(host or "").strip().strip("[]")
+        if not value or value == RELAY_HOST or value in seen:
+            return
+        seen.add(value)
+        candidates.append(replace(peer, host=value, route_via_node_id=None))
+
+    if peer.host != RELAY_HOST:
+        add(peer.host)
+    for address in getattr(peer, "lan_addresses", []) or []:
+        add(address)
+    return candidates
 
 
 def _relay_http_message(response: RelayHttpResponse) -> str:
@@ -756,6 +781,85 @@ class P2PStorageClient:
                 return PeerTransferResult(peer.node_id, False, str(exc))
         return PeerTransferResult(peer.node_id, False, "Keine erreichbare Peer-Route")
 
+    def _post_json_to_peer_payload(
+        self,
+        peer: Peer,
+        *,
+        path: str,
+        payload: dict[str, Any],
+        timeout: float | None = None,
+        log_message: str = "JSON request to peer %s failed",
+    ) -> dict[str, Any]:
+        data = json.dumps(payload, sort_keys=True).encode("utf-8")
+        headers = {"Content-Type": "application/json", "Accept": "application/json"}
+        request_timeout = max(float(timeout or self.timeout), self.timeout)
+        direct_error: Exception | None = None
+
+        def parse_response(body: bytes) -> dict[str, Any]:
+            parsed = json.loads(body.decode("utf-8", errors="replace"))
+            if not isinstance(parsed, dict):
+                raise StorageError("Peer-Antwort ist kein JSON-Objekt")
+            if not parsed.get("ok", False):
+                raise StorageError(str(parsed.get("message") or "Peer-Anfrage fehlgeschlagen"))
+            return parsed
+
+        if peer.host != RELAY_HOST:
+            url = f"{self.api_base(peer)}{path}"
+            req = request.Request(url, data=data, headers=self._signed_headers("POST", path, data, headers), method="POST")
+            try:
+                with request.urlopen(req, timeout=request_timeout) as response:
+                    body = response.read()
+                    if 200 <= response.status < 300:
+                        return parse_response(body)
+                    raise StorageError(f"HTTP {response.status}: {body.decode('utf-8', errors='replace')[:180]}")
+            except error.HTTPError as exc:
+                direct_error = StorageError(f"HTTP {exc.code}: {exc.read().decode('utf-8', errors='replace')[:180]}")
+                LOG.debug(log_message, peer.node_id, exc_info=True)
+                if not self._relay_available(peer):
+                    raise direct_error
+            except (OSError, error.URLError, ValueError, TypeError, StorageError) as exc:
+                direct_error = exc
+                LOG.debug(log_message, peer.node_id, exc_info=True)
+                if not self._relay_available(peer):
+                    raise StorageError(str(exc)) from exc
+
+        if self._relay_available(peer):
+            try:
+                response = self._forward_via_relay(peer, method="POST", path=path, headers=headers, body=data, timeout=request_timeout)
+                if 200 <= response.status_code < 300:
+                    return parse_response(response.body)
+                raise StorageError(_relay_http_message(response))
+            except (RelayError, ValueError, TypeError, StorageError) as exc:
+                LOG.debug("Relay " + log_message, peer.node_id, exc_info=True)
+                raise StorageError(str(exc)) from exc
+
+        raise StorageError(f"Keine erreichbare Peer-Route: {direct_error}")
+
+    def post_replication_delegation(
+        self,
+        peer: Peer,
+        *,
+        manifest: FileManifest,
+        exclude_node_ids: list[str] | None = None,
+        timeout: float = 180.0,
+    ) -> dict[str, Any]:
+        """Ask one storage peer to continue RAID replication from its local copy.
+
+        The starter has already sent the chunks to ``peer``.  This request shifts
+        the remaining fan-out work to that peer so the starter no longer uploads
+        the same file data to every mirror itself.
+        """
+        return self._post_json_to_peer_payload(
+            peer,
+            path="/api/p2p/replication/delegate",
+            payload={
+                "manifest": manifest.to_dict(),
+                "exclude_node_ids": list(dict.fromkeys(str(item) for item in (exclude_node_ids or []) if str(item))),
+            },
+            timeout=timeout,
+            log_message="Delegated replication request to peer %s failed",
+        )
+
     def post_manifest(self, peer: Peer, manifest: FileManifest) -> PeerTransferResult:
         return self._post_json_to_peer(
             peer,
@@ -844,33 +948,37 @@ def dynamic_mirror_replica_count(
 def _rank_peers_by_speed(peers: list[Peer], p2p_client: P2PStorageClient) -> list[Peer]:
     """Return candidates with the fastest currently responding routes first.
 
-    Direct peers are ranked by a cheap ``/healthz`` latency probe. Relay-only
-    peers are kept behind direct peers instead of being discarded, because they
-    can still transfer via PHP forwarder/mailbox. This ranking is used for both
-    writing replicas and reading missing chunks, so downloads prefer the peer
-    that answers fastest instead of blindly following manifest order.
+    Direct LAN HTTP routes are probed before relay.  Relay-discovered peers may
+    advertise LAN address candidates; if one answers on ``/healthz`` we return a
+    direct clone of that peer so downloads/uploads bypass PHP entirely.  Relay is
+    kept only as a fallback when no direct route currently answers.
     """
     ranked: list[tuple[float, Peer]] = []
     relay_ranked: list[tuple[float, Peer]] = []
 
     for peer in peers:
-        if peer.host != RELAY_HOST:
+        direct_routes = _direct_peer_candidates(peer)
+        direct_matched = False
+        for direct_peer in direct_routes:
             started = time.perf_counter()
             try:
-                url = f"{p2p_client.api_base(peer)}/healthz"
+                url = f"{p2p_client.api_base(direct_peer)}/healthz"
                 req = request.Request(url, method="GET")
                 with request.urlopen(req, timeout=max(0.75, p2p_client.timeout * 0.75)) as response:
                     if 200 <= response.status < 300:
-                        ranked.append((time.perf_counter() - started, peer))
-                        continue
+                        ranked.append((time.perf_counter() - started, direct_peer))
+                        direct_matched = True
+                        break
             except (OSError, error.URLError, error.HTTPError):
-                LOG.debug("Direct health check for peer %s failed; checking relay fallback", peer.node_id, exc_info=True)
+                LOG.debug("Direct health check for peer %s via %s failed", peer.node_id, direct_peer.host, exc_info=True)
+
+        if direct_matched:
+            continue
 
         if p2p_client._relay_available(peer):  # noqa: SLF001 - same module, intentional fast-path check
             # Do not send a mailbox health request here. It would add latency to
-            # every upload start and can itself queue behind chunk traffic. The
-            # actual write call below already performs direct-proxy/mailbox
-            # retries and records per-chunk failures.
+            # every transfer start and can itself queue behind chunk traffic. The
+            # actual read/write call performs relay retries if needed.
             penalty = 1.0 if peer.host == RELAY_HOST else 1.5
             relay_ranked.append((penalty, peer))
 

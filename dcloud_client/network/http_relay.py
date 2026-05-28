@@ -13,13 +13,14 @@ import json
 import logging
 import re
 import secrets
+import socket
 import threading
 import time
 from typing import Any, Callable
 from urllib import error, request
 from uuid import uuid4
 
-from .peers import Peer, PeerProvider
+from .peers import Peer, PeerProvider, normalize_lan_addresses
 from ..identity import NodeIdentity
 from ..crypto import sign_bytes
 
@@ -59,6 +60,38 @@ def normalize_relay_urls(value: object) -> list[str]:
         if url and url not in result:
             result.append(url)
     return result
+
+
+def local_lan_addresses() -> list[str]:
+    """Return best-effort LAN addresses this node can advertise via relay.
+
+    If UDP broadcast is blocked, relay discovery may be the only way peers learn
+    about each other. Publishing these candidates lets the receiver probe
+    same-network HTTP directly before falling back to PHP.
+    """
+    candidates: list[str] = []
+
+    def add(value: object) -> None:
+        for address in normalize_lan_addresses(value):
+            if address not in candidates:
+                candidates.append(address)
+
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+            sock.settimeout(0.2)
+            sock.connect(("8.8.8.8", 80))
+            add(sock.getsockname()[0])
+    except OSError:
+        pass
+
+    try:
+        hostname = socket.gethostname()
+        for result in socket.getaddrinfo(hostname, None, family=socket.AF_INET, type=socket.SOCK_DGRAM):
+            add(result[4][0])
+    except OSError:
+        pass
+
+    return candidates[:8]
 
 
 class RelayError(RuntimeError):
@@ -670,6 +703,7 @@ def peer_from_relay_payload(raw: object, *, relay_url: str, own_node_id: str | N
         except (TypeError, ValueError):
             return None
     client_type = str(raw.get("client_type")) if raw.get("client_type") in {"server"} else None
+    lan_addresses = normalize_lan_addresses(raw.get("lan_addresses") or raw.get("local_addresses") or [])
     return Peer(
         node_id=node_id,
         host=RELAY_HOST,
@@ -682,6 +716,7 @@ def peer_from_relay_payload(raw: object, *, relay_url: str, own_node_id: str | N
         free_storage_bytes=optional_int("free_storage_bytes"),
         relay_url=relay_url.rstrip("/"),
         public_ip=str(raw.get("public_ip") or raw.get("remote_addr") or "").strip() or None,
+        lan_addresses=lan_addresses,
         chat_enabled=bool(raw.get("chat_enabled", True)),
         chat_alias=str(raw.get("chat_alias") or "").strip() or None,
     )
@@ -816,6 +851,7 @@ class HttpRelayTransport:
             "chat_alias": self.chat_alias,
             "relay_url": self.relay_url,
             "relay_urls": self.relay_urls,
+            "lan_addresses": local_lan_addresses(),
             # Distributed as metadata so clients can see which relay day-token a
             # peer currently uses. Clients can always refresh directly via the
             # relay health action; this is gossip metadata, not a user setting.
