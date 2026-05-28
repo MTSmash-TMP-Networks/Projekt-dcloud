@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 import os
 import sys
+import logging
 import tempfile
 import json
 import secrets
@@ -17,6 +18,7 @@ from typing import Any, Protocol
 from io import BytesIO
 import threading
 from collections import defaultdict, deque
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from uuid import uuid4
 import atexit
@@ -99,6 +101,7 @@ LARGE_UPLOAD_THRESHOLD_BYTES = int(os.environ.get("DCLOUD_LARGE_UPLOAD_THRESHOLD
 LARGE_UPLOAD_CHUNK_BYTES = int(os.environ.get("DCLOUD_UPLOAD_CHUNK_BYTES", str(16 * 1024 * 1024)))
 LARGE_UPLOAD_MAX_BYTES = int(os.environ.get("DCLOUD_LARGE_UPLOAD_MAX_BYTES", str(64 * 1024 * 1024 * 1024)))
 LARGE_UPLOAD_STREAM_BUFFER_BYTES = int(os.environ.get("DCLOUD_UPLOAD_STREAM_BUFFER_BYTES", str(1024 * 1024)))
+LOG = logging.getLogger(__name__)
 
 
 def _read_system_net_io() -> tuple[int, int] | None:
@@ -3164,6 +3167,43 @@ def create_app(
         _configure_relay_transport()
         _sync_peer_connector_settings()
 
+    def _relay_inventory_payload() -> dict[str, Any]:
+        """Advertise local chunk availability to PHP relays as tracker metadata.
+
+        The relay remains a lightweight tracker/signaling service.  It does not
+        carry bulk data, but it can tell other clients which online peer recently
+        announced local copies for a manifest.  The payload is deliberately
+        bounded because it is sent with regular relay heartbeats.
+        """
+        manifests_payload: list[dict[str, Any]] = []
+        max_manifests = 200
+        max_total_chunks = 4096
+        total_chunks = 0
+        try:
+            visible = manifest_store.list_visible_for_node(identity.node_id)
+        except Exception:
+            visible = []
+        for manifest in visible:
+            chunk_hashes: list[str] = []
+            for chunk in manifest.chunks:
+                digest = str(chunk.get("hash") or "").strip()
+                if not digest or not chunk_store.chunk_path(digest).exists():
+                    continue
+                chunk_hashes.append(digest)
+                total_chunks += 1
+                if len(chunk_hashes) >= 512 or total_chunks >= max_total_chunks:
+                    break
+            if chunk_hashes:
+                manifests_payload.append({
+                    "manifest_id": manifest.manifest_id,
+                    "chunk_hashes": chunk_hashes,
+                    "chunk_count": len(chunk_hashes),
+                    "complete": len(chunk_hashes) >= len(manifest.chunks),
+                })
+            if len(manifests_payload) >= max_manifests or total_chunks >= max_total_chunks:
+                break
+        return {"version": 1, "updated_at": int(time.time()), "manifests": manifests_payload}
+
     def _configure_relay_transport() -> None:
         desired_urls = _relay_url_list()
         with relay_lock:
@@ -3202,6 +3242,7 @@ def create_app(
                     relay_discovery_callback=_learn_relay_urls,
                     chat_enabled=_chat_enabled(),
                     chat_alias=_chat_alias(),
+                    inventory_callback=_relay_inventory_payload,
                 )
                 relay_clients[desired_url] = relay_client
                 relay_transports[desired_url] = relay_transport
@@ -5132,6 +5173,67 @@ def create_app(
             flash(f"Peer konnte nicht kontaktiert werden: {exc}", "error")
         return redirect(url_for("dashboard"))
 
+    def _fetch_chunk_through_gateway(
+        digest: str,
+        manifest_payload: object,
+        *,
+        gateway_depth: int = 0,
+    ) -> bytes | None:
+        """Serve as a BitTorrent-like gateway for remote clients.
+
+        A public/DDNS reachable peer may not have every chunk locally, but it may
+        be in the same LAN as storage peers.  When a requester includes the
+        signed manifest in a batch request, this node is allowed to fetch the
+        missing chunk once from its direct peers, cache it locally and return it.
+        That keeps remote downloads working without VPN while avoiding PHP as a
+        bulk data carrier.
+        """
+        safe_digest = str(digest or "").strip()
+        if not safe_digest:
+            return None
+        try:
+            return chunk_store.read_stored_chunk(safe_digest)
+        except StorageError:
+            pass
+        if gateway_depth >= 1 or not isinstance(manifest_payload, dict):
+            return None
+        try:
+            manifest = FileManifest.from_dict(manifest_payload)
+        except Exception:
+            return None
+        if not manifest_store.may_access(manifest, identity.node_id):
+            return None
+        chunk_meta = next((dict(chunk) for chunk in manifest.chunks if str(chunk.get("hash") or "") == safe_digest), None)
+        if chunk_meta is None:
+            return None
+        requester_node_id = str(request.environ.get("dcloud.p2p_node_id") or "").strip()
+        active_peers = _list_active_peers()
+        ranked = rank_peers_by_speed(active_peers, p2p_client) if active_peers else []
+        peers_by_id = {peer.node_id: peer for peer in [*active_peers, *ranked]}
+        peer_rank = {peer.node_id: index for index, peer in enumerate(ranked)}
+        candidate_ids = [str(node_id) for node_id in chunk_meta.get("locations", []) if str(node_id)]
+        candidate_ids.extend(peer.node_id for peer in ranked)
+        candidate_ids = sorted(dict.fromkeys(candidate_ids), key=lambda node_id: peer_rank.get(node_id, 9999))
+        for node_id in candidate_ids:
+            if node_id in {identity.node_id, requester_node_id}:
+                continue
+            peer = peers_by_id.get(node_id)
+            if peer is None:
+                continue
+            try:
+                data = p2p_client.get_chunk(peer, digest=safe_digest)
+                chunk_store.write_stored_chunk(
+                    data,
+                    original_size=int(chunk_meta.get("size") or len(data)),
+                    index=int(chunk_meta.get("index") or 0),
+                    compression=str(chunk_meta.get("compression")) if chunk_meta.get("compression") else None,
+                    digest=safe_digest,
+                )
+                return data
+            except StorageError:
+                continue
+        return None
+
     def _ensure_manifest_chunks_available(manifest: FileManifest, progress_callback: Any | None = None) -> None:
         discovered_peers_by_id = {peer.node_id: peer for peer in _list_active_peers()}
         all_peers = list(discovered_peers_by_id.values())
@@ -5142,6 +5244,13 @@ def create_app(
         peers_by_id = dict(discovered_peers_by_id)
         peers_by_id.update({peer.node_id: peer for peer in ranked_download_peers})
         peer_rank = {peer.node_id: index for index, peer in enumerate(ranked_download_peers)}
+        tracker_candidates_by_digest: dict[str, list[str]] = defaultdict(list)
+        for peer in ranked_download_peers:
+            inventory = getattr(peer, "chunk_inventory", {}) or {}
+            for digest in inventory.get(manifest.manifest_id, []):
+                safe_digest = str(digest or "").strip()
+                if safe_digest and peer.node_id not in tracker_candidates_by_digest[safe_digest]:
+                    tracker_candidates_by_digest[safe_digest].append(peer.node_id)
         chunks = sorted(manifest.chunks, key=lambda item: int(item["index"]))
         total_chunks = len(chunks)
         chunks_by_digest = {str(chunk["hash"]): chunk for chunk in chunks}
@@ -5166,15 +5275,18 @@ def create_app(
 
         missing_total = len(missing)
         restored_digests: set[str] = set()
+        missing_lock = threading.RLock()
         peer_candidates: dict[str, list[str]] = defaultdict(list)
         peer_order: list[str] = []
 
         for chunk in missing.values():
             digest = str(chunk["hash"])
-            candidate_ids = [str(node_id) for node_id in chunk.get("locations", []) if str(node_id)]
+            candidate_ids = list(tracker_candidates_by_digest.get(digest, []))
+            candidate_ids.extend(str(node_id) for node_id in chunk.get("locations", []) if str(node_id))
             # If the manifest is stale, a chunk may already exist on a newer
-            # mirror that is not listed yet. Try listed mirrors first, then every
-            # active peer, but sort the final peer order by current response time.
+            # mirror that is not listed yet. Try tracker/listed mirrors first,
+            # then every active peer, but sort the final peer order by current
+            # response time.
             candidate_ids.extend(peer.node_id for peer in ranked_download_peers)
             seen: set[str] = set()
             for node_id in candidate_ids:
@@ -5185,19 +5297,21 @@ def create_app(
         peer_order = sorted(peer_candidates, key=lambda node_id: peer_rank.get(node_id, 9999))
 
         def write_restored_chunk(digest: str, stored_data: bytes) -> bool:
-            chunk = chunks_by_digest.get(digest)
-            if chunk is None or chunk_store.chunk_path(digest).exists():
-                return False
-            chunk_store.write_stored_chunk(
-                stored_data,
-                original_size=int(chunk["size"]),
-                index=int(chunk["index"]),
-                compression=str(chunk.get("compression")) if chunk.get("compression") else None,
-                digest=digest,
-            )
-            restored_digests.add(digest)
-            missing.pop(digest, None)
-            return True
+            with missing_lock:
+                chunk = chunks_by_digest.get(digest)
+                if chunk is None or digest not in missing or chunk_store.chunk_path(digest).exists():
+                    missing.pop(digest, None)
+                    return False
+                chunk_store.write_stored_chunk(
+                    stored_data,
+                    original_size=int(chunk["size"]),
+                    index=int(chunk["index"]),
+                    compression=str(chunk.get("compression")) if chunk.get("compression") else None,
+                    digest=digest,
+                )
+                restored_digests.add(digest)
+                missing.pop(digest, None)
+                return True
 
         # Large files should not require one HTTP/PHP roundtrip per chunk.
         # Very large PHP-forwarded packs can still appear to hang because many
@@ -5248,6 +5362,8 @@ def create_app(
                     timeout=timeout,
                     max_chunks=max_chunks,
                     max_payload_bytes=max_payload_bytes,
+                    manifest=manifest,
+                    gateway_depth=0,
                 )
             except StorageError:
                 received = {}
@@ -5289,21 +5405,21 @@ def create_app(
                 return left + right
             return 0
 
-        for node_id in peer_order:
-            if not missing:
-                break
+        def fetch_from_peer_worker(node_id: str) -> None:
             peer = peers_by_id.get(node_id)
             if peer is None:
-                continue
+                return
             peer_name = peer.to_dict().get("display_name") or peer.node_id[:12]
             batch_size, batch_byte_budget, batch_timeout = batch_limits_for_peer(peer)
-            candidate_digests = [digest for digest in peer_candidates.get(node_id, []) if digest in missing]
+            with missing_lock:
+                candidate_digests = [digest for digest in peer_candidates.get(node_id, []) if digest in missing]
             batch: list[str] = []
             estimated_bytes = 0
             for digest in candidate_digests:
-                if digest not in missing:
-                    continue
-                chunk = missing[digest]
+                with missing_lock:
+                    if digest not in missing:
+                        continue
+                    chunk = dict(missing[digest])
                 estimated_size = int(chunk.get("stored_size") or chunk.get("size") or 0)
                 if batch and (len(batch) >= batch_size or estimated_bytes + estimated_size > batch_byte_budget):
                     fetch_and_store_batch(
@@ -5328,6 +5444,16 @@ def create_app(
                     timeout=batch_timeout,
                 )
 
+        if peer_order:
+            max_workers = max(1, min(6, len(peer_order)))
+            with ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="dcloud-download-peer") as executor:
+                futures = [executor.submit(fetch_from_peer_worker, node_id) for node_id in peer_order]
+                for future in as_completed(futures):
+                    try:
+                        future.result()
+                    except Exception:
+                        LOG.debug("Parallel peer download worker failed", exc_info=True)
+
         # Conservative fallback: if a peer/server is older and does not know the
         # batch endpoint yet, still try the previous single-chunk API so mixed
         # versions keep working.
@@ -5337,7 +5463,8 @@ def create_app(
                 continue
             tried: set[str] = set()
             restored = False
-            candidate_ids = [str(node_id) for node_id in chunk.get("locations", []) if str(node_id)]
+            candidate_ids = list(tracker_candidates_by_digest.get(digest, []))
+            candidate_ids.extend(str(node_id) for node_id in chunk.get("locations", []) if str(node_id))
             candidate_ids.extend(peer.node_id for peer in ranked_download_peers)
             candidate_ids = sorted(dict.fromkeys(candidate_ids), key=lambda node_id: peer_rank.get(node_id, 9999))
             for node_id in candidate_ids:
@@ -5835,6 +5962,11 @@ def create_app(
 
         max_chunks = _chunk_batch_limit(payload, "max_chunks", 128, 1, 128)
         max_payload_bytes = _chunk_batch_limit(payload, "max_payload_bytes", 96 * 1024 * 1024, 1024 * 1024, 96 * 1024 * 1024)
+        manifest_payload = payload.get("manifest") if isinstance(payload.get("manifest"), dict) else None
+        try:
+            gateway_depth = int(payload.get("gateway_depth") or 0)
+        except (TypeError, ValueError):
+            gateway_depth = 0
         pack_magic = b"DCLOUD-CHUNK-PACK-1\n"
 
         def generate():
@@ -5847,7 +5979,9 @@ def create_app(
                 try:
                     data = chunk_store.read_stored_chunk(digest)
                 except StorageError:
-                    continue
+                    data = _fetch_chunk_through_gateway(digest, manifest_payload, gateway_depth=gateway_depth)
+                    if data is None:
+                        continue
                 if yielded and payload_bytes + len(data) > max_payload_bytes:
                     break
                 header = f"{digest} {len(data)}\n".encode("ascii", errors="strict")
@@ -5873,6 +6007,11 @@ def create_app(
             digests = _chunk_batch_digests_from_payload(payload)
             max_chunks = _chunk_batch_limit(payload, "max_chunks", 128, 1, 128)
             max_payload_bytes = _chunk_batch_limit(payload, "max_payload_bytes", 96 * 1024 * 1024, 1024 * 1024, 96 * 1024 * 1024)
+            manifest_payload = payload.get("manifest") if isinstance(payload.get("manifest"), dict) else None
+            try:
+                gateway_depth = int(payload.get("gateway_depth") or 0)
+            except (TypeError, ValueError):
+                gateway_depth = 0
             chunks_payload: list[dict[str, Any]] = []
             missing: list[str] = []
             payload_bytes = 0
@@ -5884,8 +6023,10 @@ def create_app(
                 try:
                     data = chunk_store.read_stored_chunk(digest)
                 except StorageError:
-                    missing.append(digest)
-                    continue
+                    data = _fetch_chunk_through_gateway(digest, manifest_payload, gateway_depth=gateway_depth)
+                    if data is None:
+                        missing.append(digest)
+                        continue
                 if chunks_payload and payload_bytes + len(data) > max_payload_bytes:
                     truncated = True
                     break

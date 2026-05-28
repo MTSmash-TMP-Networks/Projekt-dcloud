@@ -6,7 +6,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 import ipaddress
 import threading
-from typing import Protocol
+from typing import Any, Protocol
 
 
 DEFAULT_PEER_TIMEOUT_SECONDS = 35.0
@@ -89,6 +89,61 @@ def normalize_lan_addresses(values: object) -> list[str]:
     return result
 
 
+
+def normalize_chunk_inventory(value: object, *, max_manifests: int = 200, max_chunks_per_manifest: int = 512) -> dict[str, list[str]]:
+    """Normalize tracker-advertised chunk availability.
+
+    The PHP relay should act like a lightweight tracker: it may tell us which
+    peer recently announced local copies for a manifest.  Keep the structure
+    bounded because it is sent with regular heartbeats.
+    """
+    inventory: dict[str, list[str]] = {}
+
+    def add(manifest_id: object, chunks: object) -> None:
+        mid = str(manifest_id or "").strip()
+        if not mid or len(inventory) >= max_manifests:
+            return
+        raw_chunks = chunks if isinstance(chunks, (list, tuple, set)) else []
+        normalized: list[str] = []
+        for item in raw_chunks:
+            digest = str(item or "").strip()
+            if not digest or digest in normalized:
+                continue
+            normalized.append(digest)
+            if len(normalized) >= max_chunks_per_manifest:
+                break
+        if normalized:
+            inventory[mid] = normalized
+
+    if isinstance(value, dict):
+        manifests = value.get("manifests")
+        if isinstance(manifests, list):
+            for item in manifests:
+                if not isinstance(item, dict):
+                    continue
+                add(item.get("manifest_id"), item.get("chunk_hashes") or item.get("chunks") or [])
+        else:
+            for manifest_id, chunks in value.items():
+                if str(manifest_id) in {"updated_at", "version"}:
+                    continue
+                add(manifest_id, chunks)
+    elif isinstance(value, list):
+        for item in value:
+            if isinstance(item, dict):
+                add(item.get("manifest_id"), item.get("chunk_hashes") or item.get("chunks") or [])
+    return inventory
+
+
+def merge_chunk_inventory(*groups: object) -> dict[str, list[str]]:
+    merged: dict[str, list[str]] = {}
+    for group in groups:
+        for manifest_id, chunks in normalize_chunk_inventory(group).items():
+            bucket = merged.setdefault(manifest_id, [])
+            for digest in chunks:
+                if digest not in bucket:
+                    bucket.append(digest)
+    return merged
+
 def merge_lan_addresses(*groups: object) -> list[str]:
     merged: list[str] = []
     for group in groups:
@@ -124,6 +179,7 @@ class Peer:
     relay_url: str | None = None
     public_ip: str | None = None
     lan_addresses: list[str] = field(default_factory=list)
+    chunk_inventory: dict[str, list[str]] = field(default_factory=dict)
     chat_enabled: bool = True
     chat_alias: str | None = None
     last_seen: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
@@ -155,6 +211,9 @@ class Peer:
             "relay_url": self.relay_url,
             "public_ip": self.public_ip,
             "lan_addresses": list(self.lan_addresses),
+            "chunk_inventory": {manifest_id: list(chunks) for manifest_id, chunks in self.chunk_inventory.items()},
+            "tracker_manifest_count": len(self.chunk_inventory),
+            "tracker_chunk_count": sum(len(chunks) for chunks in self.chunk_inventory.values()),
             "chat_enabled": bool(self.chat_enabled),
             "chat_alias": self.chat_alias,
             "transport": "relay" if self.host == "__relay__" else ("direct+relay" if self.relay_url else "direct"),
@@ -227,6 +286,7 @@ class InMemoryPeerProvider:
                 peer.web_port = peer.web_port if peer.web_port is not None else existing.web_port
                 peer.public_ip = peer.public_ip if peer.public_ip is not None else existing.public_ip
                 peer.lan_addresses = merge_lan_addresses(peer.lan_addresses, existing.lan_addresses, [peer.host, existing.host])
+                peer.chunk_inventory = merge_chunk_inventory(peer.chunk_inventory, existing.chunk_inventory)
                 peer.free_storage_bytes = (
                     peer.free_storage_bytes if peer.free_storage_bytes is not None else existing.free_storage_bytes
                 )
@@ -257,6 +317,7 @@ class InMemoryPeerProvider:
                 peer.relay_url = incoming_relay_url or existing_relay_url
 
             peer.lan_addresses = merge_lan_addresses(peer.lan_addresses, [peer.host])
+            peer.chunk_inventory = normalize_chunk_inventory(peer.chunk_inventory)
             endpoint_key = peer.endpoint_key()
             duplicate_ids = [
                 node_id

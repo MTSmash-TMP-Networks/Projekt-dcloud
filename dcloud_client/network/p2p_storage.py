@@ -689,6 +689,8 @@ class P2PStorageClient:
         timeout: float | None = None,
         max_chunks: int | None = None,
         max_payload_bytes: int | None = None,
+        manifest: FileManifest | dict[str, Any] | None = None,
+        gateway_depth: int = 0,
     ) -> dict[str, bytes]:
         """Fetch multiple stored chunks from one peer with a single peer/API call.
 
@@ -710,6 +712,13 @@ class P2PStorageClient:
             payload["max_chunks"] = max(1, int(max_chunks))
         if max_payload_bytes is not None:
             payload["max_payload_bytes"] = max(1, int(max_payload_bytes))
+        if manifest is not None:
+            if isinstance(manifest, FileManifest):
+                payload["manifest"] = manifest.to_dict()
+            elif isinstance(manifest, dict):
+                payload["manifest"] = manifest
+        if gateway_depth:
+            payload["gateway_depth"] = max(0, int(gateway_depth))
         data = json.dumps(payload, separators=(",", ":"), sort_keys=True).encode("utf-8")
         headers = {"Content-Type": "application/json", "Accept": "application/json"}
         request_timeout = timeout if timeout is not None else max(self.timeout, 90.0)

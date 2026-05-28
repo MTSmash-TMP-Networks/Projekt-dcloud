@@ -20,7 +20,7 @@ from typing import Any, Callable
 from urllib import error, request
 from uuid import uuid4
 
-from .peers import Peer, PeerProvider, normalize_lan_addresses
+from .peers import Peer, PeerProvider, normalize_chunk_inventory, normalize_lan_addresses
 from ..identity import NodeIdentity
 from ..crypto import sign_bytes
 
@@ -717,6 +717,7 @@ def peer_from_relay_payload(raw: object, *, relay_url: str, own_node_id: str | N
         relay_url=relay_url.rstrip("/"),
         public_ip=str(raw.get("public_ip") or raw.get("remote_addr") or "").strip() or None,
         lan_addresses=lan_addresses,
+        chunk_inventory=normalize_chunk_inventory(raw.get("inventory") or raw.get("chunk_inventory") or {}),
         chat_enabled=bool(raw.get("chat_enabled", True)),
         chat_alias=str(raw.get("chat_alias") or "").strip() or None,
     )
@@ -746,6 +747,7 @@ class HttpRelayTransport:
         relay_discovery_callback: Callable[[list[str]], None] | None = None,
         chat_enabled: bool = True,
         chat_alias: str = "",
+        inventory_callback: Callable[[], dict[str, Any]] | None = None,
     ) -> None:
         self.relay_client = relay_client
         self.relay_url = relay_client.relay_url
@@ -770,6 +772,7 @@ class HttpRelayTransport:
         self.relay_discovery_callback = relay_discovery_callback
         self.chat_enabled = bool(chat_enabled)
         self.chat_alias = str(chat_alias or "")
+        self.inventory_callback = inventory_callback
         self.last_error: str | None = None
         self.last_success_at: float | None = None
         self.active_request_workers = 0
@@ -836,6 +839,13 @@ class HttpRelayTransport:
     def _metadata(self) -> dict[str, Any]:
         token_payload = self.relay_client.token_payload()
         relay_tokens = [token_payload] if token_payload else []
+        inventory: dict[str, Any] = {}
+        if self.inventory_callback is not None:
+            try:
+                inventory = self.inventory_callback()
+            except Exception:
+                LOG.debug("Relay inventory callback failed", exc_info=True)
+                inventory = {}
         return {
             "node_id": self.identity.node_id,
             "public_key": self.identity.public_key_b64,
@@ -852,6 +862,7 @@ class HttpRelayTransport:
             "relay_url": self.relay_url,
             "relay_urls": self.relay_urls,
             "lan_addresses": local_lan_addresses(),
+            "inventory": inventory,
             # Distributed as metadata so clients can see which relay day-token a
             # peer currently uses. Clients can always refresh directly via the
             # relay health action; this is gossip metadata, not a user setting.

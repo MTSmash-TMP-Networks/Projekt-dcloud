@@ -1152,6 +1152,46 @@ function dcloud_sanitize_relay_tokens($value): array {
     return $tokens;
 }
 
+
+function dcloud_sanitize_string_list($value, int $maxItems = 32, int $maxLength = 128): array {
+    if ($value === null) return [];
+    $items = is_array($value) ? $value : preg_split('/[\s,;]+/', (string)$value);
+    $out = [];
+    foreach ($items ?: [] as $raw) {
+        $item = substr(trim(preg_replace('/[\r\n\t]+/', ' ', (string)$raw)), 0, $maxLength);
+        if ($item === '') continue;
+        if (!in_array($item, $out, true)) $out[] = $item;
+        if (count($out) >= $maxItems) break;
+    }
+    return $out;
+}
+
+function dcloud_sanitize_inventory($value): array {
+    if (!is_array($value)) return ['manifests' => [], 'updated_at' => time()];
+    $rawManifests = $value['manifests'] ?? $value;
+    if (!is_array($rawManifests)) return ['manifests' => [], 'updated_at' => time()];
+    $manifests = [];
+    foreach ($rawManifests as $key => $item) {
+        if (is_array($item) && array_key_exists('manifest_id', $item)) {
+            $manifestId = substr(trim((string)$item['manifest_id']), 0, 160);
+            $chunksRaw = $item['chunk_hashes'] ?? ($item['chunks'] ?? []);
+        } else {
+            $manifestId = substr(trim((string)$key), 0, 160);
+            $chunksRaw = $item;
+        }
+        if ($manifestId === '' || in_array($manifestId, ['updated_at', 'version'], true)) continue;
+        $chunks = dcloud_sanitize_string_list($chunksRaw, 512, 96);
+        if (!$chunks) continue;
+        $manifests[] = [
+            'manifest_id' => $manifestId,
+            'chunk_hashes' => $chunks,
+            'chunk_count' => count($chunks),
+        ];
+        if (count($manifests) >= 200) break;
+    }
+    return ['manifests' => $manifests, 'updated_at' => time(), 'version' => 1];
+}
+
 function dcloud_sanitize_peer($peer, string $nodeId): array {
     if (!is_array($peer)) dcloud_fail('Peer-Metadaten fehlen', 400);
 
@@ -1176,6 +1216,8 @@ function dcloud_sanitize_peer($peer, string $nodeId): array {
         'relay_url' => $relayUrls[0] ?? '',
         'relay_urls' => $relayUrls,
         'relay_tokens' => dcloud_sanitize_relay_tokens($peer['relay_tokens'] ?? []),
+        'lan_addresses' => dcloud_sanitize_string_list($peer['lan_addresses'] ?? ($peer['local_addresses'] ?? []), 8, 80),
+        'inventory' => dcloud_sanitize_inventory($peer['inventory'] ?? ($peer['chunk_inventory'] ?? [])),
         'public_ip' => substr((string)($peer['public_ip'] ?? ''), 0, 80),
         'relay_seen_at' => time(),
         'via_relay' => true,
@@ -1705,7 +1747,7 @@ function dcloud_register(array $input): void {
 
         $sanitized['public_ip'] = dcloud_public_client_ip();
 
-        foreach (['public_key', 'client_type', 'shared_storage_bytes', 'free_storage_bytes', 'accepts_peer_storage', 'chat_alias', 'relay_url', 'relay_urls', 'relay_tokens', 'web_port', 'udp_port', 'public_ip'] as $key) {
+        foreach (['public_key', 'client_type', 'shared_storage_bytes', 'free_storage_bytes', 'accepts_peer_storage', 'chat_alias', 'relay_url', 'relay_urls', 'relay_tokens', 'lan_addresses', 'web_port', 'udp_port', 'public_ip'] as $key) {
             $newValue = $sanitized[$key] ?? null;
             $emptyNewValue = $newValue === null || $newValue === '' || $newValue === [] || $newValue === 0 || $newValue === false;
             if ($emptyNewValue && array_key_exists($key, $existing)) {
