@@ -8,6 +8,7 @@ import hashlib
 import os
 import shutil
 import tempfile
+import threading
 import zlib
 from typing import Any, BinaryIO, Callable, Iterable
 
@@ -80,6 +81,8 @@ class ChunkStore:
         self.limit_bytes = limit_bytes
         self.min_free_bytes = min_free_bytes
         self.chunk_size = chunk_size
+        self._usage_lock = threading.RLock()
+        self._used_bytes_cache: int | None = None
         self.configure_compression(
             mode=compression_mode,
             algorithm=compression_algorithm,
@@ -125,16 +128,8 @@ class ChunkStore:
             min_free_bytes=self.min_free_bytes,
         )
 
-    def used_bytes(self) -> int:
-        """Return used bytes while tolerating concurrent chunk cleanup.
-
-        Peer delete/revocation requests can remove chunk files and the two-letter
-        chunk subdirectories while another request is building /api/state or
-        refreshing advertised free storage. pathlib.Path.rglob() raises
-        FileNotFoundError when a directory disappears after it has been listed but
-        before it is scanned. For a running P2P node that race is expected, so
-        storage accounting treats disappeared files/directories as already gone.
-        """
+    def _scan_used_bytes(self) -> int:
+        """Return used bytes while tolerating concurrent chunk cleanup."""
         total = 0
 
         def ignore_missing_directory(_error: OSError) -> None:
@@ -161,11 +156,46 @@ class ChunkStore:
                         continue
         return total
 
+    def used_bytes(self, *, refresh: bool = False) -> int:
+        """Return used bytes using a write-through cache.
+
+        The old implementation rescanned the full chunk directory before every
+        single chunk write. During offload/replication this made a file with many
+        chunks progressively slower (O(number_of_existing_chunks * number_of_new_chunks)).
+        The cache is updated after successful writes and invalidated/refreshed on
+        cleanup or capacity-border cases.
+        """
+        with self._usage_lock:
+            if refresh or self._used_bytes_cache is None:
+                self._used_bytes_cache = self._scan_used_bytes()
+            return int(self._used_bytes_cache)
+
+    def invalidate_usage_cache(self) -> None:
+        with self._usage_lock:
+            self._used_bytes_cache = None
+
+    def note_chunk_removed(self, removed_bytes: int | None = None) -> None:
+        """Update/invalidate cached usage after external manifest cleanup."""
+        with self._usage_lock:
+            if self._used_bytes_cache is None:
+                return
+            if removed_bytes is None:
+                self._used_bytes_cache = None
+            else:
+                self._used_bytes_cache = max(0, int(self._used_bytes_cache) - max(0, int(removed_bytes)))
+
     def ensure_capacity(self, additional_bytes: int) -> None:
-        stats = self.stats()
-        if stats.used_bytes + additional_bytes > self.limit_bytes:
+        additional = max(0, int(additional_bytes or 0))
+        used = self.used_bytes()
+        filesystem_free = shutil.disk_usage(self.root).free if self.root.exists() else 0
+        if used + additional > self.limit_bytes or filesystem_free - additional < self.min_free_bytes:
+            # Refresh once before failing. This keeps the fast path cached while
+            # avoiding false negatives after offload/cleanup removed local chunks.
+            used = self.used_bytes(refresh=True)
+            filesystem_free = shutil.disk_usage(self.root).free if self.root.exists() else 0
+        if used + additional > self.limit_bytes:
             raise StorageError("Configured storage limit would be exceeded")
-        if stats.filesystem_free_bytes - additional_bytes < self.min_free_bytes:
+        if filesystem_free - additional < self.min_free_bytes:
             raise StorageError("Minimum filesystem free space would be undercut")
 
     def _compression_level_for_mode(self) -> int:
@@ -311,6 +341,7 @@ class ChunkStore:
         compression: str | None = None,
         digest: str | None = None,
         validate: bool = True,
+        sync: bool = True,
     ) -> ChunkInfo:
         """Persist bytes that are already in their on-disk/transfer format.
 
@@ -339,9 +370,13 @@ class ChunkStore:
         try:
             with os.fdopen(fd, "wb") as handle:
                 handle.write(stored_data)
-                handle.flush()
-                os.fsync(handle.fileno())
+                if sync:
+                    handle.flush()
+                    os.fsync(handle.fileno())
             Path(tmp_name).replace(target)
+            with self._usage_lock:
+                if self._used_bytes_cache is not None:
+                    self._used_bytes_cache += len(stored_data)
         except Exception:
             Path(tmp_name).unlink(missing_ok=True)
             raise

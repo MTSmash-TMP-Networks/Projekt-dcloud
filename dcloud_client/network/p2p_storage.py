@@ -188,6 +188,18 @@ def _relay_http_message(response: RelayHttpResponse) -> str:
     return f"Forwarded HTTP {response.status_code}"
 
 
+def _transfer_timeout_for_bytes(size_bytes: int, *, base_timeout: float, min_mib_per_second: float = 2.0, max_timeout: float = 600.0) -> float:
+    """Return a practical timeout for large direct/gateway batch transfers.
+
+    A fixed 45s timeout caused large offload packs over Wi-Fi/VPN/gateway routes to
+    time out and then fall back to slower JSON/single-chunk paths. Scale the
+    timeout with payload size so the fast binary pack path can finish normally.
+    """
+    size = max(0, int(size_bytes or 0))
+    seconds_for_size = size / max(1.0, float(min_mib_per_second) * 1024 * 1024)
+    return max(float(base_timeout), min(float(max_timeout), seconds_for_size + 15.0))
+
+
 def canonical_revocation_bytes(data: dict[str, Any]) -> bytes:
     """Stable bytes that are signed by the file owner for share revocations."""
     signable = {
@@ -573,7 +585,7 @@ class P2PStorageClient:
             url = f"{self.api_base(peer)}{path}"
             req = request.Request(url, data=data, headers=self._signed_headers("POST", path, data, headers), method="POST")
             try:
-                with request.urlopen(req, timeout=max(self.timeout, 45.0)) as response:
+                with request.urlopen(req, timeout=_transfer_timeout_for_bytes(len(data), base_timeout=max(self.timeout, 45.0))) as response:
                     if 200 <= response.status < 300:
                         response_body = response.read()
                     else:
@@ -637,7 +649,7 @@ class P2PStorageClient:
             url = f"{self.api_base(peer)}{path}"
             req = request.Request(url, data=data, headers=self._signed_headers("POST", path, data, headers), method="POST")
             try:
-                with request.urlopen(req, timeout=max(self.timeout, 45.0)) as response:
+                with request.urlopen(req, timeout=_transfer_timeout_for_bytes(len(data), base_timeout=max(self.timeout, 45.0), min_mib_per_second=1.0)) as response:
                     if 200 <= response.status < 300:
                         response_payload = json.loads(response.read().decode("utf-8", errors="replace"))
                     else:

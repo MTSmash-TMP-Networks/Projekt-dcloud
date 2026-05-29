@@ -725,7 +725,12 @@ class ManifestStore:
                 continue
             path = self.chunk_store.chunk_path(digest)
             if path.exists():
+                try:
+                    removed_size = path.stat().st_size
+                except OSError:
+                    removed_size = None
                 path.unlink(missing_ok=True)
+                self.chunk_store.note_chunk_removed(removed_size)
                 removed += 1
                 try:
                     path.parent.rmdir()
@@ -757,7 +762,12 @@ class ManifestStore:
                 continue
             path = self.chunk_store.chunk_path(digest)
             if path.exists():
+                try:
+                    removed_size = path.stat().st_size
+                except OSError:
+                    removed_size = None
                 path.unlink(missing_ok=True)
+                self.chunk_store.note_chunk_removed(removed_size)
                 removed += 1
                 try:
                     path.parent.rmdir()

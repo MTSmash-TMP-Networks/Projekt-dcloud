@@ -2444,7 +2444,12 @@ def create_app(
             digest = chunk_path.stem
             if digest in referenced_chunks:
                 continue
+            try:
+                removed_size = chunk_path.stat().st_size
+            except OSError:
+                removed_size = None
             chunk_path.unlink(missing_ok=True)
+            chunk_store.note_chunk_removed(removed_size)
             removed_unreferenced_chunks += 1
 
         for tmp_path in chunk_store.tmp_dir.glob("*"):
@@ -4674,6 +4679,163 @@ def create_app(
             "background_queued_at": datetime.now(timezone.utc).isoformat() if background_enabled else None,
         }
 
+    def _local_chunk_store_can_fit(file_size: int) -> bool:
+        try:
+            stats = chunk_store.stats()
+        except Exception:
+            return True
+        needed = max(0, int(file_size or 0))
+        if needed <= 0:
+            return True
+        if stats.free_limit_bytes < needed:
+            return False
+        if stats.filesystem_free_bytes - needed < stats.min_free_bytes:
+            return False
+        return True
+
+    def _remote_primary_upload_placement(upload_result: Any, storage_peers: list[Any], primary: Any, delegation_info: dict[str, Any] | None = None) -> dict[str, Any]:
+        peer_ids = [peer.node_id for peer in storage_peers]
+        targets = list(dict.fromkeys([*peer_ids]))
+        desired_replicas = dynamic_mirror_replica_count(len(storage_peers)) if storage_peers else 1
+        return {
+            "strategy": "remote_primary_delegated_upload",
+            "target_count": len(targets),
+            "targets": targets,
+            "transfer_status": upload_result.transfer_status,
+            "remote_successes": upload_result.remote_successes,
+            "remote_failures": upload_result.remote_failures,
+            "local_chunks": upload_result.local_chunks,
+            "compressed_chunks": upload_result.compressed_chunks,
+            "raid_level": 1,
+            "raid_mode": "dynamic_mirror",
+            "desired_replicas": desired_replicas,
+            "dynamic_mirror_cap": 4,
+            "replicated_chunks": upload_result.replicated_chunks,
+            "under_replicated_chunks": upload_result.under_replicated_chunks,
+            "raw_bytes": upload_result.raw_bytes,
+            "stored_bytes": upload_result.stored_bytes,
+            "background_replication": False,
+            "primary_peer_id": primary.node_id,
+            "delegated_replication": delegation_info or {"delegated": False, "primary_peer_id": primary.node_id},
+            "remote_primary_uploaded_at": datetime.now(timezone.utc).isoformat(),
+        }
+
+    def _run_remote_primary_upload(
+        *,
+        temp_path: Path,
+        safe_name: str,
+        folder_path: str,
+        upload_id: str,
+        storage_peers: list[Any],
+    ) -> tuple[FileManifest, Any, str]:
+        if not storage_peers:
+            raise StorageError("Lokaler Speicher ist voll und es ist kein erreichbarer Speicher-Peer aktiv")
+        file_size = temp_path.stat().st_size
+        ranked = rank_peers_by_speed(storage_peers, p2p_client)
+        if not ranked:
+            raise StorageError("Lokaler Speicher ist voll und kein Direct-/Gateway-Speicher-Peer ist erreichbar")
+        primary = ranked[0]
+        upload_progress.update(
+            upload_id,
+            phase="remote_primary_upload",
+            status="Lokaler Speicher reicht nicht; Datei wird einmalig an den schnellsten Peer übertragen…",
+            percent=45,
+            server_percent=8,
+            total_bytes=file_size,
+            target_count=len(ranked),
+            current_peer=primary.to_dict().get("display_name") or primary.node_id[:12],
+            details={"remotePrimaryUpload": True, "primaryPeer": primary.node_id},
+        )
+        upload_result = distribute_file_chunks(
+            source_path=temp_path,
+            chunk_store=chunk_store,
+            local_node_id=identity.node_id,
+            peers=[primary],
+            p2p_client=p2p_client,
+            progress_callback=_upload_server_progress(upload_id),
+            chunk_size_bytes=chunk_store.chunk_size,
+        )
+        primary_chunks = sum(1 for chunk in upload_result.chunks if primary.node_id in [str(node_id) for node_id in chunk.get("locations", [])])
+        if primary_chunks != len(upload_result.chunks):
+            raise StorageError("Remote-Upload fehlgeschlagen: der erste Peer hat nicht alle Chunks bestätigt")
+        placement = _remote_primary_upload_placement(upload_result, ranked, primary)
+        upload_progress.update(
+            upload_id,
+            phase="manifest",
+            status="Remote-Manifest wird geschrieben; der erste Peer verteilt danach intern weiter…",
+            percent=96,
+            server_percent=92,
+            raw_bytes_processed=upload_result.raw_bytes,
+            stored_bytes=upload_result.stored_bytes,
+            compressed_chunks=upload_result.compressed_chunks,
+            local_chunks=upload_result.local_chunks,
+            remote_successes=upload_result.remote_successes,
+            remote_failures=upload_result.remote_failures,
+            desired_replicas=placement["desired_replicas"],
+            target_count=len(placement["targets"]),
+            details={"remotePrimaryUpload": True, "primaryPeer": primary.node_id},
+        )
+        manifest = manifest_store.create_from_chunk_entries(
+            file_name=safe_name,
+            file_size=file_size,
+            chunk_entries=upload_result.chunks,
+            identity=identity,
+            folder_path=folder_path,
+            placement=placement,
+        )
+        delegation_info: dict[str, Any] = {
+            "delegated": False,
+            "primary_peer_id": primary.node_id,
+            "primary_chunks": primary_chunks,
+            "candidate_peer_count": len(ranked),
+        }
+        if len(ranked) > 1:
+            try:
+                payload = p2p_client.post_replication_delegation(
+                    primary,
+                    manifest=manifest,
+                    exclude_node_ids=[identity.node_id],
+                )
+                upload_result = _merge_peer_delegation_payload(upload_result, payload)
+                delegation_info.update({
+                    "delegated": True,
+                    "delegated_peer_count": int(payload.get("peer_count") or 0),
+                    "delegated_remote_successes": int(payload.get("remote_successes") or 0),
+                    "delegated_remote_failures": int(payload.get("remote_failures") or 0),
+                })
+                placement = _remote_primary_upload_placement(upload_result, ranked, primary, delegation_info)
+                manifest = manifest_store.update_placement(
+                    manifest.manifest_id,
+                    identity,
+                    chunks=upload_result.chunks,
+                    placement=placement,
+                )
+            except StorageError as exc:
+                delegation_info["delegation_error"] = str(exc)
+                placement = _remote_primary_upload_placement(upload_result, ranked, primary, delegation_info)
+                manifest = manifest_store.update_placement(
+                    manifest.manifest_id,
+                    identity,
+                    placement=placement,
+                )
+        message = (
+            f"Datei remote gespeichert: {safe_name}; Primär-Peer {primary.to_dict().get('display_name') or primary.node_id[:12]} "
+            "übernimmt die weitere Direct-/Gateway-Verteilung."
+        )
+        upload_progress.finish(
+            upload_id,
+            ok=True,
+            message=message,
+            details={
+                "manifestId": manifest.manifest_id,
+                "transferStatus": upload_result.transfer_status,
+                "remotePrimaryUpload": True,
+                "primaryPeer": primary.node_id,
+                "delegatedReplication": delegation_info,
+            },
+        )
+        return manifest, upload_result, message
+
     def _run_local_first_upload(
         *,
         temp_path: Path,
@@ -4693,6 +4855,14 @@ def create_app(
             target_count=len(storage_peers) + 1,
             details={"peerTargets": [peer.to_dict().get("display_name") or peer.node_id[:12] for peer in storage_peers]},
         )
+        if storage_peers and not _local_chunk_store_can_fit(file_size):
+            return _run_remote_primary_upload(
+                temp_path=temp_path,
+                safe_name=safe_name,
+                folder_path=folder_path,
+                upload_id=upload_id,
+                storage_peers=storage_peers,
+            )
         upload_progress.update(
             upload_id,
             phase="local_chunking",
@@ -4701,15 +4871,34 @@ def create_app(
             server_percent=8,
             details={"backgroundReplication": bool(storage_peers)},
         )
-        upload_result = distribute_file_chunks(
-            source_path=temp_path,
-            chunk_store=chunk_store,
-            local_node_id=identity.node_id,
-            peers=[],
-            p2p_client=p2p_client,
-            progress_callback=_upload_server_progress(upload_id),
-            chunk_size_bytes=chunk_store.chunk_size,
-        )
+        try:
+            upload_result = distribute_file_chunks(
+                source_path=temp_path,
+                chunk_store=chunk_store,
+                local_node_id=identity.node_id,
+                peers=[],
+                p2p_client=p2p_client,
+                progress_callback=_upload_server_progress(upload_id),
+                chunk_size_bytes=chunk_store.chunk_size,
+            )
+        except StorageError:
+            if not storage_peers:
+                raise
+            upload_progress.update(
+                upload_id,
+                phase="remote_primary_upload",
+                status="Lokaler Speicher wurde während des Schreibens knapp; Wechsel auf Remote-Primary-Upload…",
+                percent=45,
+                server_percent=8,
+                details={"remotePrimaryUpload": True, "fallbackAfterLocalFull": True},
+            )
+            return _run_remote_primary_upload(
+                temp_path=temp_path,
+                safe_name=safe_name,
+                folder_path=folder_path,
+                upload_id=upload_id,
+                storage_peers=storage_peers,
+            )
         placement = _local_first_upload_placement(upload_result, storage_peers)
         upload_progress.update(
             upload_id,
@@ -6882,6 +7071,8 @@ def create_app(
                     index=int(item["index"]),
                     compression=item.get("compression"),
                     digest=str(item["digest"]),
+                    validate=False,
+                    sync=False,
                 )
                 stored.append(info.hash)
             _sync_peer_connector_settings()
@@ -6916,6 +7107,8 @@ def create_app(
                     index=index,
                     compression=compression,
                     digest=digest,
+                    validate=False,
+                    sync=False,
                 )
                 stored.append(digest)
             _sync_peer_connector_settings()
