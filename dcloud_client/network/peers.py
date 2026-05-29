@@ -239,6 +239,9 @@ class Peer:
     scheme: str | None = None
     lan_addresses: list[str] = field(default_factory=list)
     chunk_inventory: dict[str, list[str]] = field(default_factory=dict)
+    gateway_node_id: str | None = None
+    gateway_display_name: str | None = None
+    gateway_public_urls: list[str] = field(default_factory=list)
     chat_enabled: bool = True
     chat_alias: str | None = None
     last_seen: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
@@ -252,6 +255,11 @@ class Peer:
         """
         if self.relay_url and self.host == "__relay__":
             return (f"relay:{self.relay_url}", 0, self.node_id)
+        if self.route_via_node_id:
+            # Many internal peers can legitimately share the same public
+            # gateway host/port.  Keep their node IDs in the endpoint key so
+            # B and C behind gateway A do not evict each other.
+            return (f"gateway:{self.route_via_node_id}:{self.host}", int(self.web_port or self.udp_port or 0), self.node_id)
         return (self.host, self.udp_port, self.route_via_node_id)
 
     def to_dict(self, *, include_chunk_inventory: bool = False) -> dict[str, Any]:
@@ -282,9 +290,13 @@ class Peer:
             # download source selection.
             "tracker_manifest_count": inventory_manifest_count,
             "tracker_chunk_count": inventory_chunk_count,
+            "gateway_node_id": self.gateway_node_id or self.route_via_node_id,
+            "gateway_display_name": self.gateway_display_name,
+            "gateway_public_urls": list(self.gateway_public_urls),
+            "reachable_via_gateway": bool(self.route_via_node_id or self.gateway_node_id),
             "chat_enabled": bool(self.chat_enabled),
             "chat_alias": self.chat_alias,
-            "transport": "relay" if self.host == "__relay__" else ("direct+relay" if self.relay_url else "direct"),
+            "transport": "gateway" if self.route_via_node_id else ("relay" if self.host == "__relay__" else ("direct+relay" if self.relay_url else "direct")),
             "display_name": display_name_for_peer(self.node_id, self.name),
             "last_seen": self.last_seen.isoformat(),
             "last_seen_age_seconds": round(age, 1),
@@ -359,6 +371,9 @@ class InMemoryPeerProvider:
                 peer.public_host = peer.public_host if peer.public_host is not None else existing.public_host
                 peer.public_port = peer.public_port if peer.public_port is not None else existing.public_port
                 peer.public_urls = merge_public_urls(peer.public_urls, existing.public_urls)
+                peer.gateway_node_id = peer.gateway_node_id if peer.gateway_node_id is not None else existing.gateway_node_id
+                peer.gateway_display_name = peer.gateway_display_name if peer.gateway_display_name is not None else existing.gateway_display_name
+                peer.gateway_public_urls = merge_public_urls(peer.gateway_public_urls, existing.gateway_public_urls)
                 peer.scheme = peer.scheme if peer.scheme is not None else existing.scheme
                 peer.lan_addresses = merge_lan_addresses(peer.lan_addresses, existing.lan_addresses, [peer.host, existing.host])
                 peer.chunk_inventory = merge_chunk_inventory(peer.chunk_inventory, existing.chunk_inventory)

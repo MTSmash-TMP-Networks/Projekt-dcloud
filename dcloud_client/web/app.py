@@ -2016,17 +2016,25 @@ def create_app(
             port = parsed.port or (443 if parsed.scheme == "https" else int(getattr(config.web, "port", 8787) or 8787))
         except Exception:
             return None
+        via_gateway = _safe_peer_id(str(route.get("via_gateway_node_id") or ""))
+        gateway_name = str(route.get("gateway_display_name") or "").strip() or None
         return Peer(
             node_id=node_id,
             host=host,
             udp_port=0,
             name=str(route.get("display_name") or route.get("name") or "") or None,
+            route_via_node_id=via_gateway,
+            gateway_node_id=via_gateway,
+            gateway_display_name=gateway_name,
+            gateway_public_urls=urls if via_gateway else [],
             web_port=int(port),
             public_host=host,
             public_port=int(port),
             public_urls=urls,
             scheme=(parsed.scheme or "http").lower(),
-            accepts_peer_storage=True,
+            client_type=str(route.get("client_type") or "server") if str(route.get("client_type") or "server") in {"server"} else None,
+            accepts_peer_storage=bool(route.get("accepts_peer_storage", True)),
+            free_storage_bytes=int(route.get("free_storage_bytes") or 0) or None,
         )
 
     def _load_manual_peer_routes() -> None:
@@ -2053,6 +2061,7 @@ def create_app(
                         urls.append(normalized)
                 if not urls:
                     continue
+                via_gateway = _safe_peer_id(str(item.get("via_gateway_node_id") or ""))
                 loaded[safe_id] = {
                     "node_id": safe_id,
                     "display_name": str(item.get("display_name") or item.get("name") or safe_id[:12]),
@@ -2061,6 +2070,12 @@ def create_app(
                     "updated_at": float(item.get("updated_at") or time.time()),
                     "last_ok_at": float(item.get("last_ok_at") or 0),
                     "last_error": str(item.get("last_error") or ""),
+                    "via_gateway_node_id": via_gateway or "",
+                    "gateway_display_name": str(item.get("gateway_display_name") or ""),
+                    "source": "gateway" if via_gateway else "manual",
+                    "client_type": str(item.get("client_type") or "server"),
+                    "accepts_peer_storage": bool(item.get("accepts_peer_storage", True)),
+                    "free_storage_bytes": int(item.get("free_storage_bytes") or 0),
                 }
             manual_peer_routes = loaded
         except FileNotFoundError:
@@ -2134,6 +2149,10 @@ def create_app(
             }
             _persist_manual_peer_routes()
         peer_provider.add_or_update(peer)
+        try:
+            _sync_gateway_peers_from_peer(peer, force=True)
+        except Exception:
+            LOG.debug("Gateway peer discovery from %s failed", peer.node_id, exc_info=True)
         return peer
 
     def _manual_peer_routes_payload() -> list[dict[str, Any]]:
@@ -2150,12 +2169,93 @@ def create_app(
                     "last_ok_at": float(route.get("last_ok_at") or 0),
                     "last_error": str(route.get("last_error") or ""),
                     "active": str(route.get("node_id") or "") in active_ids,
+                    "via_gateway_node_id": str(route.get("via_gateway_node_id") or ""),
+                    "gateway_display_name": str(route.get("gateway_display_name") or ""),
+                    "source": str(route.get("source") or ("gateway" if route.get("via_gateway_node_id") else "manual")),
                 }
                 for route in routes
                 if str(route.get("node_id") or "")
             ],
             key=lambda item: str(item.get("display_name") or "").lower(),
         )
+
+    def _gateway_urls_for_peer(peer: Peer) -> list[str]:
+        urls: list[str] = []
+        for raw in list(getattr(peer, "public_urls", []) or []):
+            try:
+                normalized = _normalize_direct_peer_url(raw)
+            except ValueError:
+                continue
+            if normalized not in urls:
+                urls.append(normalized)
+        if not urls:
+            scheme = str(getattr(peer, "scheme", None) or "http").lower()
+            host = str(getattr(peer, "host", "") or "").strip().strip("[]")
+            port = int(getattr(peer, "web_port", 0) or getattr(config.web, "port", 8787) or 8787)
+            if host and host != RELAY_HOST:
+                host_part = f"[{host}]" if ":" in host and not host.startswith("[") else host
+                default_port = 443 if scheme == "https" else 80
+                urls.append(f"{scheme}://{host_part}" if port == default_port else f"{scheme}://{host_part}:{port}")
+        return urls[:8]
+
+    def _store_gateway_peer_route(gateway_peer: Peer, peer_info: dict[str, Any]) -> bool:
+        node_id = _safe_peer_id(str(peer_info.get("node_id") or ""))
+        if not node_id or node_id in {identity.node_id, gateway_peer.node_id}:
+            return False
+        if node_id in _disabled_peer_ids():
+            return False
+        gateway_urls = _gateway_urls_for_peer(gateway_peer)
+        if not gateway_urls:
+            return False
+        now = time.time()
+        display_name = str(peer_info.get("display_name") or peer_info.get("name") or display_name_for_peer(node_id)).strip()
+        gateway_label = display_name_for_peer(gateway_peer.node_id, gateway_peer.name)
+        with manual_peer_routes_lock:
+            existing = manual_peer_routes.get(node_id, {})
+            # A manually configured direct endpoint is stronger than a learned
+            # gateway route. Keep it and only refresh gateway metadata if it was
+            # already a gateway entry.
+            if existing and not existing.get("via_gateway_node_id"):
+                return False
+            manual_peer_routes[node_id] = {
+                "node_id": node_id,
+                "display_name": display_name,
+                "urls": gateway_urls,
+                "created_at": float(existing.get("created_at") or now),
+                "updated_at": now,
+                "last_ok_at": now,
+                "last_error": "",
+                "via_gateway_node_id": gateway_peer.node_id,
+                "gateway_display_name": gateway_label,
+                "source": "gateway",
+                "client_type": str(peer_info.get("client_type") or "server"),
+                "accepts_peer_storage": bool(peer_info.get("accepts_peer_storage", True)),
+                "free_storage_bytes": int(peer_info.get("free_storage_bytes") or 0),
+            }
+            _persist_manual_peer_routes()
+            route = dict(manual_peer_routes[node_id])
+        routed_peer = _manual_route_to_peer(route)
+        if routed_peer is not None:
+            peer_provider.add_or_update(routed_peer)
+        return True
+
+    def _sync_gateway_peers_from_peer(gateway_peer: Peer, *, force: bool = False) -> int:
+        if not gateway_peer or getattr(gateway_peer, "route_via_node_id", None):
+            return 0
+        try:
+            known_peers = p2p_client.get_known_peers(gateway_peer)
+        except Exception:
+            if force:
+                LOG.debug("Gateway peer-list request to %s failed", gateway_peer.node_id, exc_info=True)
+            return 0
+        count = 0
+        for peer_info in known_peers:
+            try:
+                if _store_gateway_peer_route(gateway_peer, peer_info):
+                    count += 1
+            except Exception:
+                LOG.debug("Could not store gateway peer route from %s", gateway_peer.node_id, exc_info=True)
+        return count
 
     def _refresh_manual_peer_routes(*, force: bool = False, min_interval_seconds: float = 20.0) -> None:
         nonlocal last_manual_peer_route_refresh_at
@@ -2166,10 +2266,30 @@ def create_app(
         with manual_peer_routes_lock:
             route_items = [dict(route) for route in manual_peer_routes.values()]
         changed = False
+        active_by_id = {peer.node_id: peer for peer in peer_provider.list_peers()}
         for route in route_items:
             node_id = _safe_peer_id(str(route.get("node_id") or ""))
             urls = [str(url) for url in route.get("urls", []) if str(url)] if isinstance(route.get("urls"), list) else []
             if not node_id or not urls:
+                continue
+            via_gateway = _safe_peer_id(str(route.get("via_gateway_node_id") or ""))
+            if via_gateway:
+                gateway_peer = active_by_id.get(via_gateway)
+                routed_peer = _manual_route_to_peer(route)
+                if gateway_peer is not None and routed_peer is not None:
+                    peer_provider.add_or_update(routed_peer)
+                    with manual_peer_routes_lock:
+                        current = manual_peer_routes.get(node_id)
+                        if current is not None:
+                            current["last_ok_at"] = now
+                            current["last_error"] = ""
+                            changed = True
+                else:
+                    with manual_peer_routes_lock:
+                        current = manual_peer_routes.get(node_id)
+                        if current is not None:
+                            current["last_error"] = "Gateway aktuell nicht erreichbar"
+                            changed = True
                 continue
             last_error = ""
             for endpoint in urls:
@@ -2179,6 +2299,8 @@ def create_app(
                         last_error = "Endpunkt meldet eine andere Node-ID"
                         continue
                     peer_provider.add_or_update(peer)
+                    active_by_id[peer.node_id] = peer
+                    _sync_gateway_peers_from_peer(peer)
                     with manual_peer_routes_lock:
                         current = manual_peer_routes.get(node_id)
                         if current is not None:
@@ -2198,6 +2320,7 @@ def create_app(
         if changed:
             with manual_peer_routes_lock:
                 _persist_manual_peer_routes()
+
 
 
     def _load_external_download_links() -> None:
@@ -5461,7 +5584,7 @@ def create_app(
         chunk_meta = next((dict(chunk) for chunk in manifest.chunks if str(chunk.get("hash") or "") == safe_digest), None)
         if chunk_meta is None:
             return None
-        requester_node_id = str(request.environ.get("dcloud.p2p_node_id") or "").strip()
+        requester_node_id = _effective_p2p_requester_node_id()
         active_peers = _list_active_peers()
         ranked = rank_peers_by_speed(active_peers, p2p_client) if active_peers else []
         peers_by_id = {peer.node_id: peer for peer in [*active_peers, *ranked]}
@@ -6195,6 +6318,96 @@ def create_app(
             abort(503, str(exc))
         return send_file(output, as_attachment=True, download_name=manifest.file_name)
 
+    def _gateway_proxy_target_peer(target_node_id: str) -> Peer | None:
+        target = _safe_peer_id(str(target_node_id or ""))
+        if not target or target == identity.node_id:
+            return None
+        for peer in _list_active_peers():
+            if peer.node_id == target and not getattr(peer, "route_via_node_id", None):
+                return peer
+        return None
+
+    def _gateway_proxy_to_target(target_node_id: str, subpath: str) -> Response:
+        target_peer = _gateway_proxy_target_peer(target_node_id)
+        if target_peer is None:
+            return jsonify({"ok": False, "message": "Gateway-Zielpeer ist hier aktuell nicht direkt erreichbar"}), 404
+        safe_subpath = str(subpath or "").lstrip("/")
+        allowed_prefixes = (
+            "chunks/",
+            "manifests",
+            "manifests/",
+            "files/delete",
+            "replication/delegate",
+        )
+        if not safe_subpath or not safe_subpath.startswith(allowed_prefixes):
+            return jsonify({"ok": False, "message": "Gateway-Pfad ist nicht erlaubt"}), 403
+        path = "/api/p2p/" + safe_subpath
+        if request.query_string:
+            path_with_query = path + "?" + request.query_string.decode("ascii", errors="ignore")
+        else:
+            path_with_query = path
+        body = request.get_data(cache=True) if request.method.upper() != "GET" else b""
+        headers: dict[str, str] = {"Accept": request.headers.get("Accept", "application/json")}
+        content_type = request.headers.get("Content-Type")
+        if content_type:
+            headers["Content-Type"] = content_type
+        for key, value in request.headers.items():
+            lowered = key.lower()
+            if lowered.startswith("x-dcloud-chunk-") or lowered in {"x-dcloud-batch-count", "x-dcloud-pack-format"}:
+                headers[key] = value
+        original_requester = str(request.environ.get("dcloud.p2p_node_id") or "").strip()
+        if original_requester:
+            headers["X-DCloud-Gateway-Requester-Node-Id"] = original_requester
+        signed_headers = p2p_client._signed_headers(request.method.upper(), path_with_query, body, headers)
+        url = f"{p2p_client.api_base(target_peer)}{path_with_query}"
+        req = url_request.Request(url, data=body if request.method.upper() != "GET" else None, headers=signed_headers, method=request.method.upper())
+        try:
+            with url_request.urlopen(req, timeout=max(8.0, p2p_client.timeout * 3)) as response:
+                response_body = response.read()
+                out = Response(response_body, status=int(response.status))
+                content_type_out = response.headers.get("Content-Type")
+                if content_type_out:
+                    out.headers["Content-Type"] = content_type_out
+                for header_name in ("X-DCloud-Pack-Format", "X-DCloud-Max-Chunks", "X-DCloud-Max-Payload-Bytes"):
+                    value = response.headers.get(header_name)
+                    if value:
+                        out.headers[header_name] = value
+                return out
+        except url_error.HTTPError as exc:
+            body = exc.read()
+            out = Response(body, status=int(exc.code))
+            content_type_out = exc.headers.get("Content-Type") if exc.headers else None
+            if content_type_out:
+                out.headers["Content-Type"] = content_type_out
+            return out
+        except Exception as exc:
+            return jsonify({"ok": False, "message": f"Gateway-Weiterleitung fehlgeschlagen: {exc}"}), 502
+
+    @app.get("/api/p2p/peers")
+    def api_p2p_known_peers() -> Response:
+        requester_node_id = str(request.environ.get("dcloud.p2p_node_id") or "").strip()
+        peers: list[dict[str, Any]] = []
+        gateway_urls = []
+        for peer in _list_active_peers():
+            if peer.node_id in {identity.node_id, requester_node_id}:
+                continue
+            # Do not re-export peers that we only know through another gateway;
+            # otherwise two gateways could create routing loops.  We only export
+            # peers this node can currently address directly in its own LAN/manual mesh.
+            if getattr(peer, "route_via_node_id", None):
+                continue
+            item = peer.to_dict()
+            item["reachable_via_gateway"] = True
+            item["gateway_node_id"] = identity.node_id
+            item["gateway_display_name"] = display_name_for_peer(identity.node_id, config.node.name)
+            item["gateway_public_urls"] = gateway_urls
+            peers.append(item)
+        return jsonify({"ok": True, "gateway_node_id": identity.node_id, "peers": peers, "count": len(peers)})
+
+    @app.route("/api/p2p/gateway/<target_node_id>/<path:subpath>", methods=["GET", "POST"])
+    def api_p2p_gateway_proxy(target_node_id: str, subpath: str) -> Response:
+        return _gateway_proxy_to_target(target_node_id, subpath)
+
     @app.get("/api/p2p/chunks/<digest>")
     def api_p2p_get_chunk(digest: str) -> Response:
         try:
@@ -6573,9 +6786,22 @@ def create_app(
         except (ValueError, TypeError, StorageError) as exc:
             return jsonify({"ok": False, "message": str(exc), "state": state_payload()}), 400
 
+    def _effective_p2p_requester_node_id() -> str:
+        signed_node_id = str(request.environ.get("dcloud.p2p_node_id") or "").strip()
+        gateway_requester = _safe_peer_id(str(request.headers.get("X-DCloud-Gateway-Requester-Node-Id") or ""))
+        if gateway_requester and gateway_requester != signed_node_id:
+            # Only honor gateway requester forwarding when the signer is a
+            # currently known peer.  Direct callers cannot impersonate another
+            # node just by adding this header; a gateway in the direct mesh must
+            # be the signer.
+            active_ids = {peer.node_id for peer in peer_provider.list_peers()}
+            if signed_node_id in active_ids:
+                return gateway_requester
+        return signed_node_id
+
     @app.get("/api/p2p/manifests/shared")
     def api_p2p_shared_manifests() -> Response:
-        requester_node_id = str(request.environ.get("dcloud.p2p_node_id") or "").strip()
+        requester_node_id = _effective_p2p_requester_node_id()
         if not requester_node_id:
             return jsonify({"ok": False, "message": "P2P requester missing"}), 403
         manifests = []
@@ -6596,7 +6822,7 @@ def create_app(
         owner = str(owner_node_id or "").strip()
         if not owner:
             return jsonify({"ok": False, "message": "Owner node id missing"}), 400
-        requester_node_id = str(request.environ.get("dcloud.p2p_node_id") or "").strip()
+        requester_node_id = _effective_p2p_requester_node_id()
         manifests = []
         for manifest in manifest_store.list_manifests():
             if manifest.owner_node_id != owner:
@@ -6734,6 +6960,8 @@ def create_app(
             "web_port": int(getattr(config.web, "port", 8787) or 8787),
             "relay_data_enabled": False,
             "relay_removed": True,
+            "gateway_discovery": True,
+            "gateway_proxy": True,
         }
 
     app.config["DCLOUD_STOP_RELAYS"] = _stop_relay_transport

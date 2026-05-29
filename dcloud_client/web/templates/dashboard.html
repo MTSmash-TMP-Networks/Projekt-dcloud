@@ -999,7 +999,7 @@
             <input id="settings-relay-enabled" type="hidden" name="relay_enabled" value="">
             <textarea id="settings-relay-url" rows="1" readonly hidden></textarea>
             <textarea id="settings-relay-urls" name="relay_server_urls" rows="1" hidden></textarea>
-            <p class="settings-note" id="settings-relay-note"><strong>Direct-Peer-Modus:</strong> Peers werden manuell über LAN-, NAT-/DDNS- oder Reverse-Proxy-Endpunkte verbunden. Dateiübertragung, Freigaben, Gateway-Zugriff und externe Links laufen nur über direkte Peer-Routen.</p>
+            <p class="settings-note" id="settings-relay-note"><strong>Direct-Peer-Modus:</strong> Peers werden manuell über LAN-, NAT-/DDNS- oder Reverse-Proxy-Endpunkte verbunden. Wenn hinter einem eingetragenen Endpunkt weitere Peers im LAN hängen, meldet der Endpunkt diese automatisch als <strong>Gateway-Peers</strong>. Daten und Freigaben laufen dann über diesen Gateway-Peer weiter ins interne Netz.</p>
             <p class="settings-note"><strong>Empfehlung:</strong> Einen Gateway-Peer öffentlich freigeben und interne Peers dahinter per LAN anbinden.</p>
           </section>
 
@@ -1020,7 +1020,7 @@
         </form>
 
         <hr style="border:0;border-top:1px solid #d8e4f6;margin:1.1rem 0;">
-        <p>Peers manuell eintragen oder per LAN-Discovery finden. Internet-Peers benötigen einen NAT-/DDNS-Endpunkt oder Reverse Proxy.</p>
+        <p>Peers manuell eintragen oder per LAN-Discovery finden. Internet-Peers benötigen einen NAT-/DDNS-Endpunkt oder Reverse Proxy. Ein öffentlicher Gateway-Peer kann dahinterliegende interne Peers bekannt machen und für sie weiterleiten.</p>
         <form method="post" action="/peers" class="settings-form">
           <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
           <label for="settings-peer">LAN/UDP-Peer-Adresse (host:port)</label>
@@ -1043,7 +1043,7 @@
               <button type="button" class="explorer-btn" id="settings-nat-refresh">Endpunkte prüfen</button>
             </div>
           </div>
-          <ul class="status-list" id="settings-manual-routes"><li>Keine direkten NAT-/DDNS-Endpunkte gespeichert.</li></ul>
+          <ul class="status-list" id="settings-manual-routes"><li>Keine direkten NAT-/DDNS-Endpunkte oder Gateway-Peers gespeichert.</li></ul>
         </section>
         <div style="margin-top:1rem;">
           <strong>Automatische Netzwerksuche:</strong>
@@ -1174,7 +1174,7 @@
           <select id="sharePeerSelect" name="peer_node_id"></select>
           <label for="shareNatEndpoint">Oder NAT-/DDNS-Endpunkt direkt eintragen</label>
           <input id="shareNatEndpoint" type="text" placeholder="https://peer.example.de oder mein-ddns.net:8787">
-          <p class="settings-note" id="sharePeerHelp">Wenn ein NAT-/DDNS-Endpunkt eingetragen ist, wird er zuerst geprüft und die Freigabe direkt an diesen Peer gesendet. Große Daten laufen anschließend direkt Peer↔Peer/Gateway. Es gibt keinen indirekten Datenweg mehr.</p>
+          <p class="settings-note" id="sharePeerHelp">Wenn ein NAT-/DDNS-Endpunkt eingetragen ist, wird er zuerst geprüft und gespeichert. Hängen hinter diesem Endpunkt weitere Peers, erscheinen sie danach als „über Gateway erreichbar“. Freigaben an solche Peers werden über den Gateway-Peer zugestellt; große Daten laufen über direkte Peer-/Gateway-Routen.</p>
           <div class="dialog-actions">
             <button type="button" class="explorer-btn" id="shareDialogCancel">Abbrechen</button>
             <button type="submit" class="explorer-btn">Freigeben</button>
@@ -2377,7 +2377,7 @@
         list.innerHTML = "";
         if(!routes.length){
           const item = document.createElement("li");
-          item.textContent = "Keine direkten NAT-/DDNS-Endpunkte gespeichert.";
+          item.textContent = "Keine direkten NAT-/DDNS-Endpunkte oder Gateway-Peers gespeichert.";
           list.appendChild(item);
           return;
         }
@@ -2387,14 +2387,17 @@
           const text = document.createElement("span");
           const label = route.display_name || String(route.node_id || "Peer").slice(0, 12);
           const urls = Array.isArray(route.urls) ? route.urls.join(", ") : "";
+          const viaGateway = route.via_gateway_node_id || "";
+          const gatewayName = route.gateway_display_name || String(viaGateway).slice(0, 12);
+          const kind = viaGateway ? `Gateway-Peer über ${gatewayName}` : "direkter Endpunkt";
           const status = route.active ? "aktiv" : (route.last_error ? `nicht erreichbar: ${route.last_error}` : "wartet");
-          text.textContent = `${label} · ${urls} · ${status}`;
+          text.textContent = `${label} · ${kind} · ${urls} · ${status}`;
           const removeBtn = document.createElement("button");
           removeBtn.type = "button";
           removeBtn.className = "explorer-btn";
           removeBtn.textContent = "Entfernen";
           removeBtn.addEventListener("click", async () => {
-            if(!confirm(`Direkten Endpunkt entfernen?\n${label}`)) return;
+            if(!confirm(`Peer-/Gateway-Route entfernen?\n${label}`)) return;
             try{ await ajaxPost("/api/peer-routes/remove", { peer_id: route.node_id }); }
             catch(error){ showToast(error.message || "Endpunkt konnte nicht entfernt werden", "error"); }
           });
@@ -3805,13 +3808,17 @@ ${folderPath}`)) return;
       function endpointHostLabel(host){
         return host && host.includes(":") && !host.startsWith("[") ? `[${host}]` : host;
       }
+      function peerGatewayName(peer){
+        return peer.gateway_display_name || (peer.gateway_node_id ? String(peer.gateway_node_id).slice(0, 12) : "Gateway");
+      }
       function peerApiEndpoint(peer){
         const webPort = peer.web_port || "";
         const candidates = peerDirectCandidates(peer);
         const host = candidates[0] || "";
-        if(!host) return webPort ? `API :${webPort}` : "API unbekannt";
+        if(!host) return peer.route_via_node_id ? `Gateway API über ${peerGatewayName(peer)}` : (webPort ? `API :${webPort}` : "API unbekannt");
         const endpoint = /^https?:\/\//i.test(host) ? host : (webPort ? `${endpointHostLabel(host)}:${webPort}` : endpointHostLabel(host));
-        return candidates.length > 1 ? `API ${endpoint} (+${candidates.length - 1})` : `API ${endpoint}`;
+        const prefix = peer.route_via_node_id ? `Gateway API über ${peerGatewayName(peer)}: ` : "API ";
+        return candidates.length > 1 ? `${prefix}${endpoint} (+${candidates.length - 1})` : `${prefix}${endpoint}`;
       }
       function peerInventarSummary(peer){
         const manifests = Number(peer.tracker_manifest_count || 0);
@@ -3824,6 +3831,9 @@ ${folderPath}`)) return;
         const publicIp = peerPublicIp(peer);
         const hostPort = peer.host && peer.host !== "__relay__" ? `${peer.host}:${peer.udp_port || "?"}` : "";
         const directCount = peerDirectCandidates(peer).length;
+        if(peer.route_via_node_id || peer.transport === "gateway"){
+          return `Route: über Gateway ${peerGatewayName(peer)}`;
+        }
         if(isRelayPeer(peer)){
           return directCount ? `Route: kein direkter Endpunkt, ${directCount} Direkt-Kandidat(en)` : "Route: kein direkter Endpunkt";
         }
@@ -3835,6 +3845,9 @@ ${folderPath}`)) return;
       }
       function peerTransferLabel(peer){
         const directCount = peerDirectCandidates(peer).length;
+        if(peer.route_via_node_id || peer.transport === "gateway"){
+          return `Transfer: über Gateway ${peerGatewayName(peer)}`;
+        }
         if(isRelayPeer(peer)){
           return directCount ? "Transfer: Direkt/Gateway" : "Transfer: kein direkter Datenweg";
         }

@@ -112,7 +112,11 @@ def _direct_peer_candidates(peer: Peer) -> list[Peer]:
         value = str(candidate.host or "").strip().strip("[]")
         if not value or value == RELAY_HOST:
             return
-        candidate = replace(candidate, host=value, route_via_node_id=None)
+        # Preserve route_via_node_id for gateway peers.  A gateway-routed peer
+        # uses the gateway host as transport destination, but the target node ID
+        # must survive so transfer methods can call /api/p2p/gateway/<target>/...
+        # instead of treating the gateway itself as the final peer.
+        candidate = replace(candidate, host=value)
         key = route_key(candidate)
         if key in seen:
             return
@@ -357,6 +361,13 @@ class P2PStorageClient:
             scheme = "http"
         return f"{scheme}://{host}:{port}"
 
+    def _path_for_peer(self, peer: Peer, path: str) -> str:
+        """Return the actual API path for direct or gateway-routed peers."""
+        if getattr(peer, "route_via_node_id", None):
+            suffix = path[len("/api/p2p"):] if path.startswith("/api/p2p") else path
+            return f"/api/p2p/gateway/{parse.quote(str(peer.node_id), safe='')}{suffix}"
+        return path
+
     def _relay_client_for(self, peer: Peer) -> HttpRelayClient | None:
         return None
 
@@ -432,6 +443,7 @@ class P2PStorageClient:
         if compression:
             headers["X-DCloud-Chunk-Compression"] = compression
         peer = self._prefer_direct_transfer_peer(peer)
+        path = self._path_for_peer(peer, path)
         if peer.host != RELAY_HOST:
             url = f"{self.api_base(peer)}{path}"
             req = request.Request(url, data=stored_data, headers=self._signed_headers("POST", path, stored_data, headers), method="POST")
@@ -513,6 +525,7 @@ class P2PStorageClient:
         response_body: bytes | None = None
         direct_error: Exception | None = None
         peer = self._prefer_direct_transfer_peer(peer, timeout=2.0)
+        path = self._path_for_peer(peer, path)
         if peer.host != RELAY_HOST:
             url = f"{self.api_base(peer)}{path}"
             req = request.Request(url, data=data, headers=self._signed_headers("POST", path, data, headers), method="POST")
@@ -576,6 +589,7 @@ class P2PStorageClient:
         headers = {"Content-Type": "application/json", "Accept": "application/json"}
         response_payload: dict[str, Any] = {}
         peer = self._prefer_direct_transfer_peer(peer, timeout=2.0)
+        path = self._path_for_peer(peer, path)
         if peer.host != RELAY_HOST:
             url = f"{self.api_base(peer)}{path}"
             req = request.Request(url, data=data, headers=self._signed_headers("POST", path, data, headers), method="POST")
@@ -669,6 +683,7 @@ class P2PStorageClient:
         direct_error: Exception | None = None
         pack_headers = {**headers, "Accept": "application/octet-stream"}
         peer = self._prefer_direct_transfer_peer(peer, timeout=2.0)
+        path = self._path_for_peer(peer, path)
 
         if peer.host != RELAY_HOST:
             url = f"{self.api_base(peer)}{path}"
@@ -749,6 +764,7 @@ class P2PStorageClient:
 
         path = "/api/p2p/chunks/batch/download"
         peer = self._prefer_direct_transfer_peer(peer, timeout=2.0)
+        path = self._path_for_peer(peer, path)
         if peer.host != RELAY_HOST:
             url = f"{self.api_base(peer)}{path}"
             req = request.Request(url, data=data, headers=self._signed_headers("POST", path, data, headers), method="POST")
@@ -785,6 +801,7 @@ class P2PStorageClient:
         path = f"/api/p2p/chunks/{parse.quote(digest)}"
         direct_error: Exception | None = None
         peer = self._prefer_direct_transfer_peer(peer)
+        path = self._path_for_peer(peer, path)
         if peer.host != RELAY_HOST:
             url = f"{self.api_base(peer)}{path}"
             req = request.Request(url, headers=self._signed_headers("GET", path, b"", {"Accept": "application/octet-stream"}), method="GET")
@@ -818,6 +835,7 @@ class P2PStorageClient:
         data = json.dumps(payload, sort_keys=True).encode("utf-8")
         headers = {"Content-Type": "application/json", "Accept": "application/json"}
         peer = self._prefer_direct_transfer_peer(peer)
+        path = self._path_for_peer(peer, path)
         if peer.host != RELAY_HOST:
             url = f"{self.api_base(peer)}{path}"
             req = request.Request(url, data=data, headers=self._signed_headers("POST", path, data, headers), method="POST")
@@ -855,6 +873,7 @@ class P2PStorageClient:
         request_timeout = max(float(timeout or self.timeout), self.timeout)
         direct_error: Exception | None = None
         peer = self._prefer_direct_transfer_peer(peer)
+        path = self._path_for_peer(peer, path)
 
         def parse_response(body: bytes) -> dict[str, Any]:
             parsed = json.loads(body.decode("utf-8", errors="replace"))
@@ -936,6 +955,7 @@ class P2PStorageClient:
         headers = {"Accept": "application/json"}
         direct_error: Exception | None = None
         peer = self._prefer_direct_transfer_peer(peer)
+        path = self._path_for_peer(peer, path)
         if peer.host != RELAY_HOST:
             url = f"{self.api_base(peer)}{path}"
             req = request.Request(url, headers=self._signed_headers("GET", path, b"", headers), method="GET")
@@ -967,6 +987,7 @@ class P2PStorageClient:
         headers = {"Accept": "application/json"}
         direct_error: Exception | None = None
         peer = self._prefer_direct_transfer_peer(peer)
+        path = self._path_for_peer(peer, path)
         if peer.host != RELAY_HOST:
             url = f"{self.api_base(peer)}{path}"
             req = request.Request(url, headers=self._signed_headers("GET", path, b"", headers), method="GET")
@@ -990,6 +1011,27 @@ class P2PStorageClient:
                 direct_error = exc
                 LOG.debug("Direct owner manifest recovery from peer %s failed", peer.node_id, exc_info=True)
         raise StorageError(f"Manifest-Wiederherstellung von Peer {peer.node_id} fehlgeschlagen: {direct_error}") from direct_error
+
+
+    def get_known_peers(self, peer: Peer) -> list[dict[str, Any]]:
+        """Fetch peers known behind/near a direct gateway peer."""
+        path = "/api/p2p/peers"
+        headers = {"Accept": "application/json"}
+        direct_error: Exception | None = None
+        peer = self._prefer_direct_transfer_peer(peer)
+        path = self._path_for_peer(peer, path)
+        if peer.host != RELAY_HOST:
+            url = f"{self.api_base(peer)}{path}"
+            req = request.Request(url, headers=self._signed_headers("GET", path, b"", headers), method="GET")
+            try:
+                with request.urlopen(req, timeout=max(self.timeout, 8.0)) as response:
+                    payload = json.loads(response.read().decode("utf-8", errors="replace"))
+                    peers = payload.get("peers", []) if isinstance(payload, dict) else []
+                    return [item for item in peers if isinstance(item, dict)]
+            except (OSError, error.URLError, error.HTTPError, ValueError, TypeError) as exc:
+                direct_error = exc
+                LOG.debug("Gateway peer-list sync from peer %s failed", peer.node_id, exc_info=True)
+        raise StorageError(f"Gateway-Peer-Liste von Peer {peer.node_id} konnte nicht geladen werden: {direct_error}") from direct_error
 
     def post_manifest_revocation(self, peer: Peer, revocation: dict[str, Any]) -> PeerTransferResult:
         return self._post_json_to_peer(
