@@ -56,8 +56,14 @@ CHUNK_PACK_MAGIC = b"DCLOUD-CHUNK-PACK-1\n"
 CHUNK_UPLOAD_PACK_MAGIC = b"DCLOUD-CHUNK-UPLOAD-PACK-1\n"
 MAX_DIRECT_UPLOAD_PACK_BYTES = 64 * 1024 * 1024
 MAX_RELAY_UPLOAD_PACK_BYTES = 0
+# Gateway routes are Python-to-Python direct proxy hops, not PHP relay, but the
+# public gateway still buffers and forwards one request to the internal peer.
+# Keep upload packs smaller than a same-LAN direct upload so large remote writes
+# make steady progress instead of occupying one gateway worker for too long.
+MAX_GATEWAY_UPLOAD_PACK_BYTES = 32 * 1024 * 1024
 MAX_DIRECT_UPLOAD_PACK_CHUNKS = 64
 MAX_RELAY_UPLOAD_PACK_CHUNKS = 0
+MAX_GATEWAY_UPLOAD_PACK_CHUNKS = 32
 
 
 @dataclass
@@ -374,6 +380,49 @@ class P2PStorageClient:
     def _relay_available(self, peer: Peer) -> bool:
         return False
 
+    def _probe_direct_http_route(self, peer: Peer, *, timeout: float | None = None) -> bool:
+        """Return True only when the *actual transfer target* answers.
+
+        For direct peers this checks /healthz on the peer itself.  For peers
+        learned behind a gateway it checks /api/p2p/ping through the gateway, so
+        uploads do not count a storage peer as active merely because the public
+        gateway is reachable.  This mirrors the download path: the route is
+        usable only when the gateway can reach the internal target now.
+        """
+        probe_timeout = max(0.5, min(float(timeout if timeout is not None else self.timeout), 3.0))
+        try:
+            if getattr(peer, "route_via_node_id", None):
+                path = self._path_for_peer(peer, "/api/p2p/ping")
+                url = f"{self.api_base(peer)}{path}"
+                headers = self._signed_headers("GET", path, b"", {"Accept": "application/json"})
+                req = request.Request(url, headers=headers, method="GET")
+            else:
+                url = f"{self.api_base(peer)}/healthz"
+                req = request.Request(url, headers={"Accept": "application/json"}, method="GET")
+            with request.urlopen(req, timeout=probe_timeout) as response:
+                if not 200 <= response.status < 300:
+                    return False
+                body = response.read(64 * 1024)
+            try:
+                payload = json.loads(body.decode("utf-8", errors="replace"))
+            except Exception:
+                # Older direct peers may answer healthz with a tiny non-JSON OK.
+                # Gateway-routed peers must answer the signed ping with JSON so
+                # we can verify that the target, not just the gateway, answered.
+                return not bool(getattr(peer, "route_via_node_id", None))
+            if isinstance(payload, dict):
+                reported_node_id = str(payload.get("node_id") or "").strip()
+                if reported_node_id and reported_node_id != str(peer.node_id):
+                    return False
+                if payload.get("ok") is False:
+                    return False
+                status = str(payload.get("status") or "ok").lower()
+                return status in {"ok", "ready", "active"}
+            return False
+        except (OSError, error.URLError, error.HTTPError):
+            LOG.debug("Direct transfer target probe for peer %s failed", peer.node_id, exc_info=True)
+            return False
+
     def _direct_route_for_transfer(self, peer: Peer, *, timeout: float | None = None) -> Peer | None:
         """Return a currently reachable direct route for a peer, if any.
 
@@ -382,16 +431,10 @@ class P2PStorageClient:
         compatibility fallbacks also bypass PHP when relay-discovered peers have
         advertised LAN addresses.
         """
-        probe_timeout = max(0.5, min(float(timeout if timeout is not None else self.timeout), 2.0))
+        probe_timeout = max(0.5, min(float(timeout if timeout is not None else self.timeout), 3.0))
         for direct_peer in _direct_peer_candidates(peer):
-            try:
-                url = f"{self.api_base(direct_peer)}/healthz"
-                req = request.Request(url, method="GET")
-                with request.urlopen(req, timeout=probe_timeout) as response:
-                    if 200 <= response.status < 300:
-                        return direct_peer
-            except (OSError, error.URLError, error.HTTPError):
-                LOG.debug("Direct transfer route for peer %s via %s failed", peer.node_id, direct_peer.host, exc_info=True)
+            if self._probe_direct_http_route(direct_peer, timeout=probe_timeout):
+                return direct_peer
         return None
 
     def _prefer_direct_transfer_peer(self, peer: Peer, *, timeout: float | None = None) -> Peer:
@@ -1114,10 +1157,10 @@ def dynamic_mirror_replica_count(
 def _rank_peers_by_speed(peers: list[Peer], p2p_client: P2PStorageClient) -> list[Peer]:
     """Return candidates with the fastest currently responding routes first.
 
-    Direct LAN HTTP routes are probed before relay.  Relay-discovered peers may
-    advertise LAN address candidates; if one answers on ``/healthz`` we return a
-    direct clone of that peer so downloads/uploads bypass PHP entirely.  Relay is
-    kept only as a fallback when no direct route currently answers.
+    Direct LAN/NAT routes and gateway target routes are probed before a peer is
+    offered as upload/download target.  Gateway-routed peers are checked through
+    /api/p2p/gateway/<target>/ping, so a public gateway alone does not make an
+    offline internal storage peer look active.  PHP relay data paths are removed.
     """
     ranked: list[tuple[float, Peer]] = []
     relay_ranked: list[tuple[float, Peer]] = []
@@ -1127,16 +1170,10 @@ def _rank_peers_by_speed(peers: list[Peer], p2p_client: P2PStorageClient) -> lis
         direct_matched = False
         for direct_peer in direct_routes:
             started = time.perf_counter()
-            try:
-                url = f"{p2p_client.api_base(direct_peer)}/healthz"
-                req = request.Request(url, method="GET")
-                with request.urlopen(req, timeout=max(0.75, p2p_client.timeout * 0.75)) as response:
-                    if 200 <= response.status < 300:
-                        ranked.append((time.perf_counter() - started, direct_peer))
-                        direct_matched = True
-                        break
-            except (OSError, error.URLError, error.HTTPError):
-                LOG.debug("Direct health check for peer %s via %s failed", peer.node_id, direct_peer.host, exc_info=True)
+            if p2p_client._probe_direct_http_route(direct_peer, timeout=max(0.75, p2p_client.timeout * 0.75)):  # noqa: SLF001 - same module, route probe
+                ranked.append((time.perf_counter() - started, direct_peer))
+                direct_matched = True
+                break
 
         if direct_matched:
             continue
@@ -1182,9 +1219,9 @@ def _rotated_targets(targets: list[Peer | None], target_ids: list[str], start_in
 
 def _upload_batch_limits(peer: Peer) -> tuple[int, int]:
     """Return conservative upload pack limits for this peer route."""
+    if getattr(peer, "route_via_node_id", None):
+        return MAX_GATEWAY_UPLOAD_PACK_CHUNKS, MAX_GATEWAY_UPLOAD_PACK_BYTES
     if peer.host == RELAY_HOST:
-        # PHP receives the outer relay request as JSON. Keep the pack below
-        # common post_max_size defaults after base64 expansion.
         return MAX_RELAY_UPLOAD_PACK_CHUNKS, MAX_RELAY_UPLOAD_PACK_BYTES
     return MAX_DIRECT_UPLOAD_PACK_CHUNKS, MAX_DIRECT_UPLOAD_PACK_BYTES
 
@@ -1334,7 +1371,7 @@ def distribute_file_chunks(
 
     notify(
         phase="chunking_start",
-        status="Datei wird lokal vorbereitet; Peer-Replikation wird gebündelt…",
+        status="Datei wird lokal vorbereitet; Direct-/Gateway-Peer-Replikation wird gebündelt…",
         total_bytes=source_size,
         total_chunks=total_chunks,
         target_count=len(result.targets),
@@ -1705,7 +1742,7 @@ def replicate_manifest_chunks(
 
     notify(
         phase="background_replication_start",
-        status="Datei ist lokal gespeichert; Sicherheitskopien werden im Hintergrund verteilt…",
+        status="Datei ist lokal gespeichert; Sicherheitskopien werden per Direct-/Gateway-Upload verteilt…",
         current_chunk=0,
         total_chunks=total_chunks,
         target_count=len(result.targets),
@@ -1724,7 +1761,7 @@ def replicate_manifest_chunks(
                 result.under_replicated_chunks += 1
         notify(
             phase="background_replication_skipped",
-            status="Keine aktiven Speicher-Peers verfügbar; RAID-1-Spiegel bleibt beim aktuellen Stand.",
+            status="Keine aktiven Speicher-Peers verfügbar; Direct-/Gateway-RAID-1-Spiegel bleibt beim aktuellen Stand.",
             current_chunk=total_chunks,
             total_chunks=total_chunks,
             remote_successes=0,

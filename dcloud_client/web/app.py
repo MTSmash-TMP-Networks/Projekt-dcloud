@@ -2753,7 +2753,7 @@ def create_app(
                 active=True,
                 ok=None,
                 phase="background_replication_queued",
-                status="Datei ist lokal gespeichert; Sicherheitskopie läuft im Hintergrund…",
+                status="Datei ist lokal gespeichert; Sicherheitskopie läuft per Direct-/Gateway-Upload im Hintergrund…",
                 percent=100,
                 server_percent=0,
                 details={"backgroundReplication": True, "manifestId": safe_manifest_id},
@@ -2881,7 +2881,7 @@ def create_app(
                     active=True,
                     ok=None,
                     phase="background_replication_start",
-                    status="Upload ist abgeschlossen; Sicherheitskopien werden im Hintergrund verteilt…",
+                    status="Upload ist abgeschlossen; Sicherheitskopien werden per Direct-/Gateway-Upload verteilt…",
                     percent=100,
                     server_percent=0,
                     total_bytes=manifest.file_size,
@@ -2936,10 +2936,10 @@ def create_app(
                 elif peers:
                     message = (
                         f"Upload abgeschlossen: {file_name or manifest.file_name}; "
-                        "Sicherheitskopie konnte noch nicht erstellt werden."
+                        "Sicherheitskopie konnte über Direct-/Gateway-Peers noch nicht erstellt werden."
                     )
                 else:
-                    message = f"Upload abgeschlossen: {file_name or manifest.file_name}; keine Speicher-Peers aktiv."
+                    message = f"Upload abgeschlossen: {file_name or manifest.file_name}; keine direkt erreichbaren Speicher-Peers aktiv."
                 upload_progress.finish(
                     upload_id,
                     ok=True,
@@ -6554,6 +6554,7 @@ def create_app(
             return jsonify({"ok": False, "message": "Gateway-Zielpeer ist hier aktuell nicht direkt erreichbar"}), 404
         safe_subpath = str(subpath or "").lstrip("/")
         allowed_prefixes = (
+            "ping",
             "chunks/",
             "manifests",
             "manifests/",
@@ -6661,6 +6662,23 @@ def create_app(
         requester_node_id = str(request.environ.get("dcloud.p2p_node_id") or "").strip()
         peers = _known_peers_export_payload(requester_node_id)
         return jsonify({"ok": True, "gateway_node_id": identity.node_id, "peers": peers, "count": len(peers)})
+
+    @app.get("/api/p2p/ping")
+    def api_p2p_ping() -> Response:
+        """Signed liveness/storage probe for direct and gateway-routed peers.
+
+        /healthz only proves that the HTTP endpoint we reached is alive.  For a
+        peer behind a gateway, uploads must prove that the final target behind
+        the gateway is reachable before it is counted as active P2P storage.
+        """
+        payload = _peer_exchange_payload()
+        payload.update({
+            "ok": True,
+            "status": "ok",
+            "signed_p2p": True,
+            "gateway_probe_supported": True,
+        })
+        return jsonify(payload)
 
     @app.route("/api/p2p/gateway/<target_node_id>/<path:subpath>", methods=["GET", "POST"])
     def api_p2p_gateway_proxy(target_node_id: str, subpath: str) -> Response:
