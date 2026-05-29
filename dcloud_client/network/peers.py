@@ -153,6 +153,61 @@ def merge_lan_addresses(*groups: object) -> list[str]:
     return merged
 
 
+def normalize_public_urls(values: object, *, max_urls: int = 16) -> list[str]:
+    """Return clean http(s) public/NAT endpoint URLs.
+
+    Unlike LAN candidates, these may be DDNS names or public IP routes and are
+    often entered manually.  Keep only scheme, host and optional port/pathless
+    base URL so transfers can probe the peer API directly without using PHP.
+    """
+    from urllib import parse
+
+    raw_items: list[object]
+    if values is None:
+        raw_items = []
+    elif isinstance(values, (list, tuple, set)):
+        raw_items = list(values)
+    else:
+        raw_items = [values]
+    result: list[str] = []
+    for item in raw_items:
+        value = str(item or "").strip().rstrip("/")
+        if not value:
+            continue
+        if not value.lower().startswith(("http://", "https://")):
+            value = "http://" + value
+        try:
+            parsed = parse.urlsplit(value)
+        except Exception:
+            continue
+        scheme = parsed.scheme.lower()
+        host = (parsed.hostname or "").strip().strip("[]")
+        if scheme not in {"http", "https"} or not host:
+            continue
+        try:
+            port = parsed.port
+        except ValueError:
+            continue
+        host_part = f"[{host}]" if ":" in host and not host.startswith("[") else host
+        default_port = 443 if scheme == "https" else 80
+        netloc = host_part if port in (None, default_port) else f"{host_part}:{port}"
+        normalized = f"{scheme}://{netloc}"
+        if normalized not in result:
+            result.append(normalized)
+        if len(result) >= max_urls:
+            break
+    return result
+
+
+def merge_public_urls(*groups: object) -> list[str]:
+    merged: list[str] = []
+    for group in groups:
+        for url in normalize_public_urls(group):
+            if url not in merged:
+                merged.append(url)
+    return merged
+
+
 def _route_preference(peer: "Peer") -> int:
     """Higher value means the peer route should be kept as primary."""
     if peer.host == "__relay__":
@@ -181,6 +236,7 @@ class Peer:
     public_host: str | None = None
     public_port: int | None = None
     public_urls: list[str] = field(default_factory=list)
+    scheme: str | None = None
     lan_addresses: list[str] = field(default_factory=list)
     chunk_inventory: dict[str, list[str]] = field(default_factory=dict)
     chat_enabled: bool = True
@@ -218,6 +274,7 @@ class Peer:
             "public_host": self.public_host,
             "public_port": self.public_port,
             "public_urls": list(self.public_urls),
+            "scheme": self.scheme or "http",
             "lan_addresses": list(self.lan_addresses),
             # The full digest inventory can be very large.  Keep dashboard/API and
             # LAN peer-list payloads small by default and expose only counters; the
@@ -301,7 +358,8 @@ class InMemoryPeerProvider:
                 peer.public_ip = peer.public_ip if peer.public_ip is not None else existing.public_ip
                 peer.public_host = peer.public_host if peer.public_host is not None else existing.public_host
                 peer.public_port = peer.public_port if peer.public_port is not None else existing.public_port
-                peer.public_urls = merge_lan_addresses(peer.public_urls, existing.public_urls)
+                peer.public_urls = merge_public_urls(peer.public_urls, existing.public_urls)
+                peer.scheme = peer.scheme if peer.scheme is not None else existing.scheme
                 peer.lan_addresses = merge_lan_addresses(peer.lan_addresses, existing.lan_addresses, [peer.host, existing.host])
                 peer.chunk_inventory = merge_chunk_inventory(peer.chunk_inventory, existing.chunk_inventory)
                 peer.free_storage_bytes = (

@@ -21,7 +21,7 @@ from typing import Any, Callable
 from urllib import error, request
 from uuid import uuid4
 
-from .peers import Peer, PeerProvider, normalize_chunk_inventory, normalize_lan_addresses
+from .peers import Peer, PeerProvider, normalize_chunk_inventory, normalize_lan_addresses, normalize_public_urls
 from ..identity import NodeIdentity
 from ..crypto import sign_bytes
 
@@ -765,7 +765,7 @@ def peer_from_relay_payload(raw: object, *, relay_url: str, own_node_id: str | N
         public_ip=str(raw.get("public_ip") or raw.get("remote_addr") or "").strip() or None,
         public_host=str(raw.get("public_host") or "").strip() or None,
         public_port=optional_int("public_port"),
-        public_urls=normalize_lan_addresses(raw.get("public_urls") or []),
+        public_urls=normalize_public_urls(raw.get("public_urls") or []),
         lan_addresses=lan_addresses,
         chunk_inventory=normalize_chunk_inventory(raw.get("inventory") or raw.get("chunk_inventory") or {}),
         chat_enabled=bool(raw.get("chat_enabled", True)),

@@ -17,7 +17,7 @@ from typing import Any, Callable, Mapping
 from urllib import error, parse, request
 
 from .http_relay import RelayError, RelayHttpResponse, HttpRelayClient, RELAY_HOST
-from .peers import Peer
+from .peers import Peer, normalize_public_urls
 from ..crypto import b64decode, derive_node_id, sha256_hex, sign_bytes, verify_signature
 from ..identity import NodeIdentity
 from ..manifests import FileManifest, canonical_manifest_bytes
@@ -77,45 +77,53 @@ class DistributedUploadResult:
 
 
 def _direct_peer_candidates(peer: Peer) -> list[Peer]:
-    """Return direct HTTP routes to probe before PHP relay fallback.
+    """Return direct HTTP(S) routes to probe before any PHP relay fallback.
 
-    A peer learned through the PHP relay may still be on the same LAN.  Newer
-    nodes advertise LAN address candidates in their relay heartbeat; transfers
-    clone the peer with each candidate host and health-check those direct routes
-    before using the relay mailbox/forwarder.
+    Relay-discovered peers can still be reachable through LAN, DDNS or a manual
+    NAT endpoint from the dashboard.  The returned peers are cloned direct routes
+    with scheme/host/web_port filled from the best candidate URL when possible.
     """
     candidates: list[Peer] = []
     seen: set[str] = set()
 
-    def add(host: object) -> None:
-        value = str(host or "").strip().strip("[]")
-        if not value or value == RELAY_HOST or value in seen:
+    def route_key(candidate: Peer) -> str:
+        scheme = str(getattr(candidate, "scheme", None) or "http").lower()
+        return f"{scheme}://{candidate.host}:{int(candidate.web_port or 0)}"
+
+    def add_candidate(candidate: Peer) -> None:
+        value = str(candidate.host or "").strip().strip("[]")
+        if not value or value == RELAY_HOST:
             return
-        seen.add(value)
-        candidates.append(replace(peer, host=value, route_via_node_id=None))
+        candidate = replace(candidate, host=value, route_via_node_id=None)
+        key = route_key(candidate)
+        if key in seen:
+            return
+        seen.add(key)
+        candidates.append(candidate)
 
-    # Prefer LAN candidates before public routes.  A peer learned through the
-    # relay may still be in the same subnet, and local HTTP is much faster than
-    # routing bulk upload/download data through PHP.
+    def add_host(host: object, *, port: int | None = None, scheme: str | None = None) -> None:
+        value = str(host or "").strip().strip("[]")
+        if not value or value == RELAY_HOST:
+            return
+        add_candidate(replace(peer, host=value, web_port=port or peer.web_port, scheme=scheme or getattr(peer, "scheme", None) or "http"))
+
+    # Prefer LAN candidates before public routes.  Local HTTP is much faster and
+    # avoids hairpin NAT when both nodes are in the same network.
     for address in getattr(peer, "lan_addresses", []) or []:
-        add(address)
+        add_host(address, scheme="http")
 
-    # If the peer has a manually configured public URL/DDNS/port-forward route,
-    # try it before the PHP mailbox. This supports routers where the external
-    # port differs from the local dcloud web_port.
-    for public_url in getattr(peer, "public_urls", []) or []:
+    # Manually entered DDNS/NAT endpoints and relay-advertised public URLs may
+    # use a different external port or HTTPS reverse proxy.
+    for public_url in normalize_public_urls(getattr(peer, "public_urls", []) or []):
         try:
             parsed = parse.urlparse(str(public_url))
-            if parsed.hostname:
-                candidate = replace(
-                    peer,
-                    host=parsed.hostname.strip("[]"),
-                    web_port=parsed.port or (443 if parsed.scheme == "https" else 80),
-                    route_via_node_id=None,
-                )
-                add(candidate.host)
-                if candidates:
-                    candidates[-1] = candidate
+            if not parsed.hostname:
+                continue
+            scheme = parsed.scheme.lower() if parsed.scheme else "http"
+            if scheme not in {"http", "https"}:
+                continue
+            default_port = 443 if scheme == "https" else 80
+            add_host(parsed.hostname, port=parsed.port or default_port, scheme=scheme)
         except Exception:
             continue
 
@@ -125,20 +133,16 @@ def _direct_peer_candidates(peer: Peer) -> list[Peer]:
             public_port = int(getattr(peer, "public_port", 0) or getattr(peer, "web_port", 0) or 0)
         except (TypeError, ValueError):
             public_port = 0
-        candidate = replace(peer, host=public_host, web_port=public_port or peer.web_port, route_via_node_id=None)
-        add(candidate.host)
-        if candidates:
-            candidates[-1] = candidate
+        add_host(public_host, port=public_port or peer.web_port, scheme=getattr(peer, "scheme", None) or "http")
 
-    # If the peer has a port-forward-like public route and was discovered
-    # through the relay, try the relay-observed public IP directly before using
-    # the PHP forwarder/mailbox.
+    # If the relay observed a public IP and the web port is forwarded, try it
+    # directly.  This is best-effort only; CGNAT/firewalls may still reject it.
     public_ip = str(getattr(peer, "public_ip", "") or "").strip().strip("[]")
     if public_ip:
-        add(public_ip)
+        add_host(public_ip, scheme="http")
 
     if peer.host != RELAY_HOST:
-        add(peer.host)
+        add_host(peer.host, scheme=getattr(peer, "scheme", None) or "http")
     return candidates
 
 
@@ -281,10 +285,16 @@ class P2PStorageClient:
         relay_client: HttpRelayClient | None = None,
         relay_clients: Mapping[str, HttpRelayClient] | None = None,
         identity: NodeIdentity | None = None,
+        allow_relay_data: bool = False,
     ) -> None:
         self.timeout = float(timeout)
         self.default_web_port = int(default_web_port)
         self.identity = identity
+        # PHP relay remains useful as tracker/signaling for small control payloads.
+        # Bulk chunk upload/download is disabled by default because shared PHP is
+        # too slow and memory-heavy for real file transfer. Manual NAT/DDNS routes
+        # and gateway peers are the intended data path.
+        self.allow_relay_data = bool(allow_relay_data)
         self.relay_client = relay_client
         self.relay_clients: dict[str, HttpRelayClient] = {}
         if relay_clients:
@@ -330,7 +340,10 @@ class P2PStorageClient:
         if ":" in host and not host.startswith("["):
             host = f"[{host}]"
         port = int(peer.web_port or self.default_web_port)
-        return f"http://{host}:{port}"
+        scheme = str(getattr(peer, "scheme", None) or "http").lower()
+        if scheme not in {"http", "https"}:
+            scheme = "http"
+        return f"{scheme}://{host}:{port}"
 
     def _relay_client_for(self, peer: Peer) -> HttpRelayClient | None:
         if not peer.relay_url:
@@ -464,7 +477,7 @@ class P2PStorageClient:
                 LOG.debug("Chunk upload to peer %s failed", peer.node_id, exc_info=True)
                 if not self._relay_available(peer):
                     return PeerTransferResult(peer.node_id, False, str(exc))
-        if self._relay_available(peer):
+        if self._relay_available(peer) and self.allow_relay_data:
             last_error = ""
             for attempt in range(3):
                 try:
@@ -547,7 +560,7 @@ class P2PStorageClient:
                 LOG.debug("Binary batch chunk upload to peer %s failed", peer.node_id, exc_info=True)
                 if not self._relay_available(peer):
                     return [PeerTransferResult(peer.node_id, False, str(exc)) for _ in chunks]
-        if response_body is None and self._relay_available(peer):
+        if response_body is None and self._relay_available(peer) and self.allow_relay_data:
             try:
                 timeout = 60.0 if peer.host == RELAY_HOST else 45.0
                 relay_response = self._forward_via_relay(peer, method="POST", path=path, headers=headers, body=data, timeout=timeout)
@@ -609,7 +622,7 @@ class P2PStorageClient:
                 LOG.debug("Batch chunk upload to peer %s failed", peer.node_id, exc_info=True)
                 if not self._relay_available(peer):
                     return [PeerTransferResult(peer.node_id, False, str(exc)) for _ in chunks]
-        if not response_payload and self._relay_available(peer):
+        if not response_payload and self._relay_available(peer) and self.allow_relay_data:
             try:
                 relay_response = self._forward_via_relay(peer, method="POST", path=path, headers=headers, body=data, timeout=45.0)
                 if 200 <= relay_response.status_code < 300:
@@ -702,7 +715,7 @@ class P2PStorageClient:
                 direct_error = exc
                 LOG.debug("Direct chunk-pack download from peer %s failed", peer.node_id, exc_info=True)
 
-        if self._relay_available(peer):
+        if self._relay_available(peer) and self.allow_relay_data:
             relay_client = self._relay_client_for(peer)
             if relay_client is not None:
                 try:
@@ -782,7 +795,7 @@ class P2PStorageClient:
                 direct_error = exc
                 LOG.debug("Direct chunk batch download from peer %s failed", peer.node_id, exc_info=True)
 
-        if self._relay_available(peer):
+        if self._relay_available(peer) and self.allow_relay_data:
             last_error: Exception | None = None
             for attempt in range(2):
                 try:
@@ -816,7 +829,7 @@ class P2PStorageClient:
             except (OSError, error.URLError, error.HTTPError, StorageError) as exc:
                 direct_error = exc
                 LOG.debug("Direct chunk download from peer %s failed", peer.node_id, exc_info=True)
-        if self._relay_available(peer):
+        if self._relay_available(peer) and self.allow_relay_data:
             last_error: Exception | None = None
             for attempt in range(3):
                 try:
@@ -1087,10 +1100,10 @@ def _rank_peers_by_speed(peers: list[Peer], p2p_client: P2PStorageClient) -> lis
         if direct_matched:
             continue
 
-        if p2p_client._relay_available(peer):  # noqa: SLF001 - same module, intentional fast-path check
-            # Do not send a mailbox health request here. It would add latency to
-            # every transfer start and can itself queue behind chunk traffic. The
-            # actual read/write call performs relay retries if needed.
+        if p2p_client.allow_relay_data and p2p_client._relay_available(peer):  # noqa: SLF001 - same module, intentional fast-path check
+            # Data relay is an explicit compatibility mode.  By default relay-only
+            # peers are not ranked as chunk-transfer targets; add a NAT/DDNS route
+            # or gateway endpoint in the dashboard instead.
             penalty = 1.0 if peer.host == RELAY_HOST else 1.5
             relay_ranked.append((penalty, peer))
 

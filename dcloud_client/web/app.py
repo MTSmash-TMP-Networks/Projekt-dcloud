@@ -360,7 +360,8 @@ def create_app(
     relay_clients: dict[str, HttpRelayClient] = {}
     relay_transports: dict[str, HttpRelayTransport] = {}
     relay_lock = threading.RLock()
-    p2p_client = P2PStorageClient(default_web_port=config.web.port, identity=identity)
+    allow_relay_data_transfer = str(os.environ.get("DCLOUD_ALLOW_RELAY_DATA", "0")).lower() in {"1", "true", "yes", "on"}
+    p2p_client = P2PStorageClient(default_web_port=config.web.port, identity=identity, allow_relay_data=allow_relay_data_transfer)
     upload_progress = UploadProgressTracker(
         persist_dir=chunk_store.tmp_dir / "upload_progress",
         active_stall_seconds=int(os.environ.get("DCLOUD_UPLOAD_STALL_SECONDS", "900")),
@@ -378,6 +379,10 @@ def create_app(
     disabled_peer_lock = threading.RLock()
     disabled_peers_path = chunk_store.root / "disabled_peers.json"
     disabled_peers: dict[str, dict[str, Any]] = {}
+    manual_peer_routes_path = chunk_store.root / "manual_peer_routes.json"
+    manual_peer_routes: dict[str, dict[str, Any]] = {}
+    manual_peer_routes_lock = threading.RLock()
+    last_manual_peer_route_refresh_at = 0.0
     chat_messages: dict[str, deque[dict[str, Any]]] = defaultdict(lambda: deque(maxlen=240))
     chat_unread: dict[str, int] = defaultdict(int)
     chat_lock = threading.RLock()
@@ -1952,6 +1957,232 @@ def create_app(
                 _persist_disabled_peers()
         return removed
 
+    def _normalize_direct_peer_url(value: Any) -> str:
+        raw = str(value or "").strip().rstrip("/")
+        if not raw:
+            raise ValueError("NAT-/DDNS-Endpunkt fehlt")
+        if not raw.lower().startswith(("http://", "https://")):
+            raw = "http://" + raw
+        try:
+            parsed = url_parse.urlsplit(raw)
+        except Exception as exc:
+            raise ValueError("NAT-/DDNS-Endpunkt ist keine gültige URL") from exc
+        scheme = parsed.scheme.lower()
+        if scheme not in {"http", "https"}:
+            raise ValueError("Nur http:// oder https:// sind als Peer-Endpunkt erlaubt")
+        host = (parsed.hostname or "").strip().strip("[]")
+        if not host:
+            raise ValueError("Peer-Endpunkt benötigt einen Hostnamen oder eine IP")
+        try:
+            port = parsed.port
+        except ValueError as exc:
+            raise ValueError("Peer-Endpunkt enthält einen ungültigen Port") from exc
+        if port is None:
+            port = 443 if scheme == "https" else int(getattr(config.web, "port", 8787) or 8787)
+        if not 1 <= int(port) <= 65535:
+            raise ValueError("Peer-Port muss zwischen 1 und 65535 liegen")
+        host_part = f"[{host}]" if ":" in host and not host.startswith("[") else host
+        default_port = 443 if scheme == "https" else 80
+        netloc = host_part if int(port) == default_port else f"{host_part}:{int(port)}"
+        return f"{scheme}://{netloc}"
+
+    def _manual_route_to_peer(route: dict[str, Any]) -> Peer | None:
+        node_id = _safe_peer_id(str(route.get("node_id") or ""))
+        urls = [str(url) for url in route.get("urls", []) if str(url)] if isinstance(route.get("urls"), list) else []
+        if not node_id or not urls:
+            return None
+        url = urls[0]
+        try:
+            parsed = url_parse.urlsplit(url)
+            host = (parsed.hostname or "").strip().strip("[]")
+            if not host:
+                return None
+            port = parsed.port or (443 if parsed.scheme == "https" else int(getattr(config.web, "port", 8787) or 8787))
+        except Exception:
+            return None
+        return Peer(
+            node_id=node_id,
+            host=host,
+            udp_port=0,
+            name=str(route.get("display_name") or route.get("name") or "") or None,
+            web_port=int(port),
+            public_host=host,
+            public_port=int(port),
+            public_urls=urls,
+            scheme=(parsed.scheme or "http").lower(),
+            accepts_peer_storage=True,
+        )
+
+    def _load_manual_peer_routes() -> None:
+        nonlocal manual_peer_routes
+        try:
+            with manual_peer_routes_path.open("r", encoding="utf-8") as handle:
+                raw = json.load(handle)
+            if not isinstance(raw, dict):
+                manual_peer_routes = {}
+                return
+            loaded: dict[str, dict[str, Any]] = {}
+            for node_id, item in raw.items():
+                safe_id = _safe_peer_id(str(node_id))
+                if not safe_id or safe_id == identity.node_id or not isinstance(item, dict):
+                    continue
+                urls: list[str] = []
+                raw_urls = item.get("urls") if isinstance(item.get("urls"), list) else [item.get("url") or item.get("endpoint")]
+                for raw_url in raw_urls:
+                    try:
+                        normalized = _normalize_direct_peer_url(raw_url)
+                    except ValueError:
+                        continue
+                    if normalized not in urls:
+                        urls.append(normalized)
+                if not urls:
+                    continue
+                loaded[safe_id] = {
+                    "node_id": safe_id,
+                    "display_name": str(item.get("display_name") or item.get("name") or safe_id[:12]),
+                    "urls": urls[:8],
+                    "created_at": float(item.get("created_at") or time.time()),
+                    "updated_at": float(item.get("updated_at") or time.time()),
+                    "last_ok_at": float(item.get("last_ok_at") or 0),
+                    "last_error": str(item.get("last_error") or ""),
+                }
+            manual_peer_routes = loaded
+        except FileNotFoundError:
+            manual_peer_routes = {}
+        except Exception:
+            manual_peer_routes = {}
+
+    def _persist_manual_peer_routes() -> None:
+        manual_peer_routes_path.parent.mkdir(parents=True, exist_ok=True)
+        payload = json.dumps(manual_peer_routes, ensure_ascii=False, indent=2, sort_keys=True)
+        tmp_path = manual_peer_routes_path.with_suffix(".tmp")
+        tmp_path.write_text(payload, encoding="utf-8")
+        tmp_path.replace(manual_peer_routes_path)
+
+    def _probe_direct_peer_endpoint(endpoint: str, *, timeout: float = 4.0) -> tuple[Peer, dict[str, Any]]:
+        url = _normalize_direct_peer_url(endpoint)
+        parsed = url_parse.urlsplit(url)
+        health_url = url + "/healthz"
+        req = url_request.Request(health_url, headers={"Accept": "application/json"}, method="GET")
+        try:
+            with url_request.urlopen(req, timeout=timeout) as response:
+                body = response.read(64 * 1024)
+        except Exception as exc:
+            raise StorageError(f"Direkter Peer-Endpunkt nicht erreichbar: {exc}") from exc
+        try:
+            payload = json.loads(body.decode("utf-8", errors="replace"))
+        except Exception as exc:
+            raise StorageError("Peer-Endpunkt antwortet nicht mit gültigem /healthz JSON") from exc
+        if not isinstance(payload, dict) or str(payload.get("status") or "").lower() != "ok":
+            raise StorageError("Peer-Endpunkt ist kein gültiger dcloud-Peer")
+        node_id = _safe_peer_id(str(payload.get("node_id") or ""))
+        if not node_id:
+            raise StorageError("Peer-Endpunkt liefert keine Node-ID")
+        if node_id == identity.node_id:
+            raise StorageError("Der NAT-Endpunkt zeigt auf diesen eigenen Knoten")
+        host = (parsed.hostname or "").strip().strip("[]")
+        port = parsed.port or (443 if parsed.scheme == "https" else int(getattr(config.web, "port", 8787) or 8787))
+        peer = Peer(
+            node_id=node_id,
+            host=host,
+            udp_port=0,
+            name=str(payload.get("name") or payload.get("display_name") or "") or None,
+            web_port=int(port),
+            public_host=host,
+            public_port=int(port),
+            public_urls=[url],
+            scheme=(parsed.scheme or "http").lower(),
+            client_type=str(payload.get("client_type") or "server") if str(payload.get("client_type") or "server") in {"server"} else None,
+            accepts_peer_storage=True,
+        )
+        return peer, payload
+
+    def _upsert_manual_peer_route(endpoint: str, *, display_name: str | None = None) -> Peer:
+        peer, payload = _probe_direct_peer_endpoint(endpoint)
+        normalized_url = _normalize_direct_peer_url(endpoint)
+        now = time.time()
+        label = (display_name or str(payload.get("name") or "") or display_name_for_peer(peer.node_id, peer.name)).strip()
+        with manual_peer_routes_lock:
+            existing = manual_peer_routes.get(peer.node_id, {})
+            urls = [str(url) for url in existing.get("urls", []) if str(url)] if isinstance(existing.get("urls"), list) else []
+            if normalized_url not in urls:
+                urls.insert(0, normalized_url)
+            manual_peer_routes[peer.node_id] = {
+                "node_id": peer.node_id,
+                "display_name": label,
+                "urls": urls[:8],
+                "created_at": float(existing.get("created_at") or now),
+                "updated_at": now,
+                "last_ok_at": now,
+                "last_error": "",
+            }
+            _persist_manual_peer_routes()
+        peer_provider.add_or_update(peer)
+        return peer
+
+    def _manual_peer_routes_payload() -> list[dict[str, Any]]:
+        with manual_peer_routes_lock:
+            routes = [dict(route) for route in manual_peer_routes.values()]
+        active_ids = {str(getattr(peer, "node_id", "") or "") for peer in peer_provider.list_peers()}
+        return sorted(
+            [
+                {
+                    "node_id": str(route.get("node_id") or ""),
+                    "display_name": str(route.get("display_name") or route.get("node_id") or "Peer"),
+                    "urls": list(route.get("urls") or []),
+                    "updated_at": float(route.get("updated_at") or 0),
+                    "last_ok_at": float(route.get("last_ok_at") or 0),
+                    "last_error": str(route.get("last_error") or ""),
+                    "active": str(route.get("node_id") or "") in active_ids,
+                }
+                for route in routes
+                if str(route.get("node_id") or "")
+            ],
+            key=lambda item: str(item.get("display_name") or "").lower(),
+        )
+
+    def _refresh_manual_peer_routes(*, force: bool = False, min_interval_seconds: float = 20.0) -> None:
+        nonlocal last_manual_peer_route_refresh_at
+        now = time.time()
+        if not force and last_manual_peer_route_refresh_at and now - last_manual_peer_route_refresh_at < min_interval_seconds:
+            return
+        last_manual_peer_route_refresh_at = now
+        with manual_peer_routes_lock:
+            route_items = [dict(route) for route in manual_peer_routes.values()]
+        changed = False
+        for route in route_items:
+            node_id = _safe_peer_id(str(route.get("node_id") or ""))
+            urls = [str(url) for url in route.get("urls", []) if str(url)] if isinstance(route.get("urls"), list) else []
+            if not node_id or not urls:
+                continue
+            last_error = ""
+            for endpoint in urls:
+                try:
+                    peer, payload = _probe_direct_peer_endpoint(endpoint, timeout=2.5)
+                    if peer.node_id != node_id:
+                        last_error = "Endpunkt meldet eine andere Node-ID"
+                        continue
+                    peer_provider.add_or_update(peer)
+                    with manual_peer_routes_lock:
+                        current = manual_peer_routes.get(node_id)
+                        if current is not None:
+                            current["last_ok_at"] = now
+                            current["last_error"] = ""
+                            current["display_name"] = str(current.get("display_name") or payload.get("name") or display_name_for_peer(node_id, peer.name))
+                            changed = True
+                    break
+                except Exception as exc:
+                    last_error = str(exc)
+            else:
+                with manual_peer_routes_lock:
+                    current = manual_peer_routes.get(node_id)
+                    if current is not None:
+                        current["last_error"] = last_error[:300]
+                        changed = True
+        if changed:
+            with manual_peer_routes_lock:
+                _persist_manual_peer_routes()
+
 
     def _load_external_download_links() -> None:
         """Load temporary external download links from the runtime store."""
@@ -2083,6 +2314,10 @@ def create_app(
 
     with disabled_peer_lock:
         _load_disabled_peers()
+
+    with manual_peer_routes_lock:
+        _load_manual_peer_routes()
+    _refresh_manual_peer_routes(force=True)
 
     with external_link_lock:
         _load_external_download_links()
@@ -2283,6 +2518,7 @@ def create_app(
         return {"auth": _auth_payload(), "csrf_token": _csrf_token()}
 
     def _list_active_peers() -> list[Any]:
+        _refresh_manual_peer_routes()
         if peer_connector is not None and hasattr(peer_connector, "prune_stale_peers"):
             peer_connector.prune_stale_peers()
         disabled_ids = _disabled_peer_ids()
@@ -2801,7 +3037,8 @@ def create_app(
             "relaySecretSet": False,
             "relayTokenMode": "automatic-daily",
             "relayTokenLabel": "Automatisch, tägliche Rotation",
-            "directConnectionModeLabel": ("Direkt bevorzugt + PHP-Relay-Fallback" if config.network.relay_urls else "Nur Direktverbindung"),
+            "directConnectionModeLabel": ("Direkt/Gateway, PHP nur Tracker" if config.network.relay_urls and not allow_relay_data_transfer else ("Direkt bevorzugt + PHP-Datenfallback" if config.network.relay_urls else "Nur Direktverbindung")),
+            "allowRelayDataTransfer": bool(allow_relay_data_transfer),
             "dashboardTcpPort": int(getattr(config.web, "port", 8787) or 8787),
             "p2pApiTcpPort": int(getattr(config.web, "port", 8787) or 8787),
             "discoveryUdpPort": int(getattr(config.network, "udp_port", 6881) or 6881),
@@ -3085,6 +3322,7 @@ def create_app(
             "relayLastError": relay_error,
             "relayStatuses": relay_statuses,
             "relayTokenMode": "automatic-daily",
+            "allowRelayDataTransfer": bool(allow_relay_data_transfer),
         }
 
     def _sync_peer_connector_settings() -> None:
@@ -3658,6 +3896,7 @@ def create_app(
             "browserDownloads": browser_downloads_payload(),
             "peers": [peer.to_dict() for peer in peers],
             "disabledPeers": _disabled_peers_payload(),
+            "manualPeerRoutes": _manual_peer_routes_payload(),
             "fileCount": len(manifests),
             "folders": folders,
             "folderTree": folder_tree_json(tree),
@@ -5111,7 +5350,12 @@ def create_app(
             target_peers: list[Any] = []
             shared_with: list[str] = []
             if shared:
-                target_peers, shared_with = _share_target_peers(request.form.get("peer_node_id", "*"))
+                nat_endpoint = (request.form.get("nat_endpoint") or request.form.get("peer_endpoint") or "").strip()
+                if nat_endpoint:
+                    manual_peer = _upsert_manual_peer_route(nat_endpoint)
+                    target_peers, shared_with = [manual_peer], [manual_peer.node_id]
+                else:
+                    target_peers, shared_with = _share_target_peers(request.form.get("peer_node_id", "*"))
             elif manifest_store.is_shared(old_manifest):
                 previous_targets = [
                     str(item) for item in (old_manifest.access or {}).get("shared_with", []) if str(item)
@@ -5302,6 +5546,59 @@ def create_app(
             return jsonify({"ok": True, "message": f"Netzwerksuche gestartet{suffix}", "state": state_payload()})
         message = "; ".join(errors) if errors else "Peer-Discovery ist nicht verfügbar"
         return jsonify({"ok": False, "message": f"Netzwerksuche fehlgeschlagen: {message}", "state": state_payload()}), 503
+
+    @app.post("/api/peer-routes")
+    def api_add_peer_route() -> Response:
+        payload = request.get_json(silent=True) if request.is_json else request.form
+        endpoint = str((payload or {}).get("endpoint") or (payload or {}).get("url") or "").strip()
+        display_name = str((payload or {}).get("display_name") or "").strip() or None
+        if not endpoint:
+            return jsonify({"ok": False, "message": "NAT-/DDNS-Endpunkt fehlt", "state": state_payload()}), 400
+        try:
+            peer = _upsert_manual_peer_route(endpoint, display_name=display_name)
+        except (StorageError, ValueError) as exc:
+            return jsonify({"ok": False, "message": str(exc), "state": state_payload()}), 400
+        label = display_name_for_peer(peer.node_id, peer.name)
+        return jsonify({
+            "ok": True,
+            "message": f"Direkter NAT-/DDNS-Endpunkt gespeichert: {label}",
+            "peer": peer.to_dict(),
+            "manualPeerRoutes": _manual_peer_routes_payload(),
+            "state": state_payload(),
+        })
+
+    @app.post("/api/peer-routes/remove")
+    def api_remove_peer_route() -> Response:
+        payload = request.get_json(silent=True) if request.is_json else request.form
+        node_id = _safe_peer_id(str((payload or {}).get("peer_id") or (payload or {}).get("node_id") or ""))
+        if not node_id:
+            return jsonify({"ok": False, "message": "peer_id fehlt", "state": state_payload()}), 400
+        removed = False
+        with manual_peer_routes_lock:
+            removed = manual_peer_routes.pop(node_id, None) is not None
+            if removed:
+                _persist_manual_peer_routes()
+        if removed:
+            try:
+                peer_provider.remove(node_id)
+            except Exception:
+                pass
+        return jsonify({
+            "ok": True,
+            "message": "Direkter Endpunkt entfernt." if removed else "Kein manueller Endpunkt für diesen Peer gespeichert.",
+            "manualPeerRoutes": _manual_peer_routes_payload(),
+            "state": state_payload(),
+        })
+
+    @app.post("/api/peer-routes/refresh")
+    def api_refresh_peer_routes() -> Response:
+        _refresh_manual_peer_routes(force=True)
+        return jsonify({
+            "ok": True,
+            "message": "Direkte NAT-/DDNS-Endpunkte geprüft.",
+            "manualPeerRoutes": _manual_peer_routes_payload(),
+            "state": state_payload(),
+        })
 
     @app.post("/api/peers/disable")
     def api_disable_peer() -> Response:
@@ -6088,12 +6385,14 @@ def create_app(
             }
             _persist_external_download_links()
         direct_link = url_for("external_download_file", token=token, _external=True)
-        relay_links = _create_relay_external_download_links(
-            local_token=token,
-            manifest=manifest,
-            expires_at=expires_at,
-            ttl_seconds=minutes * 60,
-        )
+        relay_links = []
+        if allow_relay_data_transfer:
+            relay_links = _create_relay_external_download_links(
+                local_token=token,
+                manifest=manifest,
+                expires_at=expires_at,
+                ttl_seconds=minutes * 60,
+            )
         usable_relay_links = [item for item in relay_links if item.get("ok") and item.get("url")]
         preferred_link = str(usable_relay_links[0].get("url")) if usable_relay_links else direct_link
         message = (
@@ -6685,8 +6984,16 @@ def create_app(
         return redirect(redirect_target)
 
     @app.get("/healthz")
-    def healthz() -> dict[str, str]:
-        return {"status": "ok", "node_id": identity.node_id}
+    def healthz() -> dict[str, Any]:
+        return {
+            "status": "ok",
+            "node_id": identity.node_id,
+            "name": config.node.name,
+            "display_name": display_name_for_peer(identity.node_id, config.node.name),
+            "client_type": config.node.client_type,
+            "web_port": int(getattr(config.web, "port", 8787) or 8787),
+            "relay_data_enabled": bool(allow_relay_data_transfer),
+        }
 
     app.config["DCLOUD_STOP_RELAYS"] = _stop_relay_transport
     _configure_relay_transport()

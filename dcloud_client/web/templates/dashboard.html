@@ -959,7 +959,7 @@
             <h3>Direktverbindung & Portfreigaben</h3>
             <div class="settings-inline">
               <span class="settings-badge" id="settings-direct-mode">{{ settings_json.directConnectionModeLabel }}</span>
-              <span class="settings-note" style="margin:0;">Daten laufen direkt über LAN/Public/Gateway; PHP dient nur noch als Tracker und letzter Fallback.</span>
+              <span class="settings-note" style="margin:0;">Daten laufen direkt über LAN, NAT/DDNS oder Gateway; PHP dient nur noch als Tracker/Signaling.</span>
             </div>
             <div class="settings-port-grid" id="settings-direct-ports">
               <div class="settings-port-card">
@@ -1004,7 +1004,7 @@
             <label for="settings-relay-urls">Weitere Relay-URLs</label>
             <textarea id="settings-relay-urls" name="relay_server_urls" rows="3" placeholder="https://deine-domain.de/dcloud_relay.php">{{ settings_json.additionalRelayUrlsText }}</textarea>
             <p class="settings-note"><strong>Relay-Zugriff:</strong> <span id="settings-relay-token-mode">{{ settings_json.relayTokenLabel }}</span>. Der Tages-Schlüssel wird automatisch vom Relay erzeugt, täglich erneuert und vom Client bei Bedarf direkt abgerufen.</p>
-            <p class="settings-note" id="settings-relay-note">Standard- und Backup-Relay sind fest hinterlegt. Zusätzliche Relays vermitteln Internet-Peers, Chunk-Verfügbarkeit, externe Download-Links und Forwarder-/Mailbox-Fallbacks. Bulk-Daten versuchen weiterhin LAN/Public/Gateway zuerst.</p>
+            <p class="settings-note" id="settings-relay-note">Relays vermitteln nur noch Tracker-/Signaling-Informationen. Datei-Daten laufen standardmäßig nicht mehr über PHP, sondern direkt über LAN, NAT/DDNS oder einen Gateway-Peer.</p>
           </section>
 
           <section class="settings-panel">
@@ -1027,13 +1027,28 @@
         <p>Peers manuell eintragen oder über Discovery/Relay automatisch finden.</p>
         <form method="post" action="/peers" class="settings-form">
           <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-          <label for="settings-peer">Peer-Adresse (host:port)</label>
+          <label for="settings-peer">LAN/UDP-Peer-Adresse (host:port)</label>
           <input id="settings-peer" type="text" name="peer" placeholder="192.168.1.10:6881" required>
           <label style="display:flex;align-items:center;gap:.45rem;">
             <input type="checkbox" name="use_as_tree_parent"> Als NAT-Parent verwenden
           </label>
           <button type="submit" class="explorer-btn">Peer verbinden</button>
         </form>
+        <section class="settings-panel" style="margin-top:1rem;">
+          <h3>Direkte NAT-/DDNS-Endpunkte</h3>
+          <p class="settings-note">Trage hier die öffentliche Adresse eines Peers mit Portfreigabe oder Reverse Proxy ein, z. B. <code>https://peer.example.de</code> oder <code>mein-ddns.net:8787</code>. Diese Route wird für Freigaben, Uploads, Downloads und Gateway-Zugriff direkt genutzt; PHP überträgt dabei keine Datei-Daten.</p>
+          <div class="settings-form" id="manual-peer-route-form">
+            <label for="settings-nat-endpoint">NAT-/DDNS-Endpunkt</label>
+            <input id="settings-nat-endpoint" type="text" placeholder="https://peer.example.de oder mein-ddns.net:8787">
+            <label for="settings-nat-name">Anzeigename optional</label>
+            <input id="settings-nat-name" type="text" placeholder="Server zuhause">
+            <div style="display:flex;gap:.5rem;flex-wrap:wrap;">
+              <button type="button" class="explorer-btn" id="settings-nat-add">Endpunkt prüfen & speichern</button>
+              <button type="button" class="explorer-btn" id="settings-nat-refresh">Endpunkte prüfen</button>
+            </div>
+          </div>
+          <ul class="status-list" id="settings-manual-routes"><li>Keine direkten NAT-/DDNS-Endpunkte gespeichert.</li></ul>
+        </section>
         <div style="margin-top:1rem;">
           <strong>Automatische Netzwerksuche:</strong>
           <span id="settings-auto-discovery">aktiv · UDP-Port 6881</span>
@@ -1161,7 +1176,9 @@
           <p class="settings-note" id="shareFileLabel">Datei auswählen…</p>
           <label for="sharePeerSelect">Peer auswählen</label>
           <select id="sharePeerSelect" name="peer_node_id"></select>
-          <p class="settings-note" id="sharePeerHelp">Das Manifest wird an den ausgewählten Peer übertragen. Ist der Peer nicht im LAN, läuft die Zustellung über Relay/Signaling; fehlende Chunks werden später per LAN/Public/Gateway oder Relay-Fallback geholt.</p>
+          <label for="shareNatEndpoint">Oder NAT-/DDNS-Endpunkt direkt eintragen</label>
+          <input id="shareNatEndpoint" type="text" placeholder="https://peer.example.de oder mein-ddns.net:8787">
+          <p class="settings-note" id="sharePeerHelp">Wenn ein NAT-/DDNS-Endpunkt eingetragen ist, wird er zuerst geprüft und die Freigabe direkt an diesen Peer gesendet. Große Daten laufen anschließend Peer↔Peer/Gateway; PHP bleibt nur Tracker/Signaling und überträgt standardmäßig keine Datei-Daten.</p>
           <div class="dialog-actions">
             <button type="button" class="explorer-btn" id="shareDialogCancel">Abbrechen</button>
             <button type="submit" class="explorer-btn">Freigeben</button>
@@ -2362,8 +2379,42 @@
             peerList.appendChild(item);
           });
         }
+        renderManualPeerRoutes();
         renderDisabledPeers();
         renderChatPeers();
+      }
+
+      function renderManualPeerRoutes(){
+        const list = document.getElementById("settings-manual-routes");
+        if(!list) return;
+        const routes = Array.isArray(appState.manualPeerRoutes) ? appState.manualPeerRoutes : [];
+        list.innerHTML = "";
+        if(!routes.length){
+          const item = document.createElement("li");
+          item.textContent = "Keine direkten NAT-/DDNS-Endpunkte gespeichert.";
+          list.appendChild(item);
+          return;
+        }
+        routes.forEach(route => {
+          const item = document.createElement("li");
+          item.className = "peer-row";
+          const text = document.createElement("span");
+          const label = route.display_name || String(route.node_id || "Peer").slice(0, 12);
+          const urls = Array.isArray(route.urls) ? route.urls.join(", ") : "";
+          const status = route.active ? "aktiv" : (route.last_error ? `nicht erreichbar: ${route.last_error}` : "wartet");
+          text.textContent = `${label} · ${urls} · ${status}`;
+          const removeBtn = document.createElement("button");
+          removeBtn.type = "button";
+          removeBtn.className = "explorer-btn";
+          removeBtn.textContent = "Entfernen";
+          removeBtn.addEventListener("click", async () => {
+            if(!confirm(`Direkten Endpunkt entfernen?\n${label}`)) return;
+            try{ await ajaxPost("/api/peer-routes/remove", { peer_id: route.node_id }); }
+            catch(error){ showToast(error.message || "Endpunkt konnte nicht entfernt werden", "error"); }
+          });
+          item.append(text, removeBtn);
+          list.appendChild(item);
+        });
       }
 
       function renderDisabledPeers(){
@@ -3747,12 +3798,20 @@ ${folderPath}`)) return;
         const values = [];
         const seen = new Set();
         const add = value => {
-          const host = String(value || "").trim().replace(/^\[/, "").replace(/\]$/, "");
+          let host = String(value || "").trim();
+          if(!host || host === "__relay__") return;
+          if(/^https?:\/\//i.test(host)){
+            try{ host = new URL(host).origin; }catch(error){ return; }
+          }else{
+            host = host.replace(/^\[/, "").replace(/\]$/, "");
+          }
           if(!host || host === "__relay__" || seen.has(host)) return;
           seen.add(host);
           values.push(host);
         };
         (Array.isArray(peer.lan_addresses) ? peer.lan_addresses : []).forEach(add);
+        (Array.isArray(peer.public_urls) ? peer.public_urls : []).forEach(add);
+        add(peer.public_host || "");
         add(peerPublicIp(peer));
         if(peer.host && peer.host !== "__relay__") add(peer.host);
         return values;
@@ -3765,7 +3824,7 @@ ${folderPath}`)) return;
         const candidates = peerDirectCandidates(peer);
         const host = candidates[0] || "";
         if(!host) return webPort ? `API :${webPort}` : "API unbekannt";
-        const endpoint = webPort ? `${endpointHostLabel(host)}:${webPort}` : endpointHostLabel(host);
+        const endpoint = /^https?:\/\//i.test(host) ? host : (webPort ? `${endpointHostLabel(host)}:${webPort}` : endpointHostLabel(host));
         return candidates.length > 1 ? `API ${endpoint} (+${candidates.length - 1})` : `API ${endpoint}`;
       }
       function peerTrackerSummary(peer){
@@ -3790,11 +3849,12 @@ ${folderPath}`)) return;
       }
       function peerTransferLabel(peer){
         const directCount = peerDirectCandidates(peer).length;
+        const relayData = !!((appState.settings || {}).allowRelayDataTransfer || (appState.network || {}).allowRelayDataTransfer);
         if(isRelayPeer(peer)){
-          return directCount ? `Transfer: LAN/Public direkt zuerst, PHP-Fallback` : "Transfer: PHP-Mailbox-Fallback";
+          return directCount ? `Transfer: Direkt/Gateway, PHP-Daten ${relayData ? "Fallback" : "aus"}` : (relayData ? "Transfer: PHP-Datenfallback" : "Transfer: kein direkter Datenweg");
         }
         if(peer.transport === "direct+relay"){
-          return "Transfer: direkt, PHP-Fallback nur bei Bedarf";
+          return relayData ? "Transfer: direkt, PHP-Datenfallback nur bei Bedarf" : "Transfer: direkt; PHP-Daten aus";
         }
         return "Transfer: direkt";
       }
@@ -3820,13 +3880,15 @@ ${folderPath}`)) return;
           option.textContent = `${peerDisplayName(peer)} (${type}, ${route})`;
           sharePeerSelect.appendChild(option);
         });
+        const natInput = document.getElementById("shareNatEndpoint");
+        if(natInput) natInput.value = "";
         shareDialog.hidden = false;
         setTimeout(() => sharePeerSelect.focus(), 40);
       }
       function closeShareDialog(){ shareDialog.hidden = true; pendingShareFile = null; }
-      async function shareFileWithPeer(file, peerNodeId){
+      async function shareFileWithPeer(file, peerNodeId, natEndpoint){
         const previousId = file.id;
-        const payload = await ajaxPost(file.shareUrl, { next:"/", shared:"on", peer_node_id: peerNodeId || "*" });
+        const payload = await ajaxPost(file.shareUrl, { next:"/", shared:"on", peer_node_id: peerNodeId || "*", nat_endpoint: natEndpoint || "" });
         const nextId = payload && payload.manifest && payload.manifest.manifest_id;
         if(nextId && nextId !== previousId){
           const replacement = findFileById(nextId);
@@ -4368,6 +4430,28 @@ ${file.name}`)) return;
             renderUsers(payload.users || []);
             showToast(payload.message || "Benutzer erstellt", "success");
           }catch(error){ showToast(error.message, "error"); }
+        });
+      }
+
+      const natAddBtn = document.getElementById("settings-nat-add");
+      if(natAddBtn){
+        natAddBtn.addEventListener("click", async () => {
+          const endpoint = (document.getElementById("settings-nat-endpoint") || {}).value || "";
+          const displayName = (document.getElementById("settings-nat-name") || {}).value || "";
+          try{
+            await ajaxPost("/api/peer-routes", { endpoint, display_name: displayName });
+            const endpointInput = document.getElementById("settings-nat-endpoint");
+            const nameInput = document.getElementById("settings-nat-name");
+            if(endpointInput) endpointInput.value = "";
+            if(nameInput) nameInput.value = "";
+          }catch(error){ showToast(error.message || "Endpunkt konnte nicht gespeichert werden", "error"); }
+        });
+      }
+      const natRefreshBtn = document.getElementById("settings-nat-refresh");
+      if(natRefreshBtn){
+        natRefreshBtn.addEventListener("click", async () => {
+          try{ await ajaxPost("/api/peer-routes/refresh", {}); }
+          catch(error){ showToast(error.message || "Endpunkte konnten nicht geprüft werden", "error"); }
         });
       }
 
