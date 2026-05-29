@@ -815,7 +815,7 @@
         <div class="status-list" id="network-storage-peer-selection"></div>
         <ul class="status-list" id="network-peer-list"><li>Keine aktiven Peers online.</li></ul>
         <h3>Deaktivierte Peers</h3>
-        <p class="settings-note">Diese Knoten werden von Discovery/Relay ignoriert und nicht als Speicherziel genutzt.</p>
+        <p class="settings-note">Diese Knoten werden von Discovery/manuelle Peers ignoriert und nicht als Speicherziel genutzt.</p>
         <ul class="status-list" id="network-disabled-peer-list"><li>Keine Peers deaktiviert.</li></ul>
       </div>
     </section>
@@ -837,8 +837,8 @@
           <section class="status-card"><h3>Client-Typ</h3><div class="status-kpi" id="status-client-type">Server</div><div class="status-sub">Server für P2P-Speicher</div></section>
           <section class="status-card"><h3>P2P-Ablage</h3><div class="status-kpi" id="status-peer-storage">Wartet</div><div class="status-sub" id="status-peer-storage-sub">-</div></section>
           <section class="status-card"><h3>Discovery-Port</h3><div class="status-kpi" id="status-discovery-port">6881</div><div class="status-sub">UDP-Port dieser Instanz</div></section>
-          <section class="status-card"><h3>PHP-Tracker/Fallback</h3><div class="status-kpi" id="status-relay-state">Aus</div><div class="status-sub" id="status-relay-sub">Nur direkte Verbindungen</div></section>
-          <section class="status-card"><h3>Tracker/Gateway</h3><div class="status-kpi" id="status-tracker-state">0</div><div class="status-sub" id="status-tracker-sub">Noch keine Chunk-Quellen bekannt</div></section>
+          <section class="status-card"><h3>Direct-Peer-Netz</h3><div class="status-kpi" id="status-relay-state">Aus</div><div class="status-sub" id="status-relay-sub">Nur direkte Verbindungen</div></section>
+          <section class="status-card"><h3>Peer-Inventar/Gateway</h3><div class="status-kpi" id="status-tracker-state">0</div><div class="status-sub" id="status-tracker-sub">Noch keine Peer-Quellen bekannt</div></section>
           <section class="status-card"><h3>SMB-Server</h3><div class="status-kpi" id="status-smb-state">Aus</div><div class="status-sub" id="status-smb-sub">Server ist deaktiviert</div></section>
           <section class="status-card"><h3>Dateien</h3><div class="status-kpi" id="status-file-count">0</div><div class="status-sub">Sichtbar im Datei-Explorer</div></section>
           <section class="status-card"><h3>Lokaler Speicher</h3><div class="status-kpi" id="status-storage-used">0 B</div><div class="status-sub">Lokale Chunks und Manifeste</div></section>
@@ -878,7 +878,7 @@
       </div>
       <div class="window-content dummy-app">
         <h2>Einstellungen</h2>
-        <p>Hier steuerst du Speicherfreigabe, Komprimierung, Relay-Vermittlung, SMB und manuelle Peer-Verbindungen.</p>
+        <p>Hier steuerst du Speicherfreigabe, Komprimierung, Direct-Peer-Verbindungen, SMB und manuelle Peer-Verbindungen.</p>
 
         <form method="post" action="/settings" class="settings-form" id="settings-form">
           <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
@@ -959,7 +959,7 @@
             <h3>Direktverbindung & Portfreigaben</h3>
             <div class="settings-inline">
               <span class="settings-badge" id="settings-direct-mode">{{ settings_json.directConnectionModeLabel }}</span>
-              <span class="settings-note" style="margin:0;">Daten laufen direkt über LAN, NAT/DDNS oder Gateway; PHP dient nur noch als Tracker/Signaling.</span>
+              <span class="settings-note" style="margin:0;">Daten laufen ausschließlich direkt über LAN, NAT/DDNS oder Gateway. Direct-Peer ist entfernt.</span>
             </div>
             <div class="settings-port-grid" id="settings-direct-ports">
               <div class="settings-port-card">
@@ -979,7 +979,7 @@
                 <span>SMB nur lokal verwenden. Nicht öffentlich ins Internet freigeben.</span>
               </div>
             </div>
-            <p class="settings-note"><strong>Merksatz:</strong> Ohne PHP-Tracker/Fallback brauchst du für jeden öffentlich erreichbaren Peer entweder <strong>TCP {{ settings_json.dashboardTcpPort }}</strong> direkt oder einen HTTPS-Reverse-Proxy auf diesen Port. Mit PHP-Tracker werden Peers nur vermittelt; Daten versuchen weiterhin LAN/Public zuerst.</p>
+            <p class="settings-note"><strong>Merksatz:</strong> Für jeden öffentlich erreichbaren Peer brauchst du entweder <strong>TCP {{ settings_json.dashboardTcpPort }}</strong> direkt oder einen HTTPS-Reverse-Proxy auf diesen Port. Es gibt keine indirekte Ersatzroute mehr.</p>
             <ul class="settings-checklist">
               <li><strong>Im LAN/VPN:</strong> TCP {{ settings_json.dashboardTcpPort }} reicht, UDP {{ settings_json.discoveryUdpPort }} hilft bei automatischer Suche.</li>
               <li><strong>Über das Internet:</strong> Router-Portweiterleitung oder Reverse Proxy auf den dcloud-Port einrichten.</li>
@@ -995,16 +995,12 @@
           </section>
 
           <section class="settings-panel">
-            <h3>Internet-Peers, Tracker & Relays</h3>
-            <label style="display:flex;align-items:center;gap:.45rem;">
-              <input id="settings-relay-enabled" type="checkbox" name="relay_enabled" {% if settings_json.relayEnabled %}checked{% endif %}> PHP-Tracker/Fallback aktivieren
-            </label>
-            <label for="settings-relay-url">Feste Standard- und Backup-Relays</label>
-            <textarea id="settings-relay-url" rows="2" readonly>{{ settings_json.fixedRelayUrlsText }}</textarea>
-            <label for="settings-relay-urls">Weitere Relay-URLs</label>
-            <textarea id="settings-relay-urls" name="relay_server_urls" rows="3" placeholder="https://deine-domain.de/dcloud_relay.php">{{ settings_json.additionalRelayUrlsText }}</textarea>
-            <p class="settings-note"><strong>Relay-Zugriff:</strong> <span id="settings-relay-token-mode">{{ settings_json.relayTokenLabel }}</span>. Der Tages-Schlüssel wird automatisch vom Relay erzeugt, täglich erneuert und vom Client bei Bedarf direkt abgerufen.</p>
-            <p class="settings-note" id="settings-relay-note">Relays vermitteln nur noch Tracker-/Signaling-Informationen. Datei-Daten laufen standardmäßig nicht mehr über PHP, sondern direkt über LAN, NAT/DDNS oder einen Gateway-Peer.</p>
+            <h3>Direct-Peer-Netzwerk</h3>
+            <input id="settings-relay-enabled" type="hidden" name="relay_enabled" value="">
+            <textarea id="settings-relay-url" rows="1" readonly hidden></textarea>
+            <textarea id="settings-relay-urls" name="relay_server_urls" rows="1" hidden></textarea>
+            <p class="settings-note" id="settings-relay-note"><strong>Direct-Peer-Modus:</strong> Peers werden manuell über LAN-, NAT-/DDNS- oder Reverse-Proxy-Endpunkte verbunden. Dateiübertragung, Freigaben, Gateway-Zugriff und externe Links laufen nur über direkte Peer-Routen.</p>
+            <p class="settings-note"><strong>Empfehlung:</strong> Einen Gateway-Peer öffentlich freigeben und interne Peers dahinter per LAN anbinden.</p>
           </section>
 
           <section class="settings-panel">
@@ -1024,7 +1020,7 @@
         </form>
 
         <hr style="border:0;border-top:1px solid #d8e4f6;margin:1.1rem 0;">
-        <p>Peers manuell eintragen oder über Discovery/Relay automatisch finden.</p>
+        <p>Peers manuell eintragen oder per LAN-Discovery finden. Internet-Peers benötigen einen NAT-/DDNS-Endpunkt oder Reverse Proxy.</p>
         <form method="post" action="/peers" class="settings-form">
           <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
           <label for="settings-peer">LAN/UDP-Peer-Adresse (host:port)</label>
@@ -1036,7 +1032,7 @@
         </form>
         <section class="settings-panel" style="margin-top:1rem;">
           <h3>Direkte NAT-/DDNS-Endpunkte</h3>
-          <p class="settings-note">Trage hier die öffentliche Adresse eines Peers mit Portfreigabe oder Reverse Proxy ein, z. B. <code>https://peer.example.de</code> oder <code>mein-ddns.net:8787</code>. Diese Route wird für Freigaben, Uploads, Downloads und Gateway-Zugriff direkt genutzt; PHP überträgt dabei keine Datei-Daten.</p>
+          <p class="settings-note">Trage hier die öffentliche Adresse eines Peers mit Portfreigabe oder Reverse Proxy ein, z. B. <code>https://peer.example.de</code> oder <code>mein-ddns.net:8787</code>. Diese Route wird für Freigaben, Uploads, Downloads und Gateway-Zugriff direkt genutzt. Es gibt keine indirekte Ersatzroute mehr.</p>
           <div class="settings-form" id="manual-peer-route-form">
             <label for="settings-nat-endpoint">NAT-/DDNS-Endpunkt</label>
             <input id="settings-nat-endpoint" type="text" placeholder="https://peer.example.de oder mein-ddns.net:8787">
@@ -1053,7 +1049,7 @@
           <strong>Automatische Netzwerksuche:</strong>
           <span id="settings-auto-discovery">aktiv · UDP-Port 6881</span>
           <p class="settings-note">Beim Start sendet der Client sofort LAN-Discovery-Hellos an sichtbare dcloud-Clients auf UDP-Port 6881 und danach regelmäßig weiter.</p>
-          <p class="settings-note"><strong>PHP-Vermittlung:</strong> <span id="settings-relay-status">nicht konfiguriert</span></p>
+          <p class="settings-note"><strong>Direct-Peer-Netz:</strong> <span id="settings-relay-status">aktiv</span></p>
           <div style="margin-top:.5rem;display:flex;gap:.5rem;flex-wrap:wrap;">
             <button type="button" class="explorer-btn" id="settings-refresh">Netzwerksuche aktualisieren</button>
             <button type="button" class="explorer-btn" id="settings-cleanup">Datenmüll bereinigen</button>
@@ -1178,7 +1174,7 @@
           <select id="sharePeerSelect" name="peer_node_id"></select>
           <label for="shareNatEndpoint">Oder NAT-/DDNS-Endpunkt direkt eintragen</label>
           <input id="shareNatEndpoint" type="text" placeholder="https://peer.example.de oder mein-ddns.net:8787">
-          <p class="settings-note" id="sharePeerHelp">Wenn ein NAT-/DDNS-Endpunkt eingetragen ist, wird er zuerst geprüft und die Freigabe direkt an diesen Peer gesendet. Große Daten laufen anschließend Peer↔Peer/Gateway; PHP bleibt nur Tracker/Signaling und überträgt standardmäßig keine Datei-Daten.</p>
+          <p class="settings-note" id="sharePeerHelp">Wenn ein NAT-/DDNS-Endpunkt eingetragen ist, wird er zuerst geprüft und die Freigabe direkt an diesen Peer gesendet. Große Daten laufen anschließend direkt Peer↔Peer/Gateway. Es gibt keinen indirekten Datenweg mehr.</p>
           <div class="dialog-actions">
             <button type="button" class="explorer-btn" id="shareDialogCancel">Abbrechen</button>
             <button type="submit" class="explorer-btn">Freigeben</button>
@@ -1246,7 +1242,7 @@
       </div>
       <div class="window-content dummy-app">
         <h2>Benutzerverwaltung</h2>
-        <p>Lokale Benutzer für dieses dcloud Dashboard. Peer-, Relay- und externe Token-Endpunkte bleiben unabhängig davon erreichbar.</p>
+        <p>Lokale Benutzer für dieses dcloud Dashboard. Peer- und externe Token-Endpunkte bleiben unabhängig davon erreichbar.</p>
         <div class="user-admin-bar">
           <div>
             <strong id="users-current-label">Angemeldet</strong>
@@ -2155,7 +2151,7 @@
         const autoText = network.autoDiscoveryEnabled === false ? "Aus" : "Aktiv";
         const autoSub = network.autoDiscoveryEnabled === false
           ? "Automatische Peer-Suche ist deaktiviert"
-          : `Sucht LAN-/Relay-Peers auf UDP-Port ${autoPorts.join(", ")} · Offline-Timeout ${network.peerTimeoutSeconds || 35}s`;
+          : `Sucht LAN-/Direct-Peers auf UDP-Port ${autoPorts.join(", ")} · Offline-Timeout ${network.peerTimeoutSeconds || 35}s`;
         const capacity = appState.networkCapacity || settings || {};
         document.getElementById("network-peer-count").textContent = String((appState.peers || []).length);
         document.getElementById("network-storage-limit").textContent = formatBytes(capacity.networkLimitBytes || settings.networkLimitBytes || appState.stats.limitBytes);
@@ -2165,17 +2161,10 @@
         renderNetworkLoad();
         document.getElementById("status-node-id").textContent = appState.nodeId.slice(0, 12) + "…";
         document.getElementById("status-discovery-port").textContent = String(network.udpPort || 6881);
-        const relayUrls = Array.isArray(network.relayUrls) ? network.relayUrls : (network.relayUrl ? [network.relayUrl] : []);
-        const relayState = network.relayEnabled ? (network.relayStatus || "startet") : "aus";
         const relayStateEl = document.getElementById("status-relay-state");
         const relaySubEl = document.getElementById("status-relay-sub");
-        if(relayStateEl) relayStateEl.textContent = network.relayEnabled ? (relayState === "verbunden" ? "Aktiv" : relayState === "fehler" ? "Fehler" : "Startet") : "Aus";
-        if(relaySubEl){
-          const relayNames = relayUrls.length ? `${relayUrls.length} Tracker/Fallback-Server: ${relayUrls.slice(0,2).join(", ")}${relayUrls.length > 2 ? " …" : ""}` : "Nur direkte Verbindungen";
-          relaySubEl.textContent = network.relayEnabled
-            ? (network.relayLastError ? `Tracker-/Fallback-Fehler: ${network.relayLastError}` : relayNames)
-            : "Nur direkte Verbindungen";
-        }
+        if(relayStateEl) relayStateEl.textContent = "Direkt";
+        if(relaySubEl) relaySubEl.textContent = "Nur manuelle LAN-/NAT-/DDNS-Endpunkte";
         const trackerState = document.getElementById("status-tracker-state");
         const trackerSub = document.getElementById("status-tracker-sub");
         const trackerManifests = (appState.peers || []).reduce((sum, peer) => sum + Number(peer.tracker_manifest_count || 0), 0);
@@ -2185,7 +2174,7 @@
         if(trackerSub){
           trackerSub.textContent = trackerChunks
             ? `${trackerManifests} Manifest(e), ${trackerChunks} Chunk-Quelle(n), ${directCandidateCount} Direkt-Kandidat(en)`
-            : `${directCandidateCount} Direkt-Kandidat(en); Chunk-Tracker wartet auf Peer-Inventar`;
+            : `${directCandidateCount} Direkt-Kandidat(en); Chunk-Inventar wartet auf Peer-Inventar`;
         }
         document.getElementById("status-client-type").textContent = settings.clientTypeLabel || ("Server");
         document.getElementById("status-peer-storage").textContent = settings.acceptsPeerStorage ? "Aktiv" : "Wartet";
@@ -2258,7 +2247,7 @@
         const compressionActive = document.getElementById("settings-compression-active");
         if(compressionActive) compressionActive.textContent = settings.compressionActiveLabel || `${settings.compressionMode || "auto"} · ${settings.compressionAlgorithm || "auto"}`;
         const directMode = document.getElementById("settings-direct-mode");
-        if(directMode) directMode.textContent = settings.directConnectionModeLabel || (settings.relayEnabled ? "Direkt bevorzugt + PHP-Relay-Fallback" : "Nur Direktverbindung");
+        if(directMode) directMode.textContent = settings.directConnectionModeLabel || (settings.relayEnabled ? "Nur Direktverbindung / Gateway" : "Nur Direktverbindung");
         const directPorts = document.getElementById("settings-direct-ports");
         if(directPorts){
           const tcpPort = Number(settings.dashboardTcpPort || network.webPort || 8787);
@@ -2289,10 +2278,7 @@
         if(relayTokenMode) relayTokenMode.textContent = settings.relayTokenLabel || "Automatisch, tägliche Rotation";
         const relayStatus = document.getElementById("settings-relay-status");
         if(relayStatus){
-          const urls = Array.isArray(network.relayUrls) ? network.relayUrls : [];
-          relayStatus.textContent = network.relayEnabled
-            ? `${network.relayStatus || "startet"} · ${urls.length || 1} Vermittlungsserver`
-            : "nicht konfiguriert";
+          relayStatus.textContent = "Direct-Peer only";
         }
         const smbEnabledInput = document.getElementById("settings-smb-enabled");
         if(smbEnabledInput && document.activeElement !== smbEnabledInput && !settingsFormDirty) smbEnabledInput.checked = !!settings.smbEnabled;
@@ -2366,7 +2352,7 @@
             disableBtn.className = "explorer-btn";
             disableBtn.textContent = "Deaktivieren";
             disableBtn.addEventListener("click", async () => {
-              if(!confirm(`${label} deaktivieren?\n\nDer Peer wird aus der aktiven Liste entfernt und durch Discovery/Relay nicht automatisch wieder gesetzt.`)) return;
+              if(!confirm(`${label} deaktivieren?\n\nDer Peer wird aus der aktiven Liste entfernt und durch Discovery/manuelle Peers nicht automatisch wieder gesetzt.`)) return;
               try{
                 selectedStoragePeerIds.delete(peer.node_id);
                 saveStoragePeerSelection();
@@ -2731,7 +2717,7 @@
         title.textContent = displayPath(explorerPath);
         const hint = document.createElement("span");
         hint.className = "tile-meta";
-        hint.textContent = isWebPath(explorerPath) ? "Dieser Ordner liegt direkt in storage/web. HTML/PHP hochladen und Textdateien bearbeiten." : (isDownloadsPath(explorerPath) ? "Browser-Downloads werden hier in storage/Downloads gespeichert." : "Doppelklick öffnet, Rechtsklick zeigt Aktionen");
+        hint.textContent = isWebPath(explorerPath) ? "Dieser Ordner liegt direkt in storage/web. HTML, optional PHP und Assets hochladen oder Textdateien bearbeiten." : (isDownloadsPath(explorerPath) ? "Browser-Downloads werden hier in storage/Downloads gespeichert." : "Doppelklick öffnet, Rechtsklick zeigt Aktionen");
         head.append(title, hint);
         updateExplorerViewButtons();
         const grid = document.createElement("div");
@@ -3720,10 +3706,10 @@
           prompt("Externer Download-Link zum Kopieren:", link);
         }
         const expiryText = payload.expiresInMinutes ? `${payload.expiresInMinutes} Minute(n)` : "maximal 60 Minuten";
-        const linkMode = payload.viaRelay ? "Relay-Link" : "Direkt-Link";
+        const linkMode = payload.viaRelay ? "Direkt-Link" : "Direkt-Link";
         if(!payload.viaRelay && Array.isArray(payload.relayLinks) && payload.relayLinks.length){
           const failed = payload.relayLinks.filter(item => !item.ok).map(item => item.message).filter(Boolean).slice(0, 1).join(" · ");
-          if(failed) showToast(`Relay-Link nicht verfügbar: ${failed}`, "warning");
+          if(failed) showToast(`Direkt-Link nicht verfügbar: ${failed}`, "warning");
         }
         showToast(copied ? `${linkMode} kopiert · gültig ${expiryText}` : `${linkMode} erstellt · gültig ${expiryText}`, "success");
       }
@@ -3788,7 +3774,7 @@ ${folderPath}`)) return;
       function peerDisplayName(peer){
         return peer.display_name || peer.name || String(peer.node_id || "Peer").slice(0, 12);
       }
-      function isRelayPeer(peer){
+      function isRelayPeer(peer){ // legacy route-only peer check
         return peer.transport === "relay" || peer.host === "__relay__";
       }
       function peerPublicIp(peer){
@@ -3827,42 +3813,41 @@ ${folderPath}`)) return;
         const endpoint = /^https?:\/\//i.test(host) ? host : (webPort ? `${endpointHostLabel(host)}:${webPort}` : endpointHostLabel(host));
         return candidates.length > 1 ? `API ${endpoint} (+${candidates.length - 1})` : `API ${endpoint}`;
       }
-      function peerTrackerSummary(peer){
+      function peerInventarSummary(peer){
         const manifests = Number(peer.tracker_manifest_count || 0);
         const chunks = Number(peer.tracker_chunk_count || 0);
-        if(chunks) return `Tracker: ${manifests} Manifest(e), ${chunks} Chunk(s)`;
-        if(manifests) return `Tracker: ${manifests} Manifest(e)`;
-        return "Tracker: kein Inventar";
+        if(chunks) return `Inventar: ${manifests} Manifest(e), ${chunks} Chunk(s)`;
+        if(manifests) return `Inventar: ${manifests} Manifest(e)`;
+        return "Inventar: kein Inventar";
       }
       function peerDiscoveryLabel(peer){
         const publicIp = peerPublicIp(peer);
         const hostPort = peer.host && peer.host !== "__relay__" ? `${peer.host}:${peer.udp_port || "?"}` : "";
         const directCount = peerDirectCandidates(peer).length;
         if(isRelayPeer(peer)){
-          return directCount ? `Vermittlung: PHP-Tracker, ${directCount} Direkt-Kandidat(en)` : "Vermittlung: PHP-Tracker";
+          return directCount ? `Route: kein direkter Endpunkt, ${directCount} Direkt-Kandidat(en)` : "Route: kein direkter Endpunkt";
         }
         if(peer.transport === "direct+relay"){
           const direct = hostPort || (publicIp ? `${publicIp}:${peer.udp_port || "?"}` : "direkt");
-          return `Vermittlung: direkt ${direct}, PHP-Tracker/Fallback`;
+          return `Route: direkt ${direct}, Direct-Peer-Netz`;
         }
-        return hostPort ? `Vermittlung: direkt ${hostPort}` : "Vermittlung: direkt";
+        return hostPort ? `Route: direkt ${hostPort}` : "Route: direkt";
       }
       function peerTransferLabel(peer){
         const directCount = peerDirectCandidates(peer).length;
-        const relayData = !!((appState.settings || {}).allowRelayDataTransfer || (appState.network || {}).allowRelayDataTransfer);
         if(isRelayPeer(peer)){
-          return directCount ? `Transfer: Direkt/Gateway, PHP-Daten ${relayData ? "Fallback" : "aus"}` : (relayData ? "Transfer: PHP-Datenfallback" : "Transfer: kein direkter Datenweg");
+          return directCount ? "Transfer: Direkt/Gateway" : "Transfer: kein direkter Datenweg";
         }
         if(peer.transport === "direct+relay"){
-          return relayData ? "Transfer: direkt, PHP-Datenfallback nur bei Bedarf" : "Transfer: direkt; PHP-Daten aus";
+          return "Transfer: direkt";
         }
         return "Transfer: direkt";
       }
       function peerRouteSummary(peer){
-        return `${peerApiEndpoint(peer)} · ${peerDiscoveryLabel(peer)} · ${peerTransferLabel(peer)} · ${peerTrackerSummary(peer)}`;
+        return `${peerApiEndpoint(peer)} · ${peerDiscoveryLabel(peer)} · ${peerTransferLabel(peer)} · ${peerInventarSummary(peer)}`;
       }
       function peerRouteLabel(peer){
-        return `${peerApiEndpoint(peer)} · ${peerTransferLabel(peer)} · ${peerTrackerSummary(peer)}`;
+        return `${peerApiEndpoint(peer)} · ${peerTransferLabel(peer)} · ${peerInventarSummary(peer)}`;
       }
       function openShareDialog(file){
         pendingShareFile = file;

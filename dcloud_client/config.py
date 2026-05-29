@@ -21,12 +21,12 @@ DEFAULT_AUTO_DISCOVERY_PORTS = [6881]
 DEFAULT_AUTO_DISCOVERY_HOSTS = ["255.255.255.255"]
 DEFAULT_PEER_TIMEOUT_SECONDS = 35
 DEFAULT_PEER_CLEANUP_INTERVAL_SECONDS = 5
-DEFAULT_RELAY_POLL_INTERVAL_SECONDS = 1
-DEFAULT_RELAY_REQUEST_TIMEOUT_SECONDS = 180
-DEFAULT_RELAY_CHUNK_SIZE_BYTES = 512 * 1024
-DEFAULT_PUBLIC_RELAY_URL = "https://support.tmp-networks.de/dcstorage/dcloud_relay.php"
+DEFAULT_RELAY_POLL_INTERVAL_SECONDS = 0
+DEFAULT_RELAY_REQUEST_TIMEOUT_SECONDS = 0
+DEFAULT_RELAY_CHUNK_SIZE_BYTES = 0
+DEFAULT_PUBLIC_RELAY_URL = ""
 DEPRECATED_PUBLIC_RELAY_HOSTS = {"dcloud.byethost12.com"}
-DEFAULT_PUBLIC_RELAY_URLS = [DEFAULT_PUBLIC_RELAY_URL]
+DEFAULT_PUBLIC_RELAY_URLS: list[str] = []
 VALID_COMPRESSION_MODES = {"auto", "fast", "balanced", "max", "off"}
 VALID_COMPRESSION_ALGORITHMS = {"auto", "zstd", "zlib", "none"}
 DEFAULT_COMPRESSION_MODE = "auto"
@@ -91,9 +91,9 @@ class NetworkConfig:
     startup_discovery_interval_seconds: int = 2
     peer_timeout_seconds: int = DEFAULT_PEER_TIMEOUT_SECONDS
     peer_cleanup_interval_seconds: int = DEFAULT_PEER_CLEANUP_INTERVAL_SECONDS
-    relay_url: str = DEFAULT_PUBLIC_RELAY_URL
-    relay_urls: list[str] = field(default_factory=lambda: DEFAULT_PUBLIC_RELAY_URLS.copy())
-    relay_secret: str = ""  # deprecated; bundled relays use automatic daily tokens
+    relay_url: str = ""
+    relay_urls: list[str] = field(default_factory=list)
+    relay_secret: str = ""  # legacy, ignored
     relay_poll_interval_seconds: float = DEFAULT_RELAY_POLL_INTERVAL_SECONDS
     relay_request_timeout_seconds: int = DEFAULT_RELAY_REQUEST_TIMEOUT_SECONDS
     relay_chunk_size_bytes: int = DEFAULT_RELAY_CHUNK_SIZE_BYTES
@@ -248,7 +248,7 @@ def normalize_relay_url(value: str | None) -> str:
     if not url:
         return ""
     if not re.match(r"^https?://", url, flags=re.IGNORECASE):
-        raise ValueError("Relay-URL muss mit http:// oder https:// beginnen")
+        raise ValueError("Direkter Peer-Endpunkt muss mit http:// oder https:// beginnen")
     return url.rstrip("/")
 
 
@@ -353,21 +353,9 @@ def load_config(config_path: str | Path = "config.yml", *, create_if_missing: bo
     if udp_range.start > udp_range.end:
         raise ValueError("network.udp_port_range.start must be <= end")
 
-    relay_urls_key_present = "relay_urls" in network_raw
-    relay_url_key_present = "relay_url" in network_raw
-    if relay_urls_key_present:
-        # `relay_urls: []` is an explicit user choice from the dashboard to
-        # disable PHP relay usage. For non-empty relay lists, keep the built-in
-        # primary relay available and filter deprecated relays so old configs do
-        # not keep using offline providers.
-        relay_values = network_raw.get("relay_urls", [])
-        relay_urls_loaded = normalize_relay_urls(relay_values, include_default=bool(_iter_relay_url_candidates(relay_values)))
-    elif relay_url_key_present:
-        relay_value = network_raw.get("relay_url", "")
-        relay_urls_loaded = normalize_relay_urls(relay_value, include_default=bool(_iter_relay_url_candidates(relay_value)))
-    else:
-        relay_urls_loaded = normalize_relay_urls([], include_default=True)
-    relay_primary_url = relay_urls_loaded[0] if relay_urls_loaded else DEFAULT_PUBLIC_RELAY_URL
+    # PHP relay support was removed. Ignore old relay_url/relay_urls keys.
+    relay_urls_loaded: list[str] = []
+    relay_primary_url = relay_urls_loaded[0] if relay_urls_loaded else ""
 
     return AppConfig(
         node=NodeConfig(
@@ -414,13 +402,13 @@ def load_config(config_path: str | Path = "config.yml", *, create_if_missing: bo
 
 def persist_relay_urls(config: AppConfig, relay_urls: list[str]) -> AppConfig:
     """Persist the fixed public relay plus known additional relay URLs."""
-    normalized_relay_urls = normalize_relay_urls(relay_urls, include_default=True)
+    normalized_relay_urls = []
     raw = _load_yaml(config.config_path)
     raw.setdefault("network", {})
     if not isinstance(raw["network"], dict):
         raise ValueError("Konfigurationsdatei hat kein gültiges network Mapping")
-    raw["network"]["relay_url"] = DEFAULT_PUBLIC_RELAY_URL
-    raw["network"]["relay_urls"] = normalized_relay_urls
+    raw["network"]["relay_url"] = ""
+    raw["network"]["relay_urls"] = []
     _write_yaml_atomic(config.config_path, raw)
     config.network.relay_url = normalized_relay_urls[0]
     config.network.relay_urls = normalized_relay_urls
@@ -460,7 +448,7 @@ def update_runtime_settings(
         else config.storage.compression.skip_incompressible
     )
     relay_values = relay_server_urls if relay_server_urls is not None else relay_server_url
-    relay_is_enabled = bool(relay_enabled) if relay_enabled is not None else bool(config.network.relay_urls)
+    relay_is_enabled = False
     if relay_is_enabled:
         normalized_relay_urls = (
             normalize_relay_urls(relay_values, include_default=True)
@@ -497,8 +485,8 @@ def update_runtime_settings(
         "min_savings_bytes": config.storage.compression.min_savings_bytes,
         "skip_incompressible": new_skip_incompressible,
     }
-    raw["network"]["relay_url"] = DEFAULT_PUBLIC_RELAY_URL
-    raw["network"]["relay_urls"] = normalized_relay_urls
+    raw["network"]["relay_url"] = ""
+    raw["network"]["relay_urls"] = []
     raw["network"]["relay_secret"] = normalized_relay_secret
     raw["smb"]["enabled"] = bool(smb_enabled) if smb_enabled is not None else config.smb.enabled
     raw["smb"]["username"] = (smb_username if smb_username is not None else config.smb.username).strip()
@@ -515,8 +503,8 @@ def update_runtime_settings(
         min_savings_bytes=config.storage.compression.min_savings_bytes,
         skip_incompressible=new_skip_incompressible,
     )
-    config.network.relay_url = normalized_relay_urls[0] if normalized_relay_urls else DEFAULT_PUBLIC_RELAY_URL
-    config.network.relay_urls = normalized_relay_urls
+    config.network.relay_url = ""
+    config.network.relay_urls = []
     config.network.relay_secret = normalized_relay_secret
     config.smb.enabled = bool(smb_enabled) if smb_enabled is not None else config.smb.enabled
     config.smb.username = (smb_username if smb_username is not None else config.smb.username).strip()

@@ -131,12 +131,12 @@ network:
   startup_discovery_interval_seconds: 2
   peer_timeout_seconds: 35
   peer_cleanup_interval_seconds: 5
-  relay_url: "https://support.tmp-networks.de/dcstorage/dcloud_relay.php"
-  relay_urls: ["https://support.tmp-networks.de/dcstorage/dcloud_relay.php"]
+  relay_url: ""
+  relay_urls: []
   relay_secret: ""
-  relay_poll_interval_seconds: 1
-  relay_request_timeout_seconds: 180
-  relay_chunk_size_bytes: 524288
+  relay_poll_interval_seconds: 0
+  relay_request_timeout_seconds: 0
+  relay_chunk_size_bytes: 0
 security:
   protocol_magic: DCLOUD1
 smb:

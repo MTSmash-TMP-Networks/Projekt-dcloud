@@ -43,20 +43,14 @@ from werkzeug.utils import secure_filename
 
 from ..config import (
     AppConfig,
-    DEFAULT_PUBLIC_RELAY_URL,
-    DEFAULT_PUBLIC_RELAY_URLS,
     MIN_SHARED_STORAGE_GB,
     bytes_to_gib,
     client_type_label,
-    extra_relay_urls,
-    normalize_relay_urls,
-    persist_relay_urls,
     update_runtime_settings,
 )
 from ..identity import IdentityManager, NodeIdentity, build_backup_token
 from ..crypto import b64decode, derive_node_id, sha256_hex, verify_signature
 from ..manifests import DEFAULT_FOLDER, INCOMING_SHARES_FOLDER, REMOTE_DELETE_GRACE_SECONDS, FileManifest, ManifestStore, sanitize_folder_path
-from ..network.http_relay import HttpRelayClient, HttpRelayTransport, RelayHttpResponse, RELAY_HOST
 from ..network.p2p_storage import (
     CHUNK_UPLOAD_PACK_MAGIC,
     P2PStorageClient,
@@ -83,6 +77,28 @@ class PeerConnector(Protocol):
 
 WEB_EXPLORER_FOLDER = "web"
 BROWSER_DOWNLOADS_FOLDER = "Downloads"
+
+
+RELAY_HOST = "__relay__"
+
+
+class RelayHttpResponse:
+    """Compatibility response used by removed relay-only helper code paths."""
+    def __init__(self, status_code: int, headers: dict[str, str] | None = None, body: bytes = b"") -> None:
+        self.status_code = int(status_code)
+        self.headers = headers or {}
+        self.body = body
+
+
+class HttpRelayClient:
+    """Removed PHP relay placeholder; direct peer endpoints are required."""
+    pass
+
+
+class HttpRelayTransport:
+    """Removed PHP relay placeholder."""
+    pass
+
 BROWSER_DOWNLOAD_CONTENT_EXTENSIONS = {
     ".7z", ".apk", ".bin", ".bz2", ".dmg", ".doc", ".docx", ".exe", ".gz",
     ".iso", ".msi", ".odt", ".ods", ".pdf", ".ppt", ".pptx", ".rar",
@@ -357,11 +373,11 @@ def create_app(
     browser_access_token = secrets.token_urlsafe(32)
     browser_cookie_jar = http.cookiejar.CookieJar()
     browser_http_opener = url_request.build_opener(_NoRedirectHandler, url_request.HTTPCookieProcessor(browser_cookie_jar))
-    relay_clients: dict[str, HttpRelayClient] = {}
-    relay_transports: dict[str, HttpRelayTransport] = {}
+    relay_clients: dict[str, Any] = {}
+    relay_transports: dict[str, Any] = {}
     relay_lock = threading.RLock()
-    allow_relay_data_transfer = str(os.environ.get("DCLOUD_ALLOW_RELAY_DATA", "0")).lower() in {"1", "true", "yes", "on"}
-    p2p_client = P2PStorageClient(default_web_port=config.web.port, identity=identity, allow_relay_data=allow_relay_data_transfer)
+    allow_relay_data_transfer = False
+    p2p_client = P2PStorageClient(default_web_port=config.web.port, identity=identity, allow_relay_data=False)
     upload_progress = UploadProgressTracker(
         persist_dir=chunk_store.tmp_dir / "upload_progress",
         active_stall_seconds=int(os.environ.get("DCLOUD_UPLOAD_STALL_SECONDS", "900")),
@@ -1737,7 +1753,7 @@ def create_app(
                         native_mode=native_mode,
                     )
                 preview = relay_response.body.decode("utf-8", errors="replace").strip().replace("\n", " ")[:240]
-                last_relay_error = f"direkter Relay-Forward lieferte HTTP {relay_response.status_code}: {preview or 'keine Details'}"
+                last_relay_error = f"direkter Peer-Forward lieferte HTTP {relay_response.status_code}: {preview or 'keine Details'}"
             except Exception as exc:
                 last_relay_error = str(exc)
             try:
@@ -1759,8 +1775,8 @@ def create_app(
             except Exception as exc:
                 details = str(exc)
                 if last_relay_error and last_relay_error != details:
-                    details = f"{details} (direkter Relay-Forward vorher: {last_relay_error})"
-                return Response(f"Peer-Webseite über Relay nicht erreichbar: {details}", status=502, content_type="text/plain; charset=utf-8")
+                    details = f"{details} (direkter Peer-Forward vorher: {last_relay_error})"
+                return Response(f"Peer-Webseite über direkte Route nicht erreichbar: {details}", status=502, content_type="text/plain; charset=utf-8")
         return Response("Peer-Webseite ist aktuell nicht erreichbar.", status=502, content_type="text/plain; charset=utf-8")
 
     def _fetch_dcloud_browser_url(url: str, *, native_mode: bool = False) -> Response:
@@ -2250,67 +2266,7 @@ def create_app(
         expires_at: float,
         ttl_seconds: int,
     ) -> list[dict[str, Any]]:
-        """Ask configured PHP relays to publish a temporary public link.
-
-        A relay link is useful when users share the URL with someone outside the
-        local network. It still requires that the PHP relay can reach this node's
-        registered public IP/web port; otherwise the direct node URL remains as a
-        fallback and the relay returns a clear error when opened.
-        """
-        results: list[dict[str, Any]] = []
-        with relay_lock:
-            clients_map: dict[str, HttpRelayClient] = dict(relay_clients)
-
-        # The public share link must prefer a relay URL even when the relay
-        # transport has not completed its first heartbeat yet.  Otherwise a
-        # locally opened dashboard (127.0.0.1/localhost) falls back to an
-        # unusable direct URL although relay URLs are configured.
-        try:
-            configured_urls = _relay_url_list()
-        except Exception:
-            configured_urls = []
-        for configured_url in configured_urls:
-            if configured_url in clients_map:
-                continue
-            clients_map[configured_url] = HttpRelayClient(
-                relay_url=configured_url,
-                identity=identity,
-                secret="",
-                timeout=5.0,
-                request_timeout=getattr(config.network, "relay_request_timeout_seconds", 90),
-            )
-
-        for relay_url, relay_client in clients_map.items():
-            try:
-                payload = relay_client.create_external_download_link(
-                    local_token=local_token,
-                    file_name=manifest.file_name,
-                    expires_at=expires_at,
-                    ttl_seconds=ttl_seconds,
-                    file_size=getattr(manifest, "file_size", 0),
-                )
-            except Exception as exc:
-                results.append({
-                    "ok": False,
-                    "relayUrl": relay_url,
-                    "message": str(exc),
-                })
-                continue
-            public_url = str(payload.get("public_url") or payload.get("url") or "")
-            if public_url:
-                results.append({
-                    "ok": True,
-                    "relayUrl": relay_url,
-                    "url": public_url,
-                    "message": str(payload.get("message") or "Relay-Link erstellt"),
-                })
-            else:
-                results.append({
-                    "ok": False,
-                    "relayUrl": relay_url,
-                    "message": str(payload.get("message") or "Relay hat keinen Link zurueckgegeben"),
-                })
-        return results
+        return []
 
     with disabled_peer_lock:
         _load_disabled_peers()
@@ -3025,20 +2981,20 @@ def create_app(
                 if config.storage.compression.mode == "off"
                 else f"{config.storage.compression.mode} · {config.storage.compression.algorithm} · Level {config.storage.compression.level}"
             ),
-            "fixedRelayUrl": DEFAULT_PUBLIC_RELAY_URL,
-            "fixedRelayUrls": DEFAULT_PUBLIC_RELAY_URLS.copy(),
-            "fixedRelayUrlsText": "\n".join(DEFAULT_PUBLIC_RELAY_URLS),
-            "relayUrl": config.network.relay_url,
-            "relayUrls": list(config.network.relay_urls),
-            "additionalRelayUrls": extra_relay_urls(config.network.relay_urls),
-            "additionalRelayUrlsText": "\n".join(extra_relay_urls(config.network.relay_urls)),
-            "relayEnabled": bool(config.network.relay_urls),
+            "fixedRelayUrl": "",
+            "fixedRelayUrls": [],
+            "fixedRelayUrlsText": "",
+            "relayUrl": "",
+            "relayUrls": [],
+            "additionalRelayUrls": [],
+            "additionalRelayUrlsText": "",
+            "relayEnabled": False,
             "relaySecret": "",
             "relaySecretSet": False,
-            "relayTokenMode": "automatic-daily",
-            "relayTokenLabel": "Automatisch, tägliche Rotation",
-            "directConnectionModeLabel": ("Direkt/Gateway, PHP nur Tracker" if config.network.relay_urls and not allow_relay_data_transfer else ("Direkt bevorzugt + PHP-Datenfallback" if config.network.relay_urls else "Nur Direktverbindung")),
-            "allowRelayDataTransfer": bool(allow_relay_data_transfer),
+            "relayTokenMode": "removed",
+            "relayTokenLabel": "Entfernt",
+            "directConnectionModeLabel": "Nur Direktverbindung / Gateway",
+            "allowRelayDataTransfer": False,
             "dashboardTcpPort": int(getattr(config.web, "port", 8787) or 8787),
             "p2pApiTcpPort": int(getattr(config.web, "port", 8787) or 8787),
             "discoveryUdpPort": int(getattr(config.network, "udp_port", 6881) or 6881),
@@ -3060,45 +3016,13 @@ def create_app(
         }
 
     def _relay_url_list() -> list[str]:
-        return normalize_relay_urls(getattr(config.network, "relay_urls", [config.network.relay_url]), include_default=False)
+        return []
 
     def _relay_statuses() -> list[dict[str, Any]]:
-        statuses: list[dict[str, Any]] = []
-        for url in _relay_url_list():
-            transport = relay_transports.get(url)
-            if transport is None:
-                status = "startet"
-                last_error = None
-            elif transport.last_error:
-                status = "fehler"
-                last_error = transport.last_error
-            elif transport.last_success_at:
-                status = "verbunden"
-                last_error = None
-            else:
-                status = "startet"
-                last_error = None
-            client = relay_clients.get(url)
-            statuses.append({
-                "url": url,
-                "fixed": url in DEFAULT_PUBLIC_RELAY_URLS,
-                "status": status,
-                "lastError": last_error,
-                "tokenMode": "automatic-daily",
-                "tokenDay": getattr(client, "access_token_day", "") if client is not None else "",
-                "tokenExpiresAt": getattr(client, "access_token_expires_at", None) if client is not None else None,
-            })
-        return statuses
+        return []
 
     def _relay_overall_status(statuses: list[dict[str, Any]]) -> tuple[str, str | None]:
-        if not statuses:
-            return "aus", None
-        if any(item.get("status") == "verbunden" for item in statuses):
-            return "verbunden", None
-        errors = [str(item.get("lastError")) for item in statuses if item.get("lastError")]
-        if errors:
-            return "fehler", "; ".join(errors[:2])
-        return "startet", None
+        return "entfernt", None
 
     def recovery_payload(*, include_secret: bool | None = None) -> dict[str, Any]:
         show_secret = _current_user_is_admin() if include_secret is None else bool(include_secret)
@@ -3309,20 +3233,20 @@ def create_app(
             "startupDiscoveryIntervalSeconds": config.network.startup_discovery_interval_seconds,
             "peerTimeoutSeconds": getattr(config.network, "peer_timeout_seconds", 35),
             "peerCleanupIntervalSeconds": getattr(config.network, "peer_cleanup_interval_seconds", 5),
-            "fixedRelayUrl": DEFAULT_PUBLIC_RELAY_URL,
-            "fixedRelayUrls": DEFAULT_PUBLIC_RELAY_URLS.copy(),
-            "fixedRelayUrlsText": "\n".join(DEFAULT_PUBLIC_RELAY_URLS),
-            "relayUrl": config.network.relay_url,
-            "relayUrls": _relay_url_list(),
-            "additionalRelayUrls": extra_relay_urls(config.network.relay_urls),
-            "relayEnabled": bool(_relay_url_list()),
-            "relayPollIntervalSeconds": getattr(config.network, "relay_poll_interval_seconds", 1),
-            "relayRequestTimeoutSeconds": getattr(config.network, "relay_request_timeout_seconds", 90),
-            "relayStatus": relay_status,
-            "relayLastError": relay_error,
-            "relayStatuses": relay_statuses,
-            "relayTokenMode": "automatic-daily",
-            "allowRelayDataTransfer": bool(allow_relay_data_transfer),
+            "fixedRelayUrl": "",
+            "fixedRelayUrls": [],
+            "fixedRelayUrlsText": "",
+            "relayUrl": "",
+            "relayUrls": [],
+            "additionalRelayUrls": [],
+            "relayEnabled": False,
+            "relayPollIntervalSeconds": 0,
+            "relayRequestTimeoutSeconds": 0,
+            "relayStatus": "entfernt",
+            "relayLastError": None,
+            "relayStatuses": [],
+            "relayTokenMode": "removed",
+            "allowRelayDataTransfer": False,
         }
 
     def _sync_peer_connector_settings() -> None:
@@ -3348,141 +3272,17 @@ def create_app(
 
 
     def _stream_external_download_to_relay(local_token: str, stream_id: str, relay_client: HttpRelayClient) -> RelayHttpResponse:
-        safe_token = "".join(char for char in str(local_token or "") if char.isalnum() or char in "-_")
-        if not safe_token or safe_token != local_token:
-            return RelayHttpResponse(404, {"Content-Type": "application/json"}, b'{"ok":false,"message":"Ungueltiger externer Download-Token"}')
-        try:
-            with external_link_lock:
-                _cleanup_external_download_links(persist=True)
-                item = dict(external_download_links.get(safe_token) or {})
-            if not item:
-                raise StorageError("Dieser Download-Link ist abgelaufen oder ungültig")
-            if float(item.get("expires_at") or 0) <= time.time():
-                with external_link_lock:
-                    external_download_links.pop(safe_token, None)
-                    _persist_external_download_links()
-                raise StorageError("Dieser Download-Link ist abgelaufen")
-            manifest = manifest_store.load(str(item.get("manifest_id") or ""))
-            if not manifest_store.may_access(manifest, identity.node_id):
-                raise StorageError("Keine Berechtigung für diesen externen Download")
-            _ensure_manifest_chunks_available(manifest)
-            output_path = manifest_store.restore(manifest.manifest_id)
-            file_size = output_path.stat().st_size if output_path.exists() else manifest.file_size
-            relay_client.post_external_stream_start(
-                stream_id=stream_id,
-                file_name=manifest.file_name,
-                file_size=file_size,
-                content_type="application/octet-stream",
-            )
-            sequence = 0
-            bytes_sent = 0
-            # Keep JSON/base64 POSTs comfortably below common shared-hosting
-            # post_max_size limits. The browser receives a continuous stream from
-            # PHP while the node uploads these small packets in the background.
-            chunk_size = 768 * 1024
-            with output_path.open("rb") as handle:
-                while True:
-                    block = handle.read(chunk_size)
-                    if not block:
-                        break
-                    relay_client.post_external_stream_chunk(stream_id=stream_id, sequence=sequence, data=block)
-                    bytes_sent += len(block)
-                    sequence += 1
-            relay_client.post_external_stream_finish(stream_id=stream_id, chunks=sequence, bytes_sent=bytes_sent)
-            return RelayHttpResponse(
-                status_code=200,
-                headers={"Content-Type": "application/json"},
-                body=json.dumps({"ok": True, "stream_id": stream_id, "chunks": sequence, "bytes": bytes_sent}).encode("utf-8"),
-            )
-        except Exception as exc:
-            try:
-                relay_client.post_external_stream_error(stream_id=stream_id, message=str(exc))
-            except Exception:
-                pass
-            return RelayHttpResponse(
-                status_code=500,
-                headers={"Content-Type": "application/json"},
-                body=json.dumps({"ok": False, "message": str(exc)}, ensure_ascii=False).encode("utf-8"),
-            )
+        return RelayHttpResponse(410, {"Content-Type": "application/json"}, b'{"ok":false,"message":"Direct-Peer-Build: indirekter Server-Datenweg entfernt"}')
 
     def _dispatch_relay_request(envelope: dict[str, Any]) -> RelayHttpResponse:
-        method = str(envelope.get("method", "GET")).upper()
-        path = str(envelope.get("path", ""))
-        raw_headers = envelope.get("headers", {})
-        allowed_headers: dict[str, str] = {}
-        if isinstance(raw_headers, dict):
-            for key, value in raw_headers.items():
-                key_text = str(key)
-                lower = key_text.lower()
-                if lower in {"content-type", "accept"} or lower.startswith("x-dcloud-"):
-                    allowed_headers[key_text] = str(value)
-        external_header = allowed_headers.get("X-DCloud-External-Relay") == "1"
-        stream_match = re.match(r"^/api/external-relay/stream/([A-Za-z0-9_-]{12,200})/([A-Za-z0-9_.:-]{12,160})$", path)
-        if method == "GET" and external_header and stream_match:
-            relay_url = str(envelope.get("_relay_url") or "")
-            with relay_lock:
-                relay_client = relay_clients.get(relay_url)
-            if relay_client is None:
-                return RelayHttpResponse(
-                    status_code=503,
-                    headers={"Content-Type": "application/json"},
-                    body=b'{"ok":false,"message":"Relay-Client fuer externen Stream ist nicht verfuegbar"}',
-                )
-            return _stream_external_download_to_relay(stream_match.group(1), stream_match.group(2), relay_client)
-
-        is_p2p_path = path.startswith("/api/p2p/") and method in {"GET", "POST"}
-        is_dcloud_site = path.startswith("/dcloud-site") and method in {"GET", "POST"}
-        is_external_download = (
-            method == "GET"
-            and path.startswith("/external/")
-            and external_header
-        )
-        if not (is_p2p_path or is_dcloud_site or is_external_download):
-            return RelayHttpResponse(
-                status_code=403,
-                headers={"Content-Type": "application/json"},
-                body=b'{"ok":false,"message":"Relay darf nur P2P-API-Endpunkte, dcloud-Webseiten oder freigegebene externe Download-Tokens aufrufen"}',
-            )
-        try:
-            body = base64.b64decode(str(envelope.get("body_base64", "")))
-        except Exception:
-            return RelayHttpResponse(
-                status_code=400,
-                headers={"Content-Type": "application/json"},
-                body=b'{"ok":false,"message":"Relay-Nutzdaten sind ungueltig"}',
-            )
-        try:
-            with app.test_client() as relay_client_for_app:
-                response = relay_client_for_app.open(path, method=method, headers=allowed_headers, data=body)
-                try:
-                    body_bytes = response.get_data()
-                except RuntimeError:
-                    response.direct_passthrough = False
-                    body_bytes = response.get_data()
-        except Exception as exc:
-            detail = f"Relay-lokaler Aufruf fehlgeschlagen fuer {path}: {type(exc).__name__}: {exc}"
-            return RelayHttpResponse(
-                status_code=500,
-                headers={"Content-Type": "text/plain; charset=utf-8", "X-DCloud-Error": type(exc).__name__},
-                body=detail.encode("utf-8", errors="replace"),
-            )
-        response_headers = {"Content-Type": response.content_type or "application/octet-stream"}
-        for header_name in ("Content-Disposition", "Content-Length"):
-            if header_name in response.headers:
-                response_headers[header_name] = str(response.headers[header_name])
-        for header_name, header_value in response.headers.items():
-            if str(header_name).lower().startswith("x-dcloud-"):
-                response_headers[str(header_name)] = str(header_value)
-        return RelayHttpResponse(
-            status_code=int(response.status_code),
-            headers=response_headers,
-            body=body_bytes,
-        )
+        return RelayHttpResponse(410, {"Content-Type": "application/json"}, b'{"ok":false,"message":"Direct-Peer-Build: indirekter Server-Datenweg entfernt"}')
 
     def _stop_relay_transport() -> None:
         with relay_lock:
             for transport in list(relay_transports.values()):
-                transport.stop()
+                stop = getattr(transport, "stop", None)
+                if callable(stop):
+                    stop()
             relay_transports.clear()
             relay_clients.clear()
             p2p_client.clear_relay_clients()
@@ -3490,24 +3290,10 @@ def create_app(
             app.config["DCLOUD_RELAY_TRANSPORTS"] = {}
 
     def _learn_relay_urls(urls: list[str]) -> None:
-        if not config.network.relay_urls:
-            # User has explicitly disabled PHP relay usage in settings.
-            return
-        new_urls = [url for url in normalize_relay_urls(urls, include_default=False) if url not in config.network.relay_urls]
-        if not new_urls:
-            return
-        try:
-            persist_relay_urls(config, [*config.network.relay_urls, *new_urls])
-        except Exception:
-            # Keep the discovered relays at least for the current runtime if the
-            # config file cannot be updated.
-            config.network.relay_urls = normalize_relay_urls([config.network.relay_urls, new_urls], include_default=True)
-            config.network.relay_url = config.network.relay_urls[0] if config.network.relay_urls else DEFAULT_PUBLIC_RELAY_URL
-        _configure_relay_transport()
-        _sync_peer_connector_settings()
+        return
 
     def _relay_inventory_payload() -> dict[str, Any]:
-        """Advertise local chunk availability to PHP relays as tracker metadata.
+        """Return local chunk availability for direct-peer status/debug payloads.
 
         The relay remains a lightweight tracker/signaling service.  It does not
         carry bulk data, but it can tell other clients which online peer recently
@@ -3544,51 +3330,16 @@ def create_app(
         return {"version": 1, "updated_at": int(time.time()), "manifests": manifests_payload}
 
     def _configure_relay_transport() -> None:
-        desired_urls = _relay_url_list()
         with relay_lock:
-            for url in list(relay_transports):
-                client = relay_clients.get(url)
-                if url not in desired_urls or client is None:
-                    relay_transports[url].stop()
-                    relay_transports.pop(url, None)
-                    relay_clients.pop(url, None)
-            for desired_url in desired_urls:
-                if desired_url in relay_transports:
-                    continue
-                relay_client = HttpRelayClient(
-                    relay_url=desired_url,
-                    identity=identity,
-                    secret="",
-                    timeout=5.0,
-                    request_timeout=getattr(config.network, "relay_request_timeout_seconds", 90),
-                )
-                relay_transport = HttpRelayTransport(
-                    relay_client=relay_client,
-                    identity=identity,
-                    node_name=config.node.name,
-                    peer_provider=peer_provider,
-                    dispatcher=_dispatch_relay_request,
-                    protocol_magic=config.security.protocol_magic,
-                    udp_port=config.network.udp_port,
-                    web_port=config.web.port,
-                    client_type=config.node.client_type,
-                    shared_storage_bytes=config.storage.limit_bytes,
-                    free_storage_bytes=chunk_store.stats().free_limit_bytes,
-                    accepts_peer_storage=_accepts_peer_storage(_list_active_peers()),
-                    poll_interval_seconds=getattr(config.network, "relay_poll_interval_seconds", 1),
-                    peer_timeout_seconds=getattr(config.network, "peer_timeout_seconds", 35),
-                    relay_urls=desired_urls,
-                    relay_discovery_callback=_learn_relay_urls,
-                    chat_enabled=_chat_enabled(),
-                    chat_alias=_chat_alias(),
-                    inventory_callback=_relay_inventory_payload,
-                )
-                relay_clients[desired_url] = relay_client
-                relay_transports[desired_url] = relay_transport
-                relay_transport.start()
-            p2p_client.set_relay_clients(relay_clients)
-            app.config["DCLOUD_RELAY_TRANSPORTS"] = dict(relay_transports)
-            app.config["DCLOUD_RELAY_TRANSPORT"] = next(iter(relay_transports.values()), None)
+            for transport in list(relay_transports.values()):
+                stop = getattr(transport, "stop", None)
+                if callable(stop):
+                    stop()
+            relay_transports.clear()
+            relay_clients.clear()
+            p2p_client.clear_relay_clients()
+            app.config["DCLOUD_RELAY_TRANSPORTS"] = {}
+            app.config["DCLOUD_RELAY_TRANSPORT"] = None
         _sync_peer_connector_settings()
 
     def _deliver_pending_share_revocations(peers: list[Any] | None = None) -> tuple[int, int]:
@@ -3621,7 +3372,7 @@ def create_app(
         return delivered, failed
 
     def _deliver_active_manifest_shares(peers: list[Any] | None = None, *, min_interval_seconds: int | None = None) -> dict[str, int]:
-        """Best-effort sync for peer shares when recipients appear later via Relay/Internet.
+        """Best-effort sync for peer shares when recipients appear later via Internet.
 
         The interactive share action sends the manifest to peers that are active at
         that moment. Remote peers can be offline, behind NAT, or only visible a
@@ -5385,7 +5136,7 @@ def create_app(
                         failed += 1
                 # Also trigger the relay-aware share refresher. This covers peers
                 # that appeared through the tracker a moment after the dialog was
-                # opened or that are reachable only via Relay/Internet.
+                # opened or that are reachable only via Internet.
                 try:
                     refresh = _deliver_active_manifest_shares(_list_active_peers(), min_interval_seconds=1)
                     delivered += int(refresh.get("delivered", 0))
@@ -5461,9 +5212,9 @@ def create_app(
                 config,
                 client_type="server",
                 shared_storage_gb=request.form.get("shared_storage_gb", bytes_to_gib(config.storage.limit_bytes)),
-                relay_server_url=request.form.get("relay_server_url"),
-                relay_server_urls=request.form.get("relay_server_urls", request.form.get("relay_server_url", "\n".join(extra_relay_urls(config.network.relay_urls)))),
-                relay_enabled=request.form.get("relay_enabled") == "on",
+                relay_server_url="",
+                relay_server_urls=[],
+                relay_enabled=False,
                 smb_enabled=request.form.get("smb_enabled") == "on",
                 smb_username=request.form.get("smb_username", config.smb.username),
                 smb_password=submitted_smb_password if submitted_smb_password else config.smb.password,
@@ -5511,7 +5262,7 @@ def create_app(
                         smb_runtime_note = ", SMB gestoppt"
                 elif config.smb.enabled:
                     smb_runtime_note = ", SMB-Änderung gespeichert; Dienst-Neustart erforderlich"
-            relay_note = ", PHP-Relay deaktiviert" if not config.network.relay_urls else f", {len(config.network.relay_urls)} PHP-Relay(s) aktiv"
+            relay_note = ", Direct-Peer-Modus"
             message = (
                 f"Einstellungen gespeichert: {client_type_label(config.node.client_type)}, "
                 f"{bytes_to_gib(config.storage.limit_bytes):g} GB freigegeben{relay_note}, "
@@ -5542,7 +5293,7 @@ def create_app(
             except Exception as exc:
                 errors.append(str(exc))
         if successes:
-            suffix = f"; {len(errors)} Relay/Connector(s) derzeit nicht erreichbar" if errors else ""
+            suffix = f"; {len(errors)} Peer-Connector(s) derzeit nicht erreichbar" if errors else ""
             return jsonify({"ok": True, "message": f"Netzwerksuche gestartet{suffix}", "state": state_payload()})
         message = "; ".join(errors) if errors else "Peer-Discovery ist nicht verfügbar"
         return jsonify({"ok": False, "message": f"Netzwerksuche fehlgeschlagen: {message}", "state": state_payload()}), 503
@@ -5835,7 +5586,7 @@ def create_app(
         # Large files should not require one HTTP/PHP roundtrip per chunk.
         # Very large PHP-forwarded packs can still appear to hang because many
         # hosts buffer a full upstream response before the downloader sees any
-        # bytes. Keep relay/forwarder blocks moderate and direct-LAN blocks
+        # bytes. Keep direct/gateway blocks moderate and direct-LAN blocks
         # larger. Failed blocks are retried in smaller slices before the old
         # single-chunk fallback is used.
         def batch_limits_for_peer(peer: Peer) -> tuple[int, int, float]:
@@ -6358,7 +6109,7 @@ def create_app(
         """Create a temporary public download link for any file visible on this node.
 
         Incoming peer shares are allowed as well: the current node acts as a
-        gateway and restores missing chunks through LAN/Public/Gateway/Relay
+        gateway and restores missing chunks through LAN/Public/Gateway
         routes before streaming the file to the public relay link.
         """
         try:
@@ -6386,28 +6137,17 @@ def create_app(
             _persist_external_download_links()
         direct_link = url_for("external_download_file", token=token, _external=True)
         relay_links = []
-        if allow_relay_data_transfer:
-            relay_links = _create_relay_external_download_links(
-                local_token=token,
-                manifest=manifest,
-                expires_at=expires_at,
-                ttl_seconds=minutes * 60,
-            )
-        usable_relay_links = [item for item in relay_links if item.get("ok") and item.get("url")]
-        preferred_link = str(usable_relay_links[0].get("url")) if usable_relay_links else direct_link
-        message = (
-            f"Externer Relay-Download-Link wurde für {minutes} Minute(n) erstellt."
-            if usable_relay_links
-            else f"Direkter externer Download-Link wurde für {minutes} Minute(n) erstellt; kein Relay-Link verfügbar."
-        )
+        usable_relay_links = []
+        preferred_link = direct_link
+        message = f"Direkter externer Download-Link wurde für {minutes} Minute(n) erstellt."
         return jsonify(
             {
                 "ok": True,
                 "url": preferred_link,
                 "directUrl": direct_link,
-                "relayUrl": str(usable_relay_links[0].get("url")) if usable_relay_links else "",
-                "relayLinks": relay_links,
-                "viaRelay": bool(usable_relay_links),
+                "relayUrl": "",
+                "relayLinks": [],
+                "viaRelay": False,
                 "token": token,
                 "expiresInMinutes": minutes,
                 "expiresAt": datetime.fromtimestamp(expires_at, timezone.utc).isoformat(),
@@ -6992,7 +6732,8 @@ def create_app(
             "display_name": display_name_for_peer(identity.node_id, config.node.name),
             "client_type": config.node.client_type,
             "web_port": int(getattr(config.web, "port", 8787) or 8787),
-            "relay_data_enabled": bool(allow_relay_data_transfer),
+            "relay_data_enabled": False,
+            "relay_removed": True,
         }
 
     app.config["DCLOUD_STOP_RELAYS"] = _stop_relay_transport

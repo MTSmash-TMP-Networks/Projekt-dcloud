@@ -16,7 +16,6 @@ import time
 from typing import Any, Callable, Mapping
 from urllib import error, parse, request
 
-from .http_relay import RelayError, RelayHttpResponse, HttpRelayClient, RELAY_HOST
 from .peers import Peer, normalize_public_urls
 from ..crypto import b64decode, derive_node_id, sha256_hex, sign_bytes, verify_signature
 from ..identity import NodeIdentity
@@ -24,6 +23,25 @@ from ..manifests import FileManifest, canonical_manifest_bytes
 from ..storage import ChunkStore, StorageError
 
 LOG = logging.getLogger(__name__)
+
+class RelayError(RuntimeError):
+    """Compatibility exception for removed PHP relay paths."""
+
+
+@dataclass
+class RelayHttpResponse:
+    status_code: int
+    headers: dict[str, str]
+    body: bytes
+
+
+class HttpRelayClient:
+    """Removed PHP relay placeholder; direct peer routes are required."""
+    relay_url = ""
+
+
+RELAY_HOST = "__relay__"
+
 REVOCATION_ACTION = "revoke_share"
 FILE_DELETE_ACTION = "delete_file"
 DEFAULT_MIN_REPLICAS_WITH_PEERS = 2
@@ -37,9 +55,9 @@ CHUNK_PACK_MAGIC = b"DCLOUD-CHUNK-PACK-1\n"
 # writes many chunks from one binary request instead of one HTTP/PHP request per chunk.
 CHUNK_UPLOAD_PACK_MAGIC = b"DCLOUD-CHUNK-UPLOAD-PACK-1\n"
 MAX_DIRECT_UPLOAD_PACK_BYTES = 64 * 1024 * 1024
-MAX_RELAY_UPLOAD_PACK_BYTES = 4 * 1024 * 1024
+MAX_RELAY_UPLOAD_PACK_BYTES = 0
 MAX_DIRECT_UPLOAD_PACK_CHUNKS = 64
-MAX_RELAY_UPLOAD_PACK_CHUNKS = 8
+MAX_RELAY_UPLOAD_PACK_CHUNKS = 0
 
 
 @dataclass
@@ -79,7 +97,7 @@ class DistributedUploadResult:
 def _direct_peer_candidates(peer: Peer) -> list[Peer]:
     """Return direct HTTP(S) routes to probe before any PHP relay fallback.
 
-    Relay-discovered peers can still be reachable through LAN, DDNS or a manual
+    Peers can be reachable through LAN, DDNS or a manual
     NAT endpoint from the dashboard.  The returned peers are cloned direct routes
     with scheme/host/web_port filled from the best candidate URL when possible.
     """
@@ -157,7 +175,7 @@ def _relay_http_message(response: RelayHttpResponse) -> str:
     text = response.body.decode("utf-8", errors="replace").strip() if response.body else ""
     if text:
         return text[:180]
-    return f"Relay HTTP {response.status_code}"
+    return f"Forwarded HTTP {response.status_code}"
 
 
 def canonical_revocation_bytes(data: dict[str, Any]) -> bytes:
@@ -272,9 +290,9 @@ def verify_manifest_deletion(data: dict[str, Any]) -> FileManifest:
 class P2PStorageClient:
     """Small peer API client using only the Python standard library.
 
-    Direct LAN HTTP is attempted first. If a peer was learned through the PHP
-    relay, or if direct HTTP fails while a relay fallback exists, the same peer
-    API request is forwarded through the HTTP relay mailbox.
+    Direct HTTP(S) peer routes are required. PHP relay/mailbox transport has
+    been removed from the runtime; unreachable peers fail fast with a clear
+    routing error instead of falling back to shared PHP.
     """
 
     def __init__(
@@ -290,11 +308,9 @@ class P2PStorageClient:
         self.timeout = float(timeout)
         self.default_web_port = int(default_web_port)
         self.identity = identity
-        # PHP relay remains useful as tracker/signaling for small control payloads.
-        # Bulk chunk upload/download is disabled by default because shared PHP is
-        # too slow and memory-heavy for real file transfer. Manual NAT/DDNS routes
-        # and gateway peers are the intended data path.
-        self.allow_relay_data = bool(allow_relay_data)
+        # PHP relay transport is removed. The flag is accepted only for older
+        # configs/API callers and is always forced off.
+        self.allow_relay_data = False
         self.relay_client = relay_client
         self.relay_clients: dict[str, HttpRelayClient] = {}
         if relay_clients:
@@ -303,12 +319,8 @@ class P2PStorageClient:
             self.set_relay_clients({relay_client.relay_url: relay_client})
 
     def set_relay_clients(self, relay_clients: Mapping[str, HttpRelayClient] | list[HttpRelayClient]) -> None:
-        if isinstance(relay_clients, list):
-            clients = {client.relay_url.rstrip("/"): client for client in relay_clients}
-        else:
-            clients = {str(url).rstrip("/"): client for url, client in relay_clients.items()}
-        self.relay_clients = clients
-        self.relay_client = next(iter(clients.values()), None)
+        self.relay_clients = {}
+        self.relay_client = None
 
     def clear_relay_clients(self) -> None:
         self.relay_clients = {}
@@ -346,18 +358,10 @@ class P2PStorageClient:
         return f"{scheme}://{host}:{port}"
 
     def _relay_client_for(self, peer: Peer) -> HttpRelayClient | None:
-        if not peer.relay_url:
-            return None
-        relay_url = peer.relay_url.rstrip("/")
-        client = self.relay_clients.get(relay_url)
-        if client is not None:
-            return client
-        if self.relay_client is not None and self.relay_client.relay_url.rstrip("/") == relay_url:
-            return self.relay_client
         return None
 
     def _relay_available(self, peer: Peer) -> bool:
-        return self._relay_client_for(peer) is not None
+        return False
 
     def _direct_route_for_transfer(self, peer: Peer, *, timeout: float | None = None) -> Peer | None:
         """Return a currently reachable direct route for a peer, if any.
@@ -392,47 +396,10 @@ class P2PStorageClient:
         body: bytes = b"",
         timeout: float | None = None,
     ) -> RelayHttpResponse:
-        relay_client = self._relay_client_for(peer)
-        if relay_client is None:
-            raise RelayError("Relay-Client ist nicht konfiguriert")
-        request_timeout = relay_client.request_timeout if timeout is None else timeout
-        signed_headers = self._signed_headers(method, path, body, headers or {})
-
-        # Fast path: let the PHP relay act as a short-lived HTTP forwarder to
-        # the peer's public IP/web port. This avoids writing one mailbox file
-        # per chunk on the relay. If the target is not reachable from the relay
-        # server (CGNAT, firewall, no port-forward), fall back to the existing
-        # mailbox relay, where the target client polls outward.
-        direct_proxy_error: RelayError | None = None
-        try:
-            return relay_client.direct_proxy_request(
-                peer,
-                method=method,
-                path=path,
-                headers=signed_headers,
-                body=body,
-                timeout=request_timeout,
-            )
-        except RelayError as exc:
-            direct_proxy_error = exc
-            LOG.debug("PHP direct proxy to peer %s unavailable; falling back to mailbox relay: %s", peer.node_id, exc)
-
-        try:
-            return relay_client.forward_request(
-                peer,
-                method=method,
-                path=path,
-                headers=signed_headers,
-                body=body,
-                timeout=request_timeout,
-            )
-        except RelayError as exc:
-            if direct_proxy_error is not None:
-                raise RelayError(f"PHP-Forwarder fehlgeschlagen: {direct_proxy_error}; Mailbox-Relay fehlgeschlagen: {exc}") from exc
-            raise
+        raise RelayError("PHP-Relay wurde entfernt; Peer ist nur ueber direkte LAN/NAT/DDNS/Gateway-Route erreichbar")
 
     @staticmethod
-    def _relay_transfer_message(response: RelayHttpResponse, fallback: str = "stored via relay") -> str:
+    def _relay_transfer_message(response: RelayHttpResponse, fallback: str = "stored via direct route") -> str:
         mode = ""
         for key, value in (response.headers or {}).items():
             if key.lower() == "x-dcloud-relay-mode":
@@ -441,7 +408,7 @@ class P2PStorageClient:
         if mode == "direct_proxy":
             return "stored via php forwarder"
         if mode == "mailbox":
-            return "stored via relay mailbox"
+            return "stored via direct route mailbox"
         return fallback
 
     def put_chunk(
@@ -490,13 +457,13 @@ class P2PStorageClient:
                     last_error = _relay_http_message(response)
                 except RelayError as exc:
                     last_error = str(exc)
-                    LOG.debug("Relay chunk upload to peer %s failed on attempt %s", peer.node_id, attempt + 1, exc_info=True)
+                    LOG.debug("Direct fallback chunk upload to peer %s failed on attempt %s", peer.node_id, attempt + 1, exc_info=True)
                 if attempt < 2:
                     # Relay requests are idempotent for chunks because the digest
                     # is the storage key. A retry is much cheaper than falling
                     # back locally when PHP/FastCGI answered slowly.
                     time.sleep(0.4 * (attempt + 1))
-            return PeerTransferResult(peer.node_id, False, last_error or "Relay-Chunktransfer fehlgeschlagen")
+            return PeerTransferResult(peer.node_id, False, last_error or "Direkter Chunktransfer fehlgeschlagen")
         return PeerTransferResult(peer.node_id, False, "Keine erreichbare Peer-Route")
 
     @staticmethod
@@ -529,7 +496,7 @@ class P2PStorageClient:
 
         This is the fast upload-replication path. It avoids a separate HTTP/PHP
         request for every chunk and avoids JSON/base64 inside the peer API. When
-        the PHP relay/forwarder is used, the outer relay request still needs to
+        legacy forwarding is used, the outer request still needs to
         encode the body, so relay batches are intentionally smaller than direct
         batches.
         """
@@ -570,7 +537,7 @@ class P2PStorageClient:
                     message = _relay_http_message(relay_response)
                     return [PeerTransferResult(peer.node_id, False, message) for _ in chunks]
             except RelayError as exc:
-                LOG.debug("Relay binary batch chunk upload to peer %s failed", peer.node_id, exc_info=True)
+                LOG.debug("Direct binary batch chunk upload to peer %s failed", peer.node_id, exc_info=True)
                 return [PeerTransferResult(peer.node_id, False, str(exc)) for _ in chunks]
         if response_body is None:
             return [PeerTransferResult(peer.node_id, False, str(direct_error or "Keine erreichbare Peer-Route")) for _ in chunks]
@@ -631,7 +598,7 @@ class P2PStorageClient:
                     message = _relay_http_message(relay_response)
                     return [PeerTransferResult(peer.node_id, False, message) for _ in chunks]
             except RelayError as exc:
-                LOG.debug("Relay batch chunk upload to peer %s failed", peer.node_id, exc_info=True)
+                LOG.debug("Direct batch chunk upload to peer %s failed", peer.node_id, exc_info=True)
                 return [PeerTransferResult(peer.node_id, False, str(exc)) for _ in chunks]
         stored = response_payload.get("stored", []) if isinstance(response_payload, dict) else []
         stored_digests = {str(digest) for digest in stored if isinstance(digest, str)}
@@ -807,10 +774,10 @@ class P2PStorageClient:
                     last_error = StorageError(f"Peer {peer.node_id} returned relay HTTP {response.status_code} for chunk batch")
                 except (RelayError, json.JSONDecodeError) as exc:
                     last_error = exc
-                    LOG.debug("Relay chunk batch download from peer %s failed on attempt %s", peer.node_id, attempt + 1, exc_info=True)
+                    LOG.debug("Direct chunk batch download from peer %s failed on attempt %s", peer.node_id, attempt + 1, exc_info=True)
                 if attempt == 0:
                     time.sleep(0.4)
-            raise StorageError(f"Chunk-Batch konnte über Relay von Peer {peer.node_id} nicht geladen werden: {last_error}") from last_error
+            raise StorageError(f"Chunk-Batch konnte über direkte Route von Peer {peer.node_id} nicht geladen werden: {last_error}") from last_error
 
         raise StorageError(f"Chunk-Batch konnte von Peer {peer.node_id} nicht geladen werden: {direct_error}") from direct_error
 
@@ -841,10 +808,10 @@ class P2PStorageClient:
                     last_error = StorageError(f"Peer {peer.node_id} returned relay HTTP {response.status_code} for chunk {digest}")
                 except RelayError as exc:
                     last_error = exc
-                    LOG.debug("Relay chunk download from peer %s failed on attempt %s", peer.node_id, attempt + 1, exc_info=True)
+                    LOG.debug("Direct chunk download from peer %s failed on attempt %s", peer.node_id, attempt + 1, exc_info=True)
                 if attempt < 2:
                     time.sleep(0.4 * (attempt + 1))
-            raise StorageError(f"Chunk {digest} konnte über Relay von Peer {peer.node_id} nicht geladen werden: {last_error}") from last_error
+            raise StorageError(f"Chunk {digest} konnte über direkte Route von Peer {peer.node_id} nicht geladen werden: {last_error}") from last_error
         raise StorageError(f"Chunk {digest} konnte von Peer {peer.node_id} nicht geladen werden: {direct_error}") from direct_error
 
     def _post_json_to_peer(self, peer: Peer, *, path: str, payload: dict[str, Any], success_message: str, log_message: str) -> PeerTransferResult:
@@ -990,7 +957,7 @@ class P2PStorageClient:
                 direct_error = StorageError(_relay_http_message(response))
             except (RelayError, ValueError, TypeError) as exc:
                 direct_error = exc
-                LOG.debug("Relay shared manifest sync from peer %s failed", peer.node_id, exc_info=True)
+                LOG.debug("Direct shared manifest sync from peer %s failed", peer.node_id, exc_info=True)
         raise StorageError(f"Freigaben-Sync von Peer {peer.node_id} fehlgeschlagen: {direct_error}") from direct_error
 
     def get_manifests_for_owner(self, peer: Peer, owner_node_id: str) -> list[dict[str, Any]]:
@@ -1021,7 +988,7 @@ class P2PStorageClient:
                 direct_error = StorageError(_relay_http_message(response))
             except (RelayError, ValueError, TypeError) as exc:
                 direct_error = exc
-                LOG.debug("Relay owner manifest recovery from peer %s failed", peer.node_id, exc_info=True)
+                LOG.debug("Direct owner manifest recovery from peer %s failed", peer.node_id, exc_info=True)
         raise StorageError(f"Manifest-Wiederherstellung von Peer {peer.node_id} fehlgeschlagen: {direct_error}") from direct_error
 
     def post_manifest_revocation(self, peer: Peer, revocation: dict[str, Any]) -> PeerTransferResult:

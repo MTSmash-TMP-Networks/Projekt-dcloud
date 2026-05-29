@@ -10,11 +10,28 @@ import time
 from dataclasses import dataclass
 from typing import Any, Callable
 
-from .http_relay import local_lan_addresses, normalize_relay_urls
 from .peers import Peer, PeerProvider, normalize_lan_addresses
 from ..identity import NodeIdentity
 
 LOG = logging.getLogger(__name__)
+
+def normalize_relay_urls(value: object) -> list[str]:
+    """Relay support was removed; keep parser compatibility for old packets."""
+    return []
+
+
+def local_lan_addresses() -> list[str]:
+    addresses: list[str] = []
+    try:
+        hostname = socket.gethostname()
+        for info in socket.getaddrinfo(hostname, None, family=socket.AF_INET):
+            ip = str(info[4][0])
+            if ip and ip not in addresses and not ip.startswith("127."):
+                addresses.append(ip)
+    except Exception:
+        pass
+    return addresses[:8]
+
 
 
 @dataclass(frozen=True)

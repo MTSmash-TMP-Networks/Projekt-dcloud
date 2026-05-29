@@ -40,7 +40,7 @@ def display_name_for_peer(node_id: str, configured_name: str | None = None) -> s
 def _address_is_lan_or_local(host: str | None) -> bool:
     """Return True when *host* is a local/LAN endpoint worth preferring.
 
-    Relay/API discovery can report the same peer through an external route while
+    Direct/API discovery can report the same peer through an external route while
     UDP discovery sees it directly in the same LAN.  The direct LAN address is
     faster and more stable, so the peer registry keeps it as the primary route
     and stores relay metadata only as fallback.
@@ -246,7 +246,7 @@ class Peer:
     def endpoint_key(self) -> tuple[str, int, str | None]:
         """Stable endpoint key used to prevent duplicate entries for the same address.
 
-        Relay-only peers do not have a meaningful host/UDP endpoint. Include
+        Route-only peers do not have a meaningful host/UDP endpoint. Include
         their node ID in the key so one PHP relay can hold many active nodes
         without collapsing them into a single duplicate endpoint.
         """
@@ -345,7 +345,7 @@ class InMemoryPeerProvider:
                 # Preserve useful metadata if an older peer did not advertise a
                 # field in this heartbeat.  Route selection is intentionally not
                 # "last write wins": LAN/direct discovery must stay primary when
-                # the same peer is also visible through relay/API/public routes.
+                # the same peer is also visible through direct/API/public routes.
                 peer.name = peer.name if peer.name is not None else existing.name
                 peer.client_type = peer.client_type if peer.client_type is not None else existing.client_type
                 peer.shared_storage_bytes = (
@@ -417,7 +417,7 @@ class InMemoryPeerProvider:
             self._purge_stale_locked(now)
             # Keep insertion order stable for the dashboard.  Previously the list
             # was sorted by ``last_seen`` which made peers jump to the top every
-            # time they announced themselves via UDP/relay/API.  Python dicts
+            # time they announced themselves via UDP/API.  Python dicts
             # preserve insertion order, and assigning an existing node_id does
             # not move it, so existing rows keep their visible position while
             # newly discovered peers are appended at the end.
