@@ -63,7 +63,7 @@ from ..network.p2p_storage import (
     verify_manifest_deletion,
     verify_manifest_revocation,
 )
-from ..network.peers import Peer, PeerProvider, display_name_for_peer
+from ..network.peers import Peer, PeerProvider, display_name_for_peer, normalize_public_urls
 from ..storage import ChunkStore, StorageError, StorageStats
 from .upload_progress import UploadProgressTracker
 from .auth import UserStore
@@ -2034,7 +2034,8 @@ def create_app(
             scheme=(parsed.scheme or "http").lower(),
             client_type=str(route.get("client_type") or "server") if str(route.get("client_type") or "server") in {"server"} else None,
             accepts_peer_storage=bool(route.get("accepts_peer_storage", True)),
-            free_storage_bytes=int(route.get("free_storage_bytes") or 0) or None,
+            shared_storage_bytes=int(route.get("shared_storage_bytes") or 0) or None,
+            free_storage_bytes=int(route.get("free_storage_bytes") or route.get("shared_storage_bytes") or 0) or None,
         )
 
     def _load_manual_peer_routes() -> None:
@@ -2075,7 +2076,8 @@ def create_app(
                     "source": "gateway" if via_gateway else "manual",
                     "client_type": str(item.get("client_type") or "server"),
                     "accepts_peer_storage": bool(item.get("accepts_peer_storage", True)),
-                    "free_storage_bytes": int(item.get("free_storage_bytes") or 0),
+                    "shared_storage_bytes": int(item.get("shared_storage_bytes") or 0),
+                    "free_storage_bytes": int(item.get("free_storage_bytes") or item.get("shared_storage_bytes") or 0),
                 }
             manual_peer_routes = loaded
         except FileNotFoundError:
@@ -2124,7 +2126,9 @@ def create_app(
             public_urls=[url],
             scheme=(parsed.scheme or "http").lower(),
             client_type=str(payload.get("client_type") or "server") if str(payload.get("client_type") or "server") in {"server"} else None,
-            accepts_peer_storage=True,
+            shared_storage_bytes=int(payload.get("shared_storage_bytes") or 0) or None,
+            free_storage_bytes=int(payload.get("free_storage_bytes") or payload.get("shared_storage_bytes") or 0) or None,
+            accepts_peer_storage=bool(payload.get("accepts_peer_storage", True)),
         )
         return peer, payload
 
@@ -2141,18 +2145,27 @@ def create_app(
             manual_peer_routes[peer.node_id] = {
                 "node_id": peer.node_id,
                 "display_name": label,
-                "urls": urls[:8],
+                "urls": urls[:16],
                 "created_at": float(existing.get("created_at") or now),
                 "updated_at": now,
                 "last_ok_at": now,
                 "last_error": "",
+                "source": "manual",
+                "client_type": str(payload.get("client_type") or "server"),
+                "accepts_peer_storage": bool(payload.get("accepts_peer_storage", True)),
+                "shared_storage_bytes": int(payload.get("shared_storage_bytes") or 0),
+                "free_storage_bytes": int(payload.get("free_storage_bytes") or payload.get("shared_storage_bytes") or 0),
             }
             _persist_manual_peer_routes()
         peer_provider.add_or_update(peer)
         try:
-            _sync_gateway_peers_from_peer(peer, force=True)
+            _perform_peer_exchange(peer, force=True)
         except Exception:
-            LOG.debug("Gateway peer discovery from %s failed", peer.node_id, exc_info=True)
+            LOG.debug("Active Direct-Peer exchange with %s failed", peer.node_id, exc_info=True)
+            try:
+                _sync_gateway_peers_from_peer(peer, force=True)
+            except Exception:
+                LOG.debug("Gateway peer discovery from %s failed", peer.node_id, exc_info=True)
         return peer
 
     def _manual_peer_routes_payload() -> list[dict[str, Any]]:
@@ -2172,6 +2185,9 @@ def create_app(
                     "via_gateway_node_id": str(route.get("via_gateway_node_id") or ""),
                     "gateway_display_name": str(route.get("gateway_display_name") or ""),
                     "source": str(route.get("source") or ("gateway" if route.get("via_gateway_node_id") else "manual")),
+                    "shared_storage_bytes": int(route.get("shared_storage_bytes") or 0),
+                    "free_storage_bytes": int(route.get("free_storage_bytes") or route.get("shared_storage_bytes") or 0),
+                    "accepts_peer_storage": bool(route.get("accepts_peer_storage", True)),
                 }
                 for route in routes
                 if str(route.get("node_id") or "")
@@ -2230,7 +2246,8 @@ def create_app(
                 "source": "gateway",
                 "client_type": str(peer_info.get("client_type") or "server"),
                 "accepts_peer_storage": bool(peer_info.get("accepts_peer_storage", True)),
-                "free_storage_bytes": int(peer_info.get("free_storage_bytes") or 0),
+                "shared_storage_bytes": int(peer_info.get("shared_storage_bytes") or 0),
+                "free_storage_bytes": int(peer_info.get("free_storage_bytes") or peer_info.get("shared_storage_bytes") or 0),
             }
             _persist_manual_peer_routes()
             route = dict(manual_peer_routes[node_id])
@@ -2300,13 +2317,24 @@ def create_app(
                         continue
                     peer_provider.add_or_update(peer)
                     active_by_id[peer.node_id] = peer
-                    _sync_gateway_peers_from_peer(peer)
+                    try:
+                        _perform_peer_exchange(peer)
+                    except Exception:
+                        LOG.debug("Active Direct-Peer exchange refresh with %s failed", peer.node_id, exc_info=True)
+                        try:
+                            _sync_gateway_peers_from_peer(peer)
+                        except Exception:
+                            LOG.debug("Gateway peer-list refresh from %s failed", peer.node_id, exc_info=True)
                     with manual_peer_routes_lock:
                         current = manual_peer_routes.get(node_id)
                         if current is not None:
                             current["last_ok_at"] = now
                             current["last_error"] = ""
                             current["display_name"] = str(current.get("display_name") or payload.get("name") or display_name_for_peer(node_id, peer.name))
+                            current["client_type"] = str(payload.get("client_type") or "server")
+                            current["accepts_peer_storage"] = bool(payload.get("accepts_peer_storage", True))
+                            current["shared_storage_bytes"] = int(payload.get("shared_storage_bytes") or 0)
+                            current["free_storage_bytes"] = int(payload.get("free_storage_bytes") or payload.get("shared_storage_bytes") or 0)
                             changed = True
                     break
                 except Exception as exc:
@@ -2396,7 +2424,6 @@ def create_app(
 
     with manual_peer_routes_lock:
         _load_manual_peer_routes()
-    _refresh_manual_peer_routes(force=True)
 
     with external_link_lock:
         _load_external_download_links()
@@ -3067,6 +3094,200 @@ def create_app(
             except Exception:
                 pass
         return urls[:8]
+
+    def _configured_public_peer_urls() -> list[str]:
+        """Return optional operator-configured public URLs for this node.
+
+        The Direct-Peer build no longer uses a shared PHP relay.  When a node is
+        reachable through DDNS/reverse proxy, administrators can still expose
+        the address through environment variables so the one-sided peer exchange
+        can give the remote node a reliable callback route.
+        """
+        candidates: list[str] = []
+        raw_values = [
+            os.environ.get("DCLOUD_PUBLIC_URL"),
+            os.environ.get("DCLOUD_PUBLIC_URLS"),
+            os.environ.get("DCLOUD_DIRECT_URL"),
+            os.environ.get("DCLOUD_DIRECT_URLS"),
+        ]
+        for raw in raw_values:
+            if not raw:
+                continue
+            for item in re.split(r"[\s,;]+", str(raw)):
+                value = item.strip()
+                if value:
+                    candidates.append(value)
+        return normalize_public_urls(candidates)
+
+    def _local_peer_callback_urls(*, include_lan: bool = True) -> list[str]:
+        urls: list[str] = []
+        for url in _configured_public_peer_urls():
+            if url not in urls:
+                urls.append(url)
+        if include_lan:
+            for url in _detect_lan_dashboard_urls():
+                try:
+                    normalized = _normalize_direct_peer_url(url)
+                except ValueError:
+                    continue
+                if normalized not in urls:
+                    urls.append(normalized)
+        return urls[:16]
+
+    def _peer_exchange_payload() -> dict[str, Any]:
+        stats = chunk_store.stats()
+        return {
+            "version": 1,
+            "node_id": identity.node_id,
+            "name": config.node.name,
+            "display_name": display_name_for_peer(identity.node_id, config.node.name),
+            "client_type": config.node.client_type,
+            "web_port": int(getattr(config.web, "port", 8787) or 8787),
+            "shared_storage_bytes": int(config.storage.limit_bytes),
+            "free_storage_bytes": int(stats.free_limit_bytes),
+            "accepts_peer_storage": True,
+            "public_urls": _configured_public_peer_urls(),
+            "callback_urls": _local_peer_callback_urls(),
+            "lan_addresses": [url_parse.urlsplit(url).hostname for url in _detect_lan_dashboard_urls() if url_parse.urlsplit(url).hostname],
+            "capabilities": {
+                "direct_peer": True,
+                "peer_exchange": True,
+                "gateway_discovery": True,
+                "gateway_proxy": True,
+                "relay_removed": True,
+            },
+        }
+
+    def _candidate_urls_from_peer_info(peer_info: dict[str, Any], *, fallback_endpoint: str = "", source_ip: str = "") -> list[str]:
+        urls: list[str] = []
+
+        def add(raw: Any) -> None:
+            try:
+                normalized = _normalize_direct_peer_url(raw)
+            except ValueError:
+                return
+            if normalized not in urls:
+                urls.append(normalized)
+
+        for key in ("callback_urls", "public_urls", "urls"):
+            raw = peer_info.get(key)
+            values = raw if isinstance(raw, list) else ([raw] if raw else [])
+            for value in values:
+                add(value)
+        if fallback_endpoint:
+            add(fallback_endpoint)
+        if source_ip:
+            try:
+                port = int(peer_info.get("web_port") or getattr(config.web, "port", 8787) or 8787)
+            except Exception:
+                port = int(getattr(config.web, "port", 8787) or 8787)
+            host = str(source_ip or "").strip().strip("[]")
+            if host:
+                host_part = f"[{host}]" if ":" in host and not host.startswith("[") else host
+                add(f"http://{host_part}:{port}")
+        return urls[:16]
+
+    def _store_direct_peer_from_info(
+        peer_info: dict[str, Any],
+        *,
+        fallback_endpoint: str = "",
+        source_ip: str = "",
+        source: str = "peer_exchange",
+        display_name: str | None = None,
+    ) -> Peer | None:
+        node_id = _safe_peer_id(str(peer_info.get("node_id") or ""))
+        if not node_id or node_id == identity.node_id or node_id in _disabled_peer_ids():
+            return None
+        urls = _candidate_urls_from_peer_info(peer_info, fallback_endpoint=fallback_endpoint, source_ip=source_ip)
+        if not urls:
+            return None
+        first = urls[0]
+        try:
+            parsed = url_parse.urlsplit(first)
+            host = (parsed.hostname or "").strip().strip("[]")
+            port = parsed.port or (443 if parsed.scheme == "https" else int(peer_info.get("web_port") or getattr(config.web, "port", 8787) or 8787))
+        except Exception:
+            return None
+        if not host:
+            return None
+        now = time.time()
+        label = (display_name or str(peer_info.get("display_name") or peer_info.get("name") or "") or display_name_for_peer(node_id)).strip()
+        try:
+            shared_storage_bytes = int(peer_info.get("shared_storage_bytes") or 0)
+        except Exception:
+            shared_storage_bytes = 0
+        try:
+            free_storage_bytes = int(peer_info.get("free_storage_bytes") or shared_storage_bytes or 0)
+        except Exception:
+            free_storage_bytes = shared_storage_bytes
+        accepts_peer_storage = bool(peer_info.get("accepts_peer_storage", True))
+        with manual_peer_routes_lock:
+            existing = manual_peer_routes.get(node_id, {})
+            existing_urls = [str(url) for url in existing.get("urls", []) if str(url)] if isinstance(existing.get("urls"), list) else []
+            merged_urls = []
+            for url in [*urls, *existing_urls]:
+                if url not in merged_urls:
+                    merged_urls.append(url)
+            manual_peer_routes[node_id] = {
+                "node_id": node_id,
+                "display_name": label,
+                "urls": merged_urls[:16],
+                "created_at": float(existing.get("created_at") or now),
+                "updated_at": now,
+                "last_ok_at": now,
+                "last_error": "",
+                "source": source,
+                "client_type": str(peer_info.get("client_type") or "server"),
+                "accepts_peer_storage": accepts_peer_storage,
+                "shared_storage_bytes": shared_storage_bytes,
+                "free_storage_bytes": free_storage_bytes,
+                "via_gateway_node_id": str(existing.get("via_gateway_node_id") or ""),
+                "gateway_display_name": str(existing.get("gateway_display_name") or ""),
+            }
+            _persist_manual_peer_routes()
+            stored_route = dict(manual_peer_routes[node_id])
+        routed_peer = _manual_route_to_peer(stored_route)
+        if routed_peer is not None:
+            peer_provider.add_or_update(routed_peer)
+            return routed_peer
+        return None
+
+    def _ingest_peer_exchange_response(payload: dict[str, Any], gateway_peer: Peer | None = None) -> int:
+        count = 0
+        remote_peer = payload.get("peer") if isinstance(payload.get("peer"), dict) else None
+        if remote_peer is not None:
+            stored = _store_direct_peer_from_info(remote_peer, source="peer_exchange")
+            if stored is not None:
+                count += 1
+        raw_peers = payload.get("peers") if isinstance(payload.get("peers"), list) else []
+        if gateway_peer is not None:
+            for item in raw_peers:
+                if isinstance(item, dict) and _store_gateway_peer_route(gateway_peer, item):
+                    count += 1
+        else:
+            for item in raw_peers:
+                if isinstance(item, dict):
+                    stored = _store_direct_peer_from_info(item, source="peer_exchange")
+                    if stored is not None:
+                        count += 1
+        return count
+
+    def _perform_peer_exchange(peer: Peer, *, force: bool = False) -> int:
+        """Run the active one-sided Direct-Peer handshake with a reachable peer."""
+        _ = force
+        payload = _peer_exchange_payload()
+        response = p2p_client.post_peer_connect(peer, payload)
+        count = _ingest_peer_exchange_response(response, gateway_peer=peer)
+        try:
+            count += _sync_gateway_peers_from_peer(peer, force=force)
+        except Exception:
+            LOG.debug("Gateway discovery after peer exchange failed for %s", peer.node_id, exc_info=True)
+        return count
+
+    try:
+        _refresh_manual_peer_routes(force=True)
+    except Exception:
+        LOG.debug("Initial Direct-Peer route refresh failed", exc_info=True)
 
     def settings_payload(stats: StorageStats | None = None, peers: list[Any] | None = None) -> dict[str, Any]:
         current_stats = stats or chunk_store.stats()
@@ -5435,7 +5656,7 @@ def create_app(
         label = display_name_for_peer(peer.node_id, peer.name)
         return jsonify({
             "ok": True,
-            "message": f"Direkter NAT-/DDNS-Endpunkt gespeichert: {label}",
+            "message": f"Direkter Peer gespeichert und aktiver Austausch gestartet: {label}",
             "peer": peer.to_dict(),
             "manualPeerRoutes": _manual_peer_routes_payload(),
             "state": state_payload(),
@@ -6383,25 +6604,62 @@ def create_app(
         except Exception as exc:
             return jsonify({"ok": False, "message": f"Gateway-Weiterleitung fehlgeschlagen: {exc}"}), 502
 
-    @app.get("/api/p2p/peers")
-    def api_p2p_known_peers() -> Response:
-        requester_node_id = str(request.environ.get("dcloud.p2p_node_id") or "").strip()
+    def _request_base_peer_url() -> str:
+        raw = str(request.url_root or "").rstrip("/")
+        try:
+            return _normalize_direct_peer_url(raw)
+        except ValueError:
+            return raw
+
+    def _known_peers_export_payload(requester_node_id: str = "") -> list[dict[str, Any]]:
         peers: list[dict[str, Any]] = []
-        gateway_urls = []
-        for peer in _list_active_peers():
+        gateway_urls: list[str] = []
+        for raw in [_request_base_peer_url(), *_local_peer_callback_urls()]:
+            try:
+                normalized = _normalize_direct_peer_url(raw)
+            except ValueError:
+                continue
+            if normalized not in gateway_urls:
+                gateway_urls.append(normalized)
+        for peer in peer_provider.list_peers():
             if peer.node_id in {identity.node_id, requester_node_id}:
                 continue
-            # Do not re-export peers that we only know through another gateway;
-            # otherwise two gateways could create routing loops.  We only export
-            # peers this node can currently address directly in its own LAN/manual mesh.
             if getattr(peer, "route_via_node_id", None):
                 continue
             item = peer.to_dict()
             item["reachable_via_gateway"] = True
             item["gateway_node_id"] = identity.node_id
             item["gateway_display_name"] = display_name_for_peer(identity.node_id, config.node.name)
-            item["gateway_public_urls"] = gateway_urls
+            item["gateway_public_urls"] = gateway_urls[:8]
             peers.append(item)
+        return peers
+
+    @app.post("/api/p2p/peers/connect")
+    def api_p2p_peer_connect() -> Response:
+        payload = request.get_json(silent=True) if request.is_json else None
+        if not isinstance(payload, dict):
+            return jsonify({"ok": False, "message": "Peer-Connect erwartet JSON"}), 400
+        requester_node_id = str(request.environ.get("dcloud.p2p_node_id") or "").strip()
+        payload_node_id = _safe_peer_id(str(payload.get("node_id") or ""))
+        if not requester_node_id or payload_node_id != requester_node_id:
+            return jsonify({"ok": False, "message": "Peer-Connect Node-ID stimmt nicht mit Signatur überein"}), 403
+        source_ip = str(request.headers.get("X-Forwarded-For") or request.remote_addr or "").split(",")[0].strip()
+        stored_peer = _store_direct_peer_from_info(payload, source_ip=source_ip, source="peer_exchange")
+        if stored_peer is None:
+            return jsonify({"ok": False, "message": "Peer-Connect konnte keine Rückroute speichern"}), 400
+        peers = _known_peers_export_payload(requester_node_id)
+        return jsonify({
+            "ok": True,
+            "message": "Direct-Peer-Austausch aktiv",
+            "peer": _peer_exchange_payload(),
+            "peers": peers,
+            "count": len(peers),
+        })
+
+    @app.get("/api/p2p/peers")
+    def api_p2p_known_peers() -> Response:
+        requester_node_id = str(request.environ.get("dcloud.p2p_node_id") or "").strip()
+        peers = _known_peers_export_payload(requester_node_id)
         return jsonify({"ok": True, "gateway_node_id": identity.node_id, "peers": peers, "count": len(peers)})
 
     @app.route("/api/p2p/gateway/<target_node_id>/<path:subpath>", methods=["GET", "POST"])
@@ -6951,6 +7209,7 @@ def create_app(
 
     @app.get("/healthz")
     def healthz() -> dict[str, Any]:
+        stats = chunk_store.stats()
         return {
             "status": "ok",
             "node_id": identity.node_id,
@@ -6958,8 +7217,15 @@ def create_app(
             "display_name": display_name_for_peer(identity.node_id, config.node.name),
             "client_type": config.node.client_type,
             "web_port": int(getattr(config.web, "port", 8787) or 8787),
+            "shared_storage_bytes": int(config.storage.limit_bytes),
+            "free_storage_bytes": int(stats.free_limit_bytes),
+            "accepts_peer_storage": True,
+            "public_urls": _configured_public_peer_urls(),
+            "callback_urls": _local_peer_callback_urls(),
             "relay_data_enabled": False,
             "relay_removed": True,
+            "direct_peer": True,
+            "peer_exchange": True,
             "gateway_discovery": True,
             "gateway_proxy": True,
         }

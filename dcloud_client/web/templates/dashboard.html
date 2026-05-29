@@ -959,7 +959,7 @@
             <h3>Direktverbindung & Portfreigaben</h3>
             <div class="settings-inline">
               <span class="settings-badge" id="settings-direct-mode">{{ settings_json.directConnectionModeLabel }}</span>
-              <span class="settings-note" style="margin:0;">Daten laufen ausschließlich direkt über LAN, NAT/DDNS oder Gateway. Direct-Peer ist entfernt.</span>
+              <span class="settings-note" style="margin:0;">Daten laufen ausschließlich direkt über LAN, NAT/DDNS oder Gateway. PHP-Relay ist entfernt.</span>
             </div>
             <div class="settings-port-grid" id="settings-direct-ports">
               <div class="settings-port-card">
@@ -1032,7 +1032,8 @@
         </form>
         <section class="settings-panel" style="margin-top:1rem;">
           <h3>Direkte NAT-/DDNS-Endpunkte</h3>
-          <p class="settings-note">Trage hier die öffentliche Adresse eines Peers mit Portfreigabe oder Reverse Proxy ein, z. B. <code>https://peer.example.de</code> oder <code>mein-ddns.net:8787</code>. Diese Route wird für Freigaben, Uploads, Downloads und Gateway-Zugriff direkt genutzt. Es gibt keine indirekte Ersatzroute mehr.</p>
+          <p class="settings-note">Trage hier die erreichbare Adresse eines Peers ein, z. B. <code>http://192.168.3.1:8787</code>, <code>https://peer.example.de</code> oder <code>mein-ddns.net:8787</code>. Beim Speichern startet ein signierter Peer-Austausch: Die Gegenseite speichert automatisch deine Rückroute, wenn sie dich über VPN/LAN/NAT erreichen kann. Einseitiges Eintragen reicht dann für beide Seiten.</p>
+          <p class="settings-note"><strong>Gateway:</strong> Kennt der eingetragene Peer weitere interne Peers, werden diese als „über Gateway erreichbar“ übernommen. Freigaben und Chunks laufen dann über den eingetragenen Gateway-Peer weiter.</p>
           <div class="settings-form" id="manual-peer-route-form">
             <label for="settings-nat-endpoint">NAT-/DDNS-Endpunkt</label>
             <input id="settings-nat-endpoint" type="text" placeholder="https://peer.example.de oder mein-ddns.net:8787">
@@ -2389,9 +2390,11 @@
           const urls = Array.isArray(route.urls) ? route.urls.join(", ") : "";
           const viaGateway = route.via_gateway_node_id || "";
           const gatewayName = route.gateway_display_name || String(viaGateway).slice(0, 12);
-          const kind = viaGateway ? `Gateway-Peer über ${gatewayName}` : "direkter Endpunkt";
-          const status = route.active ? "aktiv" : (route.last_error ? `nicht erreichbar: ${route.last_error}` : "wartet");
-          text.textContent = `${label} · ${kind} · ${urls} · ${status}`;
+          const source = route.source || (viaGateway ? "gateway" : "manual");
+          const kind = viaGateway ? `Gateway-Peer über ${gatewayName}` : (source === "peer_exchange" ? "gegenseitig synchronisierter Direkt-Peer" : "direkter Endpunkt");
+          const storage = route.accepts_peer_storage ? `P2P-Speicher aktiv · frei ${formatBytes(route.free_storage_bytes || route.shared_storage_bytes || 0)}` : "keine P2P-Ablage";
+          const status = route.active ? "aktiv" : (route.last_error ? `nicht erreichbar: ${route.last_error}` : "wartet auf Austausch");
+          text.textContent = `${label} · ${kind} · ${urls} · ${storage} · ${status}`;
           const removeBtn = document.createElement("button");
           removeBtn.type = "button";
           removeBtn.className = "explorer-btn";

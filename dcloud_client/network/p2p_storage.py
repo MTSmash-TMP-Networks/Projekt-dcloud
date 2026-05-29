@@ -1033,6 +1033,38 @@ class P2PStorageClient:
                 LOG.debug("Gateway peer-list sync from peer %s failed", peer.node_id, exc_info=True)
         raise StorageError(f"Gateway-Peer-Liste von Peer {peer.node_id} konnte nicht geladen werden: {direct_error}") from direct_error
 
+    def post_peer_connect(self, peer: Peer, payload: dict[str, Any]) -> dict[str, Any]:
+        """Register this node with a manually configured direct peer.
+
+        Manual NAT/DDNS endpoints must work one-sided: when node A enters node
+        B, B should immediately learn a return route to A and both nodes should
+        exchange their currently known peers.  This signed control request is
+        lightweight and carries only metadata/URLs, never bulk data.
+        """
+        path = "/api/p2p/peers/connect"
+        payload_bytes = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+        headers = {"Accept": "application/json", "Content-Type": "application/json"}
+        peer = self._prefer_direct_transfer_peer(peer)
+        path = self._path_for_peer(peer, path)
+        if peer.host == RELAY_HOST:
+            raise StorageError("Peer-Connect benötigt einen direkten Endpunkt")
+        url = f"{self.api_base(peer)}{path}"
+        req = request.Request(url, data=payload_bytes, headers=self._signed_headers("POST", path, payload_bytes, headers), method="POST")
+        try:
+            with request.urlopen(req, timeout=max(self.timeout, 8.0)) as response:
+                body = response.read(256 * 1024)
+                data = json.loads(body.decode("utf-8", errors="replace"))
+                if not isinstance(data, dict):
+                    raise StorageError("Peer-Connect lieferte keine gültige Antwort")
+                if data.get("ok") is False:
+                    raise StorageError(str(data.get("message") or "Peer-Connect wurde abgelehnt"))
+                return data
+        except error.HTTPError as exc:
+            detail = exc.read().decode("utf-8", errors="replace") if exc.fp else ""
+            raise StorageError(f"Peer-Connect fehlgeschlagen: HTTP {exc.code} {detail[:180]}") from exc
+        except (OSError, error.URLError, ValueError, TypeError) as exc:
+            raise StorageError(f"Peer-Connect fehlgeschlagen: {exc}") from exc
+
     def post_manifest_revocation(self, peer: Peer, revocation: dict[str, Any]) -> PeerTransferResult:
         return self._post_json_to_peer(
             peer,
