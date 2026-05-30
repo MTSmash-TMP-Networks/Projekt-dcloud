@@ -4985,9 +4985,15 @@ def create_app(
             stats = chunk_store.stats()
         except Exception:
             return True
-        needed = max(0, int(file_size or 0))
-        if needed <= 0:
+        size = max(0, int(file_size or 0))
+        if size <= 0:
             return True
+        # Be conservative.  The upload must not fail after the browser has
+        # already transferred the whole file just because the last local chunk
+        # crosses the configured storage limit.  A nearly-full node should switch
+        # to Remote-Primary before chunking starts.
+        reserve = max(int(getattr(chunk_store, "chunk_size", 0) or 0), 16 * 1024 * 1024, int(size * 0.05))
+        needed = size + reserve
         if stats.free_limit_bytes < needed:
             return False
         if stats.filesystem_free_bytes - needed < stats.min_free_bytes:

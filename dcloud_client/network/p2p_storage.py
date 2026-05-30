@@ -1237,6 +1237,32 @@ def complete_file_locations(chunks: list[Mapping[str, Any]] | list[dict[str, Any
     return sorted(common or [])
 
 
+def _chunk_store_can_hold_complete_seed(chunk_store: ChunkStore, source_size: int) -> bool:
+    """Conservative preflight for keeping a complete local seed.
+
+    The upload path used to begin as local-first whenever the *current* free
+    counter looked barely sufficient.  If the local node then ran out of space on
+    the last chunks, earlier chunks had already been striped over peers and no
+    remote node necessarily held the full file.  This check deliberately keeps a
+    small reserve so a nearly-full node switches to remote-primary before the
+    expensive browser upload finishes.
+    """
+    size = max(0, int(source_size or 0))
+    if size <= 0:
+        return True
+    try:
+        stats = chunk_store.stats()
+    except Exception:
+        return True
+    reserve = max(int(getattr(chunk_store, "chunk_size", 0) or 0), 16 * 1024 * 1024, int(size * 0.05))
+    needed = size + reserve
+    if int(stats.free_limit_bytes) < needed:
+        return False
+    if int(stats.filesystem_free_bytes) - needed < int(stats.min_free_bytes):
+        return False
+    return True
+
+
 def _adaptive_chunk_targets(
     *,
     ranked_peers: list[Peer],
@@ -1379,8 +1405,17 @@ def distribute_file_chunks(
         effective_chunk_size = chunk_store.chunk_size
 
     ranked_peers = _rank_peers_by_speed(peers, p2p_client) if peers else []
-    targets: list[Peer | None] = [*ranked_peers, None] if ranked_peers else [None]
-    target_ids = [*[peer.node_id for peer in ranked_peers], local_node_id] if ranked_peers else [local_node_id]
+    source_size = int(source_path.stat().st_size)
+    local_complete_seed_possible = _chunk_store_can_hold_complete_seed(chunk_store, source_size)
+    remote_seed_peer_id: str | None = None
+    if ranked_peers and not local_complete_seed_possible:
+        # Do not start filling an already-full local node.  The fastest peer is
+        # required from chunk 0 so it becomes the complete seed and the upload
+        # cannot fail only at the final manifest step.
+        remote_seed_peer_id = ranked_peers[0].node_id
+        target_ids = [peer.node_id for peer in ranked_peers]
+    else:
+        target_ids = [*[peer.node_id for peer in ranked_peers], local_node_id] if ranked_peers else [local_node_id]
     desired_replicas = dynamic_mirror_replica_count(len(ranked_peers), min_replicas_with_peers=min_replicas_with_peers)
     raid_profile = adaptive_raid_profile(len(ranked_peers))
 
@@ -1390,7 +1425,6 @@ def distribute_file_chunks(
         adaptive_raid_level=int(raid_profile["raid_level"]),
         adaptive_raid_mode=str(raid_profile["raid_mode"]),
     )
-    source_size = int(source_path.stat().st_size)
     total_chunks = (source_size + effective_chunk_size - 1) // effective_chunk_size if source_size else 0
 
     def notify(**payload: Any) -> None:
@@ -1535,7 +1569,11 @@ def distribute_file_chunks(
 
     notify(
         phase="chunking_start",
-        status="Datei wird lokal vorbereitet; Direct-/Gateway-Peer-Replikation wird gebündelt…",
+        status=(
+            "Lokaler Speicher reicht nicht für einen vollständigen Seed; Datei wird direkt auf einen Speicher-Peer geschrieben…"
+            if remote_seed_peer_id
+            else "Datei wird lokal vorbereitet; Direct-/Gateway-Peer-Replikation wird gebündelt…"
+        ),
         total_bytes=source_size,
         total_chunks=total_chunks,
         target_count=len(result.targets),
@@ -1552,7 +1590,7 @@ def distribute_file_chunks(
 
     with source_path.open("rb") as handle:
         index = 0
-        local_writable = True
+        local_writable = bool(local_complete_seed_possible or not ranked_peers)
         while True:
             raw = handle.read(effective_chunk_size)
             if not raw:
@@ -1586,11 +1624,16 @@ def distribute_file_chunks(
                     locations.append(local_node_id)
                 except StorageError as exc:
                     local_writable = False
+                    if ranked_peers and remote_seed_peer_id is None:
+                        for candidate in ranked_peers:
+                            if candidate.node_id not in failed_peer_ids:
+                                remote_seed_peer_id = candidate.node_id
+                                break
                     notify(
                         phase="local_fallback",
-                        status=f"Lokaler Speicher voll ({exc}); Upload läuft über Netzwerk-Peers weiter…",
+                        status=f"Lokaler Speicher voll ({exc}); vollständiger Seed wird auf einem Netzwerk-Peer fortgesetzt…",
                         current_chunk=index + 1,
-                        current_peer=local_node_id,
+                        current_peer=remote_seed_peer_id or local_node_id,
                         local_error=str(exc),
                     )
 
@@ -1609,11 +1652,17 @@ def distribute_file_chunks(
             result.stored_bytes += len(stored_data)
 
             if ranked_peers and len(entry["locations"]) < desired_replicas:
-                # If this node cannot keep a local complete seed, the fastest
-                # peer becomes the seed target and receives every chunk.  When
-                # the local copy exists, extra replicas are striped over peers
-                # instead of mirroring the whole file to every node.
-                required_seed_ids = set() if local_node_id in entry["locations"] else {ranked_peers[0].node_id}
+                # If this node cannot keep a local complete seed, one reachable
+                # peer must receive every chunk.  This is decided before the
+                # upload starts for nearly-full nodes and switched on immediately
+                # if a local write fails mid-file.  Extra replicas are still
+                # striped over the remaining peers.
+                if remote_seed_peer_id:
+                    required_seed_ids = {remote_seed_peer_id}
+                elif local_node_id in entry["locations"]:
+                    required_seed_ids = set()
+                else:
+                    required_seed_ids = {ranked_peers[0].node_id}
                 for peer in _adaptive_chunk_targets(
                     ranked_peers=ranked_peers,
                     ranked_ids=[p.node_id for p in ranked_peers],
@@ -1667,6 +1716,135 @@ def distribute_file_chunks(
     for node_id in list(pending_by_peer):
         flush_peer_bucket(node_id, reason="Upload abgeschlossen")
 
+    def repair_complete_seed_from_source() -> None:
+        """Make one reachable peer hold every chunk if local storage filled up late."""
+        if complete_file_locations(result.chunks):
+            return
+        if not ranked_peers:
+            return
+        candidate_ids: list[str] = []
+        if remote_seed_peer_id:
+            candidate_ids.append(remote_seed_peer_id)
+        candidate_ids.extend(peer.node_id for peer in ranked_peers)
+        candidate_ids = list(dict.fromkeys(candidate_ids))
+        peers_by_id = {peer.node_id: peer for peer in ranked_peers}
+
+        def send_seed_batch(peer: Peer, batch: list[dict[str, Any]]) -> bool:
+            if not batch:
+                return True
+            results = p2p_client.put_chunks_pack(peer, chunks=batch)
+            if len(results) != len(batch) or any(not transfer.ok for transfer in results):
+                json_results = p2p_client.put_chunks_batch(peer, chunks=batch)
+                if len(json_results) == len(batch):
+                    results = [
+                        json_results[i] if not results or i >= len(results) or not results[i].ok else results[i]
+                        for i in range(len(batch))
+                    ]
+            ok = True
+            for item, transfer in zip(batch, results):
+                entry = result.chunks[int(item["entry_index"])]
+                if transfer.ok:
+                    if peer.node_id not in entry["locations"]:
+                        entry["locations"].append(peer.node_id)
+                    result.remote_successes += 1
+                else:
+                    retry = p2p_client.put_chunk(
+                        peer,
+                        digest=str(item["digest"]),
+                        stored_data=bytes(item["stored_data"]),
+                        original_size=int(item["original_size"]),
+                        stored_size=int(item["stored_size"]),
+                        index=int(item["index"]),
+                        compression=str(item["compression"]) if item.get("compression") else None,
+                    )
+                    if retry.ok:
+                        if peer.node_id not in entry["locations"]:
+                            entry["locations"].append(peer.node_id)
+                        result.remote_successes += 1
+                    else:
+                        result.remote_failures += 1
+                        ok = False
+            return ok
+
+        for node_id in candidate_ids:
+            peer = peers_by_id.get(node_id)
+            if peer is None or peer.node_id in failed_peer_ids:
+                continue
+            missing = {
+                idx
+                for idx, entry in enumerate(result.chunks)
+                if peer.node_id not in [str(loc) for loc in entry.get("locations", []) if str(loc)]
+            }
+            if not missing:
+                result.complete_seed_node_ids = complete_file_locations(result.chunks)
+                return
+            name = peer_label(peer)
+            notify(
+                phase="remote_seed_repair",
+                status=f"Lokaler Speicher war nicht vollständig; fehlende Seed-Chunks werden auf {name} ergänzt…",
+                current_peer=name,
+                total_chunks=len(result.chunks),
+                current_chunk=0,
+            )
+            batch: list[dict[str, Any]] = []
+            batch_bytes = 0
+            max_chunks, max_bytes = _upload_batch_limits(peer)
+            with source_path.open("rb") as repair_handle:
+                for idx, entry in enumerate(result.chunks):
+                    raw = repair_handle.read(effective_chunk_size)
+                    if idx not in missing:
+                        continue
+                    stored_data, compression = chunk_store.prepare_chunk_data(
+                        raw,
+                        file_name=getattr(source_path, "name", None),
+                        file_size=source_size,
+                    )
+                    digest = chunk_store.digest_for_stored_data(stored_data)
+                    if digest != str(entry.get("hash")):
+                        result.remote_failures += 1
+                        continue
+                    item = {
+                        "entry_index": idx,
+                        "digest": digest,
+                        "stored_data": stored_data,
+                        "original_size": int(entry.get("size") or len(raw)),
+                        "stored_size": len(stored_data),
+                        "index": idx,
+                        "compression": compression,
+                    }
+                    batch.append(item)
+                    batch_bytes += len(stored_data)
+                    if len(batch) >= max_chunks or batch_bytes >= max_bytes:
+                        send_seed_batch(peer, batch)
+                        notify(
+                            phase="remote_seed_repair",
+                            status=f"Seed-Ergänzung auf {name} läuft…",
+                            current_peer=name,
+                            current_chunk=idx + 1,
+                            total_chunks=len(result.chunks),
+                            remote_successes=result.remote_successes,
+                            remote_failures=result.remote_failures,
+                        )
+                        batch = []
+                        batch_bytes = 0
+                if batch:
+                    send_seed_batch(peer, batch)
+            if peer.node_id in complete_file_locations(result.chunks):
+                result.complete_seed_node_ids = complete_file_locations(result.chunks)
+                notify(
+                    phase="remote_seed_repair_done",
+                    status=f"Vollständiger Remote-Seed auf {name} wurde hergestellt.",
+                    current_peer=name,
+                    current_chunk=len(result.chunks),
+                    total_chunks=len(result.chunks),
+                    remote_successes=result.remote_successes,
+                    remote_failures=result.remote_failures,
+                )
+                return
+            failed_peer_ids.add(peer.node_id)
+
+    repair_complete_seed_from_source()
+
     for entry in result.chunks:
         if not entry["locations"]:
             raise StorageError(
@@ -1678,6 +1856,10 @@ def distribute_file_chunks(
         if len(entry["locations"]) < desired_replicas:
             result.under_replicated_chunks += 1
     result.complete_seed_node_ids = complete_file_locations(result.chunks)
+    if ranked_peers and not result.complete_seed_node_ids:
+        raise StorageError(
+            "Upload konnte keinen vollständigen Seed herstellen: lokaler Speicher ist voll und kein Peer hat alle Chunks bestätigt"
+        )
 
     notify(
         phase="chunking_done",
