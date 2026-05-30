@@ -2043,6 +2043,8 @@ def create_app(
             accepts_peer_storage=bool(route.get("accepts_peer_storage", True)),
             shared_storage_bytes=int(route.get("shared_storage_bytes") or 0) or None,
             free_storage_bytes=int(route.get("free_storage_bytes") or route.get("shared_storage_bytes") or 0) or None,
+            chat_enabled=bool(route.get("chat_enabled", True)),
+            chat_alias=_sanitize_chat_alias(route.get("chat_alias") or "") or None,
         )
 
     def _load_manual_peer_routes() -> None:
@@ -2086,6 +2088,8 @@ def create_app(
                     "accepts_peer_storage": bool(item.get("accepts_peer_storage", True)),
                     "shared_storage_bytes": int(item.get("shared_storage_bytes") or 0),
                     "free_storage_bytes": int(item.get("free_storage_bytes") or item.get("shared_storage_bytes") or 0),
+                    "chat_enabled": bool(item.get("chat_enabled", True)),
+                    "chat_alias": _sanitize_chat_alias(item.get("chat_alias") or ""),
                 }
             manual_peer_routes = loaded
         except FileNotFoundError:
@@ -2138,6 +2142,8 @@ def create_app(
             shared_storage_bytes=int(payload.get("shared_storage_bytes") or 0) or None,
             free_storage_bytes=int(payload.get("free_storage_bytes") or payload.get("shared_storage_bytes") or 0) or None,
             accepts_peer_storage=bool(payload.get("accepts_peer_storage", True)),
+            chat_enabled=bool(payload.get("chat_enabled", True)),
+            chat_alias=_sanitize_chat_alias(payload.get("chat_alias") or "") or None,
         )
         return peer, payload
 
@@ -2164,6 +2170,8 @@ def create_app(
                 "accepts_peer_storage": bool(payload.get("accepts_peer_storage", True)),
                 "shared_storage_bytes": int(payload.get("shared_storage_bytes") or 0),
                 "free_storage_bytes": int(payload.get("free_storage_bytes") or payload.get("shared_storage_bytes") or 0),
+                "chat_enabled": bool(payload.get("chat_enabled", True)),
+                "chat_alias": _sanitize_chat_alias(payload.get("chat_alias") or ""),
                 "routed_cidrs": normalize_routed_cidrs(payload.get("routed_cidrs") or payload.get("local_subnets")),
             }
             _persist_manual_peer_routes()
@@ -2198,6 +2206,8 @@ def create_app(
                     "shared_storage_bytes": int(route.get("shared_storage_bytes") or 0),
                     "free_storage_bytes": int(route.get("free_storage_bytes") or route.get("shared_storage_bytes") or 0),
                     "accepts_peer_storage": bool(route.get("accepts_peer_storage", True)),
+                    "chat_enabled": bool(route.get("chat_enabled", True)),
+                    "chat_alias": _sanitize_chat_alias(route.get("chat_alias") or ""),
                     "routed_cidrs": normalize_routed_cidrs(route.get("routed_cidrs")),
                 }
                 for route in routes
@@ -2259,6 +2269,8 @@ def create_app(
                 "accepts_peer_storage": bool(peer_info.get("accepts_peer_storage", True)),
                 "shared_storage_bytes": int(peer_info.get("shared_storage_bytes") or 0),
                 "free_storage_bytes": int(peer_info.get("free_storage_bytes") or peer_info.get("shared_storage_bytes") or 0),
+                "chat_enabled": bool(peer_info.get("chat_enabled", True)),
+                "chat_alias": _sanitize_chat_alias(peer_info.get("chat_alias") or ""),
                 "routed_cidrs": normalize_routed_cidrs(peer_info.get("routed_cidrs") or peer_info.get("local_subnets")),
             }
             _persist_manual_peer_routes()
@@ -2352,6 +2364,8 @@ def create_app(
                             current["accepts_peer_storage"] = bool(payload.get("accepts_peer_storage", True))
                             current["shared_storage_bytes"] = int(payload.get("shared_storage_bytes") or 0)
                             current["free_storage_bytes"] = int(payload.get("free_storage_bytes") or payload.get("shared_storage_bytes") or 0)
+                            current["chat_enabled"] = bool(payload.get("chat_enabled", True))
+                            current["chat_alias"] = _sanitize_chat_alias(payload.get("chat_alias") or "")
                             current["routed_cidrs"] = normalize_routed_cidrs(payload.get("routed_cidrs") or payload.get("local_subnets") or current.get("routed_cidrs"))
                             changed = True
                     break
@@ -3361,6 +3375,8 @@ def create_app(
             "shared_storage_bytes": int(config.storage.limit_bytes),
             "free_storage_bytes": int(stats.free_limit_bytes),
             "accepts_peer_storage": True,
+            "chat_enabled": _chat_enabled(),
+            "chat_alias": _chat_alias(),
             "public_urls": _configured_public_peer_urls(),
             "callback_urls": _local_peer_callback_urls(),
             "lan_addresses": [url_parse.urlsplit(url).hostname for url in _detect_lan_dashboard_urls() if url_parse.urlsplit(url).hostname],
@@ -3441,6 +3457,8 @@ def create_app(
         except Exception:
             free_storage_bytes = shared_storage_bytes
         accepts_peer_storage = bool(peer_info.get("accepts_peer_storage", True))
+        chat_enabled = bool(peer_info.get("chat_enabled", True))
+        chat_alias = _sanitize_chat_alias(peer_info.get("chat_alias") or "")
         with manual_peer_routes_lock:
             existing = manual_peer_routes.get(node_id, {})
             existing_urls = [str(url) for url in existing.get("urls", []) if str(url)] if isinstance(existing.get("urls"), list) else []
@@ -3461,6 +3479,8 @@ def create_app(
                 "accepts_peer_storage": accepts_peer_storage,
                 "shared_storage_bytes": shared_storage_bytes,
                 "free_storage_bytes": free_storage_bytes,
+                "chat_enabled": chat_enabled,
+                "chat_alias": chat_alias,
                 "routed_cidrs": normalize_routed_cidrs(peer_info.get("routed_cidrs") or peer_info.get("local_subnets") or existing.get("routed_cidrs")),
                 "via_gateway_node_id": str(existing.get("via_gateway_node_id") or ""),
                 "gateway_display_name": str(existing.get("gateway_display_name") or ""),
@@ -6102,6 +6122,15 @@ def create_app(
             )
             _configure_relay_transport()
             _sync_peer_connector_settings()
+            try:
+                for connector in [candidate for candidate in (peer_connector, *relay_transports.values()) if candidate is not None and hasattr(candidate, "announce_once")]:
+                    connector.announce_once()
+            except Exception:
+                LOG.debug("Could not announce chat/settings update", exc_info=True)
+            try:
+                _schedule_active_mesh_exchange(force=True, min_interval_seconds=0.0)
+            except Exception:
+                LOG.debug("Could not schedule mesh exchange after settings update", exc_info=True)
             new_smb_settings = (
                 bool(config.smb.enabled),
                 str(config.smb.username),
@@ -7225,6 +7254,8 @@ def create_app(
                 "accepts_peer_storage": bool(route.get("accepts_peer_storage", True)),
                 "shared_storage_bytes": int(route.get("shared_storage_bytes") or 0),
                 "free_storage_bytes": int(route.get("free_storage_bytes") or route.get("shared_storage_bytes") or 0),
+                "chat_enabled": bool(route.get("chat_enabled", True)),
+                "chat_alias": _sanitize_chat_alias(route.get("chat_alias") or ""),
                 "public_urls": urls,
                 "urls": urls,
                 "route_via_node_id": str(route.get("via_gateway_node_id") or ""),
@@ -7856,6 +7887,8 @@ def create_app(
             "shared_storage_bytes": int(config.storage.limit_bytes),
             "free_storage_bytes": int(stats.free_limit_bytes),
             "accepts_peer_storage": True,
+            "chat_enabled": _chat_enabled(),
+            "chat_alias": _chat_alias(),
             "public_urls": _configured_public_peer_urls(),
             "callback_urls": _local_peer_callback_urls(),
             "routed_cidrs": _detect_local_routed_cidrs(),

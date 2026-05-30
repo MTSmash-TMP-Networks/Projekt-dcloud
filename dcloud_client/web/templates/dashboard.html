@@ -643,7 +643,7 @@
       <button class="desk-item app-icon" data-app="users" type="button" id="users-app-icon">
         <span class="glyph">👥</span><span class="label">Benutzer</span>
       </button>
-      <button class="desk-item app-icon" data-app="chat" id="chat-app-icon" type="button">
+      <button class="desk-item app-icon" data-app="chat" id="chat-app-icon" type="button" {% if not settings_json.chatEnabled %}hidden{% endif %}>
         <span class="glyph">💬</span><span class="label">Peer-Chat</span><span class="badge-dot" id="chat-app-badge" hidden>1</span>
       </button>
     </div>
@@ -2539,6 +2539,7 @@
         const peers = (appState.peers || []).filter(peer => peer.chat_enabled !== false);
         const summaryByPeer = new Map((chatSummary.conversations || []).map(item => [item.peer_id, item]));
         list.innerHTML = "";
+        if(activeChatPeerId && !peers.some(peer => peer.node_id === activeChatPeerId)) activeChatPeerId = "";
         if(!peers.length){ list.textContent = "Keine aktiven Chat-Peers."; return; }
         if(!activeChatPeerId || !peers.some(peer => peer.node_id === activeChatPeerId)) activeChatPeerId = peers[0].node_id;
         peers.forEach(peer => {
@@ -2822,6 +2823,10 @@
       }
 
       function openWindow(app){
+        if(app === "chat" && ((appState.settings || {}).chatEnabled === false || chatSummary.chat_enabled === false)){
+          showToast("Chat ist auf diesem Peer deaktiviert.", "warning");
+          return;
+        }
         const win = windows[app];
         if(!win) return;
         win.hidden = false;

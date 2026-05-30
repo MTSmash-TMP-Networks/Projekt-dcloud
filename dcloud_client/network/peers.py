@@ -427,6 +427,9 @@ class InMemoryPeerProvider:
                 peer.free_storage_bytes = (
                     peer.free_storage_bytes if peer.free_storage_bytes is not None else existing.free_storage_bytes
                 )
+                # Chat visibility is a real peer capability.  Newer direct/mesh
+                # paths advertise it explicitly; preserving the alias keeps older
+                # announcements from erasing a friendly display name.
                 if peer.chat_alias is None:
                     peer.chat_alias = existing.chat_alias
 
