@@ -6,7 +6,7 @@ Diese Variante entfernt das PHP-Relay vollständig aus dem Projekt. Dateiübertr
 
 - LAN: automatische UDP-Discovery plus direkter HTTP-Transfer auf dem dcloud-Port.
 - Internet: manuell eingetragene NAT-/DDNS-Endpunkte oder HTTPS-Reverse-Proxy.
-- Gateway: ein öffentlich erreichbarer Peer meldet seine internen Peers und kann für diese Chunks/Freigaben weiterleiten.
+- Gateway/Mesh: ein erreichbarer Peer meldet seine internen Peers, gespeicherten Gateway-Routen und lokalen Subnetze. Diese Informationen werden weiter an alle bekannten Peers gegossipt; der Gateway kann Chunks/Freigaben auch über mehrere App-Gateway-Hops weiterleiten.
 - Kein PHP-Fallback: wenn kein direkter Weg erreichbar ist, erscheint eine klare Fehlermeldung.
 
 ## Dashboard
@@ -19,7 +19,7 @@ http://mein-ddns.net:8787
 http://203.0.113.10:8787
 ```
 
-Beim Eintragen wird `/healthz` geprüft und danach ein signierter Peer-Austausch über `/api/p2p/peers/connect` gestartet. Dadurch speichert die Gegenseite automatisch die Rückroute zu diesem Knoten, sofern sie über LAN/VPN/NAT erreichbar ist. Einseitiges Eintragen reicht also für beide Seiten, wenn beide Richtungen direkt routbar sind. Danach können Freigaben, Uploads, Downloads und Gateway-Zugriffe direkt über diesen Endpunkt laufen.
+Beim Eintragen wird `/healthz` geprüft und danach ein signierter Peer-Austausch über `/api/p2p/peers/connect` gestartet. Dadurch speichert die Gegenseite automatisch die Rückroute zu diesem Knoten und beide Seiten tauschen nicht nur sich selbst, sondern ihre komplette bekannte Peer-/Gateway-Routenliste aus. Einseitiges Eintragen reicht also als Einstieg: die weiteren Peers hinter beiden Standorten werden anschließend im Mesh verteilt und als „direkt“ oder „über Gateway erreichbar“ angezeigt.
 
 
 ### Standort-/VPN-Subnetz-Gateway
@@ -31,7 +31,7 @@ Standort A: 192.168.1.0/24, Gateway-Peer 192.168.1.3
 Standort B: 192.168.3.0/24, Gateway-Peer 192.168.3.4
 ```
 
-Wenn `192.168.1.3` und `192.168.3.4` erfolgreich verbunden sind, tauschen sie signiert ihre Peer-Listen und lokalen Subnetz-Hinweise aus. Peers wie `192.168.3.5` lernen dadurch Peers aus `192.168.1.0/24` als „über Gateway 192.168.3.4/192.168.1.3 erreichbar“ und umgekehrt. Dateiübertragung, Freigaben und Chunk-Zugriffe laufen dann über den verbundenen Gateway-Peer weiter.
+Wenn `192.168.1.3` und `192.168.3.4` erfolgreich verbunden sind, tauschen sie signiert ihre Peer-Listen, gespeicherten Gateway-Routen und lokalen Subnetz-Hinweise aus. Die Informationen werden danach weiter an alle aktiven Peers verteilt. Peers wie `192.168.3.5` lernen dadurch alle bekannten Peers aus `192.168.1.0/24` als „über Gateway erreichbar“ und umgekehrt. Dateiübertragung, Freigaben und Chunk-Zugriffe laufen dann über den passenden Gateway-Pfad weiter; bei Bedarf auch über mehrere dcloud-App-Gateway-Hops.
 
 Wichtig: Das ist eine Anwendungsebene innerhalb von dcloud. Das Tool setzt keine Betriebssystem-Routen, NAT-Regeln oder Firewall-Regeln. Andere Programme auf dem Rechner sehen dadurch nicht automatisch das entfernte Subnetz. Für dcloud-Peers reicht diese App-Gateway-Route aber aus.
 

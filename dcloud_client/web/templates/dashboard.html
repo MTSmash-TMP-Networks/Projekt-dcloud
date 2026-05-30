@@ -1020,7 +1020,7 @@
         </form>
 
         <hr style="border:0;border-top:1px solid #d8e4f6;margin:1.1rem 0;">
-        <p>Peers manuell eintragen oder per LAN-Discovery finden. Internet-Peers benötigen einen NAT-/DDNS-Endpunkt oder Reverse Proxy. Ein erreichbarer Gateway-Peer kann dahinterliegende interne Peers und VPN-/LAN-Subnetze bekannt machen und für sie auf Anwendungsebene weiterleiten.</p>
+        <p>Peers manuell eintragen oder per LAN-Discovery finden. Internet-Peers benötigen einen NAT-/DDNS-Endpunkt oder Reverse Proxy. Ein erreichbarer Gateway-Peer kann dahinterliegende interne Peers, gespeicherte Routen und VPN-/LAN-Subnetze bekannt machen, an alle Peers verteilen und für sie auf Anwendungsebene weiterleiten.</p>
         <form method="post" action="/peers" class="settings-form">
           <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
           <label for="settings-peer">LAN/UDP-Peer-Adresse (host:port)</label>
@@ -1032,8 +1032,8 @@
         </form>
         <section class="settings-panel" style="margin-top:1rem;">
           <h3>Direkte NAT-/DDNS-Endpunkte</h3>
-          <p class="settings-note">Trage hier die erreichbare Adresse eines Peers ein, z. B. <code>http://192.168.3.1:8787</code>, <code>https://peer.example.de</code> oder <code>mein-ddns.net:8787</code>. Beim Speichern startet ein signierter Peer-Austausch: Die Gegenseite speichert automatisch deine Rückroute, wenn sie dich über VPN/LAN/NAT erreichen kann. Danach läuft ein aktiver Mesh-Austausch, der bekannte Standort-Subnetze und Peers an beide Seiten verteilt. Einseitiges Eintragen reicht dann für beide Seiten.</p>
-          <p class="settings-note"><strong>Subnetz-Gateway:</strong> Kennt der eingetragene Peer weitere interne Peers oder lokale Netze, werden diese als „über Gateway erreichbar“ übernommen. So kann z. B. ein Peer aus <code>192.168.1.0/24</code> über den verbundenen Gateway-Peer Peers aus <code>192.168.3.0/24</code> nutzen — ohne PHP-Relay und ohne OS-Routing im Tool zu verändern.</p>
+          <p class="settings-note">Trage hier die erreichbare Adresse eines Peers ein, z. B. <code>http://192.168.3.1:8787</code>, <code>https://peer.example.de</code> oder <code>mein-ddns.net:8787</code>. Beim Speichern startet ein signierter Peer-Austausch: Die Gegenseite speichert automatisch deine Rückroute, wenn sie dich über VPN/LAN/NAT erreichen kann. Danach läuft ein aktiver Mesh-Austausch, der nicht nur diesen einen Peer, sondern alle bekannten direkten und Gateway-Peers beider Standorte an alle erreichbaren Knoten weiterverteilt. Einseitiges Eintragen reicht dann für beide Seiten; zusätzliche Peers hinter dem Gateway erscheinen automatisch als „über Gateway erreichbar“.</p>
+          <p class="settings-note"><strong>Subnetz-Gateway:</strong> Kennt der eingetragene Peer weitere interne Peers, manuell gespeicherte Endpunkte oder lokale Netze, werden diese als „über Gateway erreichbar“ übernommen und anschließend weiter an die übrigen Peers gegossipt. So kann z. B. ein Peer aus <code>192.168.1.0/24</code> über den verbundenen Gateway-Peer Peers aus <code>192.168.3.0/24</code> nutzen — ohne PHP-Relay und ohne OS-Routing im Tool zu verändern.</p>
           <div class="settings-form" id="manual-peer-route-form">
             <label for="settings-nat-endpoint">NAT-/DDNS-Endpunkt</label>
             <input id="settings-nat-endpoint" type="text" placeholder="https://peer.example.de oder mein-ddns.net:8787">

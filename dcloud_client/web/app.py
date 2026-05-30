@@ -2284,6 +2284,11 @@ def create_app(
                     count += 1
             except Exception:
                 LOG.debug("Could not store gateway peer route from %s", gateway_peer.node_id, exc_info=True)
+        if count:
+            try:
+                _schedule_active_mesh_exchange(force=True, min_interval_seconds=0.0)
+            except Exception:
+                LOG.debug("Could not schedule mesh re-gossip after learning gateway peers", exc_info=True)
         return count
 
     def _refresh_manual_peer_routes(*, force: bool = False, min_interval_seconds: float = 20.0) -> None:
@@ -3486,6 +3491,13 @@ def create_app(
                     stored = _store_direct_peer_from_info(item, source="peer_exchange")
                     if stored is not None:
                         count += 1
+        if count:
+            try:
+                _schedule_active_mesh_exchange(force=True, min_interval_seconds=0.0)
+            except Exception:
+                # During create_app() the scheduler is defined after this helper;
+                # normal runtime calls can use it, early unit-style calls can skip.
+                LOG.debug("Could not schedule mesh re-gossip after peer ingest", exc_info=True)
         return count
 
     def _perform_peer_exchange(peer: Peer, *, force: bool = False) -> int:
@@ -7045,15 +7057,29 @@ def create_app(
         target = _safe_peer_id(str(target_node_id or ""))
         if not target or target == identity.node_id:
             return None
+        # Prefer the active registry because it contains freshly probed routes.
+        # Unlike the previous implementation this intentionally also returns
+        # gateway-routed peers.  That enables subnet meshes such as
+        # A2 -> A1 -> B1 -> B5 when only A1 and B1 are joined by VPN/NAT.
         for peer in _list_active_peers():
-            if peer.node_id == target and not getattr(peer, "route_via_node_id", None):
+            if peer.node_id == target:
                 return peer
+        with manual_peer_routes_lock:
+            route = dict(manual_peer_routes.get(target) or {})
+        if route:
+            return _manual_route_to_peer(route)
         return None
 
     def _gateway_proxy_to_target(target_node_id: str, subpath: str) -> Response:
         target_peer = _gateway_proxy_target_peer(target_node_id)
         if target_peer is None:
-            return jsonify({"ok": False, "message": "Gateway-Zielpeer ist hier aktuell nicht direkt erreichbar"}), 404
+            return jsonify({"ok": False, "message": "Gateway-Zielpeer ist hier aktuell nicht erreichbar"}), 404
+        try:
+            incoming_depth = int(request.headers.get("X-DCloud-Gateway-Depth") or 0)
+        except Exception:
+            incoming_depth = 0
+        if incoming_depth >= 4:
+            return jsonify({"ok": False, "message": "Gateway-Weiterleitung abgebrochen: zu viele Mesh-Hops"}), 508
         safe_subpath = str(subpath or "").lstrip("/")
         allowed_prefixes = (
             "ping",
@@ -7062,14 +7088,18 @@ def create_app(
             "manifests/",
             "files/delete",
             "replication/delegate",
+            "peers",
+            "peers/",
         )
         if not safe_subpath or not safe_subpath.startswith(allowed_prefixes):
             return jsonify({"ok": False, "message": "Gateway-Pfad ist nicht erlaubt"}), 403
         path = "/api/p2p/" + safe_subpath
+        path_for_peer = p2p_client._path_for_peer(target_peer, path)
         if request.query_string:
-            path_with_query = path + "?" + request.query_string.decode("ascii", errors="ignore")
+            query = request.query_string.decode("ascii", errors="ignore")
+            path_with_query = path_for_peer + "?" + query
         else:
-            path_with_query = path
+            path_with_query = path_for_peer
         body = request.get_data(cache=True) if request.method.upper() != "GET" else b""
         headers: dict[str, str] = {"Accept": request.headers.get("Accept", "application/json")}
         content_type = request.headers.get("Content-Type")
@@ -7082,6 +7112,7 @@ def create_app(
         original_requester = str(request.environ.get("dcloud.p2p_node_id") or "").strip()
         if original_requester:
             headers["X-DCloud-Gateway-Requester-Node-Id"] = original_requester
+        headers["X-DCloud-Gateway-Depth"] = str(incoming_depth + 1)
         signed_headers = p2p_client._signed_headers(request.method.upper(), path_with_query, body, headers)
         url = f"{p2p_client.api_base(target_peer)}{path_with_query}"
         req = url_request.Request(url, data=body if request.method.upper() != "GET" else None, headers=signed_headers, method=request.method.upper())
@@ -7115,7 +7146,19 @@ def create_app(
             return raw
 
     def _known_peers_export_payload(requester_node_id: str = "") -> list[dict[str, Any]]:
+        """Export the whole known mesh, not only directly active peers.
+
+        Earlier builds returned only direct active peers from ``peer_provider``.
+        That meant a VPN/NAT entry point learned the opposite gateway, but the
+        five other peers behind that gateway never reached the rest of the mesh.
+        For the Direct-Peer build each node now gossips all known manual, direct
+        and gateway routes.  The receiver stores them through the signed sender
+        as an application-level gateway route, so one manually connected peer is
+        enough to spread the complete site peer list everywhere.
+        """
+        requester = _safe_peer_id(str(requester_node_id or ""))
         peers: list[dict[str, Any]] = []
+        exported_ids: set[str] = set()
         gateway_urls: list[str] = []
         for raw in [_request_base_peer_url(), *_local_peer_callback_urls()]:
             try:
@@ -7124,21 +7167,67 @@ def create_app(
                 continue
             if normalized not in gateway_urls:
                 gateway_urls.append(normalized)
+
+        def add_export(item: dict[str, Any]) -> None:
+            node_id = _safe_peer_id(str(item.get("node_id") or ""))
+            if not node_id or node_id in {identity.node_id, requester} or node_id in exported_ids:
+                return
+            # Do not immediately send a route back to the gateway it already uses;
+            # that avoids useless A<->B route reflections while still allowing the
+            # route to be sent to every other peer in the mesh.
+            next_hop = _safe_peer_id(str(item.get("route_via_node_id") or item.get("via_gateway_node_id") or ""))
+            if requester and next_hop == requester:
+                return
+            exported_ids.add(node_id)
+            payload = dict(item)
+            payload["node_id"] = node_id
+            payload["reachable_via_gateway"] = True
+            payload["gateway_node_id"] = identity.node_id
+            payload["gateway_display_name"] = display_name_for_peer(identity.node_id, config.node.name)
+            payload["gateway_public_urls"] = gateway_urls[:8]
+            payload["via_subnet_gateway"] = True
+            payload["source"] = "mesh_exchange"
+            payload["routed_cidrs"] = normalize_routed_cidrs(payload.get("routed_cidrs") or payload.get("local_subnets"))
+            peers.append(payload)
+
+        # Active peers first: these carry current free-space/storage metadata.
         for peer in peer_provider.list_peers():
-            if peer.node_id in {identity.node_id, requester_node_id}:
-                continue
-            if getattr(peer, "route_via_node_id", None):
+            if peer.node_id in {identity.node_id, requester}:
                 continue
             item = peer.to_dict()
-            item["reachable_via_gateway"] = True
-            item["gateway_node_id"] = identity.node_id
-            item["gateway_display_name"] = display_name_for_peer(identity.node_id, config.node.name)
-            item["gateway_public_urls"] = gateway_urls[:8]
-            item["via_subnet_gateway"] = True
-            # Keep any peer-advertised CIDRs so the UI can show why this route
-            # is useful across VPN/NAT subnets.
-            item["routed_cidrs"] = normalize_routed_cidrs(item.get("routed_cidrs") or getattr(peer, "routed_cidrs", []))
-            peers.append(item)
+            # Preserve where we learned the route for loop prevention above, but
+            # the receiver will store the route via this signed sender.
+            item["via_gateway_node_id"] = getattr(peer, "route_via_node_id", None) or ""
+            add_export(item)
+
+        # Persisted manual/gateway routes are just as important.  These may not
+        # be in peer_provider at the exact second /api/p2p/peers is called, but
+        # they still need to be gossiped so all six peers on the other side show
+        # up everywhere instead of only the directly entered gateway node.
+        with manual_peer_routes_lock:
+            route_items = [dict(route) for route in manual_peer_routes.values()]
+        for route in route_items:
+            node_id = _safe_peer_id(str(route.get("node_id") or ""))
+            if not node_id or node_id in exported_ids:
+                continue
+            urls = [str(url) for url in route.get("urls", []) if str(url)] if isinstance(route.get("urls"), list) else []
+            item = {
+                "node_id": node_id,
+                "name": str(route.get("display_name") or route.get("name") or node_id[:12]),
+                "display_name": str(route.get("display_name") or route.get("name") or node_id[:12]),
+                "client_type": str(route.get("client_type") or "server"),
+                "accepts_peer_storage": bool(route.get("accepts_peer_storage", True)),
+                "shared_storage_bytes": int(route.get("shared_storage_bytes") or 0),
+                "free_storage_bytes": int(route.get("free_storage_bytes") or route.get("shared_storage_bytes") or 0),
+                "public_urls": urls,
+                "urls": urls,
+                "route_via_node_id": str(route.get("via_gateway_node_id") or ""),
+                "via_gateway_node_id": str(route.get("via_gateway_node_id") or ""),
+                "gateway_display_name": str(route.get("gateway_display_name") or ""),
+                "routed_cidrs": normalize_routed_cidrs(route.get("routed_cidrs")),
+                "source": str(route.get("source") or "manual"),
+            }
+            add_export(item)
         return peers
 
     @app.post("/api/p2p/peers/connect")
