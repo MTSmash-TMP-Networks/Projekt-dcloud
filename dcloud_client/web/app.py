@@ -53,9 +53,12 @@ from ..crypto import b64decode, derive_node_id, sha256_hex, verify_signature
 from ..manifests import DEFAULT_FOLDER, INCOMING_SHARES_FOLDER, REMOTE_DELETE_GRACE_SECONDS, FileManifest, ManifestStore, sanitize_folder_path
 from ..network.p2p_storage import (
     CHUNK_UPLOAD_PACK_MAGIC,
+    DistributedUploadResult,
     P2PStorageClient,
     build_manifest_deletion,
     build_manifest_revocation,
+    adaptive_raid_profile,
+    complete_file_locations,
     distribute_file_chunks,
     dynamic_mirror_replica_count,
     rank_peers_by_speed,
@@ -63,7 +66,7 @@ from ..network.p2p_storage import (
     verify_manifest_deletion,
     verify_manifest_revocation,
 )
-from ..network.peers import Peer, PeerProvider, display_name_for_peer, normalize_public_urls
+from ..network.peers import Peer, PeerProvider, display_name_for_peer, normalize_public_urls, normalize_routed_cidrs
 from ..storage import ChunkStore, StorageError, StorageStats
 from .upload_progress import UploadProgressTracker
 from .auth import UserStore
@@ -399,6 +402,9 @@ def create_app(
     manual_peer_routes: dict[str, dict[str, Any]] = {}
     manual_peer_routes_lock = threading.RLock()
     last_manual_peer_route_refresh_at = 0.0
+    mesh_exchange_lock = threading.Lock()
+    mesh_exchange_worker_lock = threading.Lock()
+    last_mesh_exchange_at = 0.0
     chat_messages: dict[str, deque[dict[str, Any]]] = defaultdict(lambda: deque(maxlen=240))
     chat_unread: dict[str, int] = defaultdict(int)
     chat_lock = threading.RLock()
@@ -2031,6 +2037,7 @@ def create_app(
             public_host=host,
             public_port=int(port),
             public_urls=urls,
+            routed_cidrs=normalize_routed_cidrs(route.get("routed_cidrs")),
             scheme=(parsed.scheme or "http").lower(),
             client_type=str(route.get("client_type") or "server") if str(route.get("client_type") or "server") in {"server"} else None,
             accepts_peer_storage=bool(route.get("accepts_peer_storage", True)),
@@ -2073,6 +2080,7 @@ def create_app(
                     "last_error": str(item.get("last_error") or ""),
                     "via_gateway_node_id": via_gateway or "",
                     "gateway_display_name": str(item.get("gateway_display_name") or ""),
+                    "routed_cidrs": normalize_routed_cidrs(item.get("routed_cidrs")),
                     "source": "gateway" if via_gateway else "manual",
                     "client_type": str(item.get("client_type") or "server"),
                     "accepts_peer_storage": bool(item.get("accepts_peer_storage", True)),
@@ -2124,6 +2132,7 @@ def create_app(
             public_host=host,
             public_port=int(port),
             public_urls=[url],
+            routed_cidrs=normalize_routed_cidrs(payload.get("routed_cidrs") or payload.get("local_subnets")),
             scheme=(parsed.scheme or "http").lower(),
             client_type=str(payload.get("client_type") or "server") if str(payload.get("client_type") or "server") in {"server"} else None,
             shared_storage_bytes=int(payload.get("shared_storage_bytes") or 0) or None,
@@ -2155,6 +2164,7 @@ def create_app(
                 "accepts_peer_storage": bool(payload.get("accepts_peer_storage", True)),
                 "shared_storage_bytes": int(payload.get("shared_storage_bytes") or 0),
                 "free_storage_bytes": int(payload.get("free_storage_bytes") or payload.get("shared_storage_bytes") or 0),
+                "routed_cidrs": normalize_routed_cidrs(payload.get("routed_cidrs") or payload.get("local_subnets")),
             }
             _persist_manual_peer_routes()
         peer_provider.add_or_update(peer)
@@ -2188,6 +2198,7 @@ def create_app(
                     "shared_storage_bytes": int(route.get("shared_storage_bytes") or 0),
                     "free_storage_bytes": int(route.get("free_storage_bytes") or route.get("shared_storage_bytes") or 0),
                     "accepts_peer_storage": bool(route.get("accepts_peer_storage", True)),
+                    "routed_cidrs": normalize_routed_cidrs(route.get("routed_cidrs")),
                 }
                 for route in routes
                 if str(route.get("node_id") or "")
@@ -2248,6 +2259,7 @@ def create_app(
                 "accepts_peer_storage": bool(peer_info.get("accepts_peer_storage", True)),
                 "shared_storage_bytes": int(peer_info.get("shared_storage_bytes") or 0),
                 "free_storage_bytes": int(peer_info.get("free_storage_bytes") or peer_info.get("shared_storage_bytes") or 0),
+                "routed_cidrs": normalize_routed_cidrs(peer_info.get("routed_cidrs") or peer_info.get("local_subnets")),
             }
             _persist_manual_peer_routes()
             route = dict(manual_peer_routes[node_id])
@@ -2335,6 +2347,7 @@ def create_app(
                             current["accepts_peer_storage"] = bool(payload.get("accepts_peer_storage", True))
                             current["shared_storage_bytes"] = int(payload.get("shared_storage_bytes") or 0)
                             current["free_storage_bytes"] = int(payload.get("free_storage_bytes") or payload.get("shared_storage_bytes") or 0)
+                            current["routed_cidrs"] = normalize_routed_cidrs(payload.get("routed_cidrs") or payload.get("local_subnets") or current.get("routed_cidrs"))
                             changed = True
                     break
                 except Exception as exc:
@@ -2736,6 +2749,8 @@ def create_app(
         upload_id: str | None = None,
         peer_node_ids: list[str] | None = None,
         file_name: str = "",
+        preferred_primary_peer_id: str | None = None,
+        strategy: str = "background_adaptive_distribution",
     ) -> bool:
         safe_manifest_id = str(manifest_id or "").strip()
         if not safe_manifest_id:
@@ -2749,6 +2764,8 @@ def create_app(
                 "upload_id": upload_id or "",
                 "peer_node_ids": list(dict.fromkeys(str(item) for item in (peer_node_ids or []) if str(item))),
                 "file_name": file_name,
+                "preferred_primary_peer_id": str(preferred_primary_peer_id or "").strip(),
+                "strategy": str(strategy or "background_adaptive_distribution"),
                 "queued_at": time.time(),
             })
             replication_queue_event.set()
@@ -2758,7 +2775,7 @@ def create_app(
                 active=True,
                 ok=None,
                 phase="background_replication_queued",
-                status="Datei ist lokal gespeichert; Sicherheitskopie läuft per Direct-/Gateway-Upload im Hintergrund…",
+                status="Datei ist gespeichert; adaptive Sicherheitsverteilung läuft entkoppelt im Hintergrund…",
                 percent=100,
                 server_percent=0,
                 details={"backgroundReplication": True, "manifestId": safe_manifest_id},
@@ -2799,6 +2816,20 @@ def create_app(
             result.replicated_chunks = max(0, int(payload.get("replicated_chunks") or 0))
         if "under_replicated_chunks" in payload:
             result.under_replicated_chunks = max(0, int(payload.get("under_replicated_chunks") or 0))
+        if "raid_level" in payload:
+            try:
+                result.adaptive_raid_level = int(payload.get("raid_level") or getattr(result, "adaptive_raid_level", 0))
+            except (TypeError, ValueError):
+                pass
+        if "raid_mode" in payload:
+            result.adaptive_raid_mode = str(payload.get("raid_mode") or getattr(result, "adaptive_raid_mode", "seeded_adaptive"))
+        if isinstance(payload.get("complete_seed_node_ids"), list):
+            result.complete_seed_node_ids = list(dict.fromkeys([
+                *[str(item) for item in getattr(result, "complete_seed_node_ids", []) if str(item)],
+                *[str(item) for item in payload.get("complete_seed_node_ids", []) if str(item)],
+            ]))
+        elif getattr(result, "chunks", None):
+            result.complete_seed_node_ids = complete_file_locations(list(result.chunks))
         return result
 
     def _replicate_via_primary_peer(
@@ -2808,48 +2839,73 @@ def create_app(
         require_primary: bool = False,
         progress_callback: Any = None,
     ) -> tuple[Any, dict[str, Any]]:
-        """Send chunks to one peer first; that peer fans out the RAID mirrors.
+        """Create one complete seed first, then let that seed distribute stripes.
 
-        This keeps the starter node from uploading the same chunk data to every
-        mirror.  If the delegated endpoint is not available yet, the primary
-        copy is still created and the caller can decide whether that is enough.
+        The starter uploads every chunk to only one currently reachable seed peer.
+        If that candidate disappears during transfer, the next ranked peer is
+        tried instead.  Once one peer has the full file, it performs adaptive
+        fan-out: additional peers receive rotating chunk stripes instead of a
+        full mirror copy on every node.
         """
         ranked = rank_peers_by_speed(peers, p2p_client) if peers else []
         if not ranked:
             raise StorageError("Keine aktiven Speicher-Peers verfügbar")
-        primary = ranked[0]
-        initial = replicate_manifest_chunks(
-            manifest=manifest,
-            chunk_store=chunk_store,
-            local_node_id=identity.node_id,
-            peers=[primary],
-            p2p_client=p2p_client,
-            progress_callback=progress_callback,
-            required_peer_node_ids=[primary.node_id] if require_primary else None,
-        )
+
+        initial: Any | None = None
+        primary: Any | None = None
         primary_locations = 0
-        for chunk in initial.chunks:
-            locations = [str(node_id) for node_id in chunk.get("locations", []) if str(node_id)]
-            if primary.node_id in locations:
-                primary_locations += 1
+        seed_errors: list[str] = []
+        for candidate in ranked:
+            try:
+                candidate_result = replicate_manifest_chunks(
+                    manifest=manifest,
+                    chunk_store=chunk_store,
+                    local_node_id=identity.node_id,
+                    peers=[candidate],
+                    p2p_client=p2p_client,
+                    progress_callback=progress_callback,
+                    required_peer_node_ids=[candidate.node_id] if require_primary else [candidate.node_id],
+                )
+            except StorageError as exc:
+                seed_errors.append(f"{candidate.node_id[:12]}: {exc}")
+                continue
+            candidate_locations = sum(
+                1
+                for chunk in candidate_result.chunks
+                if candidate.node_id in [str(node_id) for node_id in chunk.get("locations", []) if str(node_id)]
+            )
+            if candidate_locations == len(candidate_result.chunks):
+                initial = candidate_result
+                primary = candidate
+                primary_locations = candidate_locations
+                break
+            seed_errors.append(
+                f"{candidate.node_id[:12]}: nur {candidate_locations}/{len(candidate_result.chunks)} Chunks bestaetigt"
+            )
+
+        if initial is None or primary is None:
+            detail = "; ".join(seed_errors[-3:]) if seed_errors else "kein Peer hat alle Chunks bestaetigt"
+            raise StorageError(f"Kein vollstaendiger Seed-Peer konnte erstellt werden ({detail})")
+
         info: dict[str, Any] = {
             "delegated": False,
             "primary_peer_id": primary.node_id,
             "primary_chunks": primary_locations,
+            "complete_seed_node_ids": list(dict.fromkeys([primary.node_id, *getattr(initial, "complete_seed_node_ids", [])])),
             "candidate_peer_count": len(ranked),
+            "failed_seed_candidates": seed_errors,
         }
-        if primary_locations <= 0:
-            raise StorageError("Auslagerung zum ersten Peer ist fehlgeschlagen")
 
-        remaining_peer_ids = [peer.node_id for peer in ranked[1:]]
+        remaining_peer_ids = [peer.node_id for peer in ranked if peer.node_id != primary.node_id]
         if remaining_peer_ids:
             delegation_manifest = _manifest_clone_with_chunks(
                 manifest,
                 initial.chunks,
                 placement={
                     **dict(manifest.placement or {}),
-                    "strategy": "delegated_peer_replication_source",
+                    "strategy": "delegated_seeded_adaptive_replication_source",
                     "delegation_primary_peer": primary.node_id,
+                    "complete_seed_node_ids": info["complete_seed_node_ids"],
                 },
             )
             try:
@@ -2864,14 +2920,94 @@ def create_app(
                     "delegated_peer_count": int(payload.get("peer_count") or 0),
                     "delegated_remote_successes": int(payload.get("remote_successes") or 0),
                     "delegated_remote_failures": int(payload.get("remote_failures") or 0),
+                    "complete_seed_node_ids": list(dict.fromkeys([
+                        *info.get("complete_seed_node_ids", []),
+                        *[str(item) for item in payload.get("complete_seed_node_ids", []) if str(item)],
+                    ])),
                 })
             except StorageError as exc:
-                # Compatibility with peers that do not yet implement delegated
-                # replication: keep the primary copy instead of falling back to
-                # fan-out from the starter, because avoiding starter traffic is
-                # the purpose of this path.
+                # Keep the complete seed copy.  A later repair run can continue
+                # adaptive distribution without making this upload fail.
                 info["delegation_error"] = str(exc)
         return initial, info
+
+    def _delegate_from_existing_seed_peer(
+        *,
+        manifest: FileManifest,
+        peers: list[Any],
+        primary_peer_id: str,
+        progress_callback: Any = None,
+    ) -> tuple[Any, dict[str, Any]]:
+        """Continue adaptive distribution from a peer that already has a full seed.
+
+        This is used after a remote-primary upload.  The web request only waits
+        until one complete remote seed exists; the expensive fan-out is queued
+        and this worker asks the seed peer to distribute further in the
+        background.  If the seed is not reachable anymore, fall back to the
+        normal seed-selection logic instead of failing the whole network.
+        """
+        primary_id = str(primary_peer_id or "").strip()
+        primary = next((peer for peer in peers if peer.node_id == primary_id), None)
+        if primary is None:
+            return _replicate_via_primary_peer(
+                manifest=manifest,
+                peers=peers,
+                progress_callback=progress_callback,
+            )
+
+        result = DistributedUploadResult(
+            chunks=[dict(chunk) for chunk in manifest.chunks],
+            targets=[peer.node_id for peer in peers],
+            local_chunks=sum(1 for chunk in manifest.chunks if identity.node_id in [str(node_id) for node_id in chunk.get("locations", [])]),
+            raw_bytes=int(manifest.file_size or 0),
+            stored_bytes=sum(int(chunk.get("stored_size") or chunk.get("size") or 0) for chunk in manifest.chunks),
+            desired_replicas=dynamic_mirror_replica_count(max(1, len(peers))),
+            complete_seed_node_ids=list(dict.fromkeys([primary.node_id, *complete_file_locations(manifest.chunks)])),
+        )
+        info: dict[str, Any] = {
+            "delegated": False,
+            "queued_from_existing_seed": True,
+            "primary_peer_id": primary.node_id,
+            "candidate_peer_count": len(peers),
+        }
+        if progress_callback is not None:
+            try:
+                progress_callback({
+                    "phase": "background_seed_delegation",
+                    "status": "Vollständiger Seed ist vorhanden; Gateway-/Peer-Verteilung läuft vom Seed-Peer im Hintergrund…",
+                    "current_chunk": 0,
+                    "total_chunks": len(manifest.chunks),
+                    "target_count": len(peers),
+                    "desired_replicas": result.desired_replicas,
+                    "current_peer": primary.to_dict().get("display_name") or primary.node_id[:12],
+                })
+            except Exception:
+                pass
+        try:
+            payload = p2p_client.post_replication_delegation(
+                primary,
+                manifest=manifest,
+                exclude_node_ids=[identity.node_id],
+                timeout=max(180.0, min(1800.0, float(max(1, len(manifest.chunks))) * 4.0)),
+            )
+            result = _merge_peer_delegation_payload(result, payload)
+            info.update({
+                "delegated": True,
+                "delegated_peer_count": int(payload.get("peer_count") or 0),
+                "delegated_remote_successes": int(payload.get("remote_successes") or 0),
+                "delegated_remote_failures": int(payload.get("remote_failures") or 0),
+                "complete_seed_node_ids": list(dict.fromkeys([
+                    *getattr(result, "complete_seed_node_ids", []),
+                    *[str(item) for item in payload.get("complete_seed_node_ids", []) if str(item)],
+                ])),
+            })
+            return result, info
+        except StorageError as exc:
+            info["delegation_error"] = str(exc)
+            # Keep the existing complete seed and let the generic repair pass try
+            # another route. The uploaded file remains safe and available.
+            result.under_replicated_chunks = len(result.chunks)
+            return result, info
 
     def _process_background_replication_job(job: dict[str, Any]) -> None:
         manifest_id = str(job.get("manifest_id") or "")
@@ -2898,14 +3034,26 @@ def create_app(
                         "peerTargets": [peer.to_dict().get("display_name") or peer.node_id[:12] for peer in peers],
                     },
                 )
-            result, delegation_info = _replicate_via_primary_peer(
-                manifest=manifest,
-                peers=peers,
-                progress_callback=_background_replication_progress(upload_id) if upload_id else None,
-            )
+            preferred_primary_peer_id = str(job.get("preferred_primary_peer_id") or "").strip()
+            progress_callback = _background_replication_progress(upload_id) if upload_id else None
+            if preferred_primary_peer_id:
+                result, delegation_info = _delegate_from_existing_seed_peer(
+                    manifest=manifest,
+                    peers=peers,
+                    primary_peer_id=preferred_primary_peer_id,
+                    progress_callback=progress_callback,
+                )
+            else:
+                result, delegation_info = _replicate_via_primary_peer(
+                    manifest=manifest,
+                    peers=peers,
+                    progress_callback=progress_callback,
+                )
             placement = dict(manifest.placement or {})
+            raid_meta = _adaptive_placement_meta(len(peers), result)
+            raid_meta["desired_replicas"] = result.desired_replicas
             placement.update({
-                "strategy": "local_first_delegated_peer_replication",
+                "strategy": str(job.get("strategy") or placement.get("strategy") or "background_adaptive_peer_distribution"),
                 "delegated_replication": delegation_info,
                 "target_count": len(result.targets),
                 "targets": result.targets,
@@ -2914,10 +3062,7 @@ def create_app(
                 "remote_failures": result.remote_failures,
                 "local_chunks": result.local_chunks,
                 "compressed_chunks": result.compressed_chunks,
-                "raid_level": 1,
-                "raid_mode": "dynamic_mirror",
-                "desired_replicas": result.desired_replicas,
-                "dynamic_mirror_cap": 4,
+                **raid_meta,
                 "replicated_chunks": result.replicated_chunks,
                 "under_replicated_chunks": result.under_replicated_chunks,
                 "raw_bytes": result.raw_bytes,
@@ -3011,7 +3156,16 @@ def create_app(
                 desired_replicas = base_desired_replicas
                 if not manifest_expects_local_copy:
                     desired_replicas = max(1, min(base_desired_replicas, len(active_peers)))
-                needs_replication = False
+                complete_seed_ids = set(complete_file_locations(manifest.chunks))
+                healthy_complete_seed = False
+                if identity.node_id in complete_seed_ids:
+                    healthy_complete_seed = all(
+                        chunk_store.chunk_path(str(chunk.get("hash", ""))).exists()
+                        for chunk in manifest.chunks
+                        if str(chunk.get("hash", ""))
+                    )
+                healthy_complete_seed = healthy_complete_seed or bool(complete_seed_ids.intersection(active_peer_ids))
+                needs_replication = not healthy_complete_seed
                 for chunk in manifest.chunks:
                     digest = str(chunk.get("hash", ""))
                     existing_locations = [str(node_id) for node_id in chunk.get("locations", []) if str(node_id)]
@@ -3100,6 +3254,57 @@ def create_app(
                 pass
         return urls[:8]
 
+    def _detect_local_routed_cidrs() -> list[str]:
+        """Return local interface networks advertised for app-level gateway discovery.
+
+        dcloud does not modify OS routing/NAT tables.  These CIDRs tell other
+        dcloud nodes which private subnet this node can see directly, so a peer
+        that connects through VPN/NAT can use this node as an application gateway
+        for peers discovered inside that subnet.
+        """
+        cidrs: list[str] = []
+
+        def add(address: str, netmask: str | None = None) -> None:
+            try:
+                if netmask:
+                    network = ipaddress.ip_network(f"{address}/{netmask}", strict=False)
+                else:
+                    network = ipaddress.ip_network(address, strict=False)
+            except ValueError:
+                return
+            if network.version != 4:
+                return
+            if network.is_loopback or network.is_multicast or network.is_unspecified:
+                return
+            # Keep private/VPN networks; public networks are usually reverse
+            # proxy endpoints and should be entered as public URLs, not subnet
+            # gateway ranges.
+            if not network.is_private:
+                return
+            normalized = str(network)
+            if normalized not in cidrs:
+                cidrs.append(normalized)
+
+        try:
+            if psutil is not None:
+                for addrs in psutil.net_if_addrs().values():
+                    for addr in addrs:
+                        if getattr(addr, "family", None) == socket.AF_INET:
+                            add(str(getattr(addr, "address", "") or ""), str(getattr(addr, "netmask", "") or "") or None)
+        except Exception:
+            pass
+        # Operator override/addition, for example "192.168.1.0/24,192.168.3.0/24".
+        for raw in (os.environ.get("DCLOUD_ROUTED_CIDRS"), os.environ.get("DCLOUD_LOCAL_SUBNETS")):
+            if not raw:
+                continue
+            for item in re.split(r"[\s,;]+", str(raw)):
+                value = item.strip()
+                if value:
+                    for cidr in normalize_routed_cidrs(value):
+                        if cidr not in cidrs:
+                            cidrs.append(cidr)
+        return cidrs[:16]
+
     def _configured_public_peer_urls() -> list[str]:
         """Return optional operator-configured public URLs for this node.
 
@@ -3154,11 +3359,16 @@ def create_app(
             "public_urls": _configured_public_peer_urls(),
             "callback_urls": _local_peer_callback_urls(),
             "lan_addresses": [url_parse.urlsplit(url).hostname for url in _detect_lan_dashboard_urls() if url_parse.urlsplit(url).hostname],
+            "routed_cidrs": _detect_local_routed_cidrs(),
+            "local_subnets": _detect_local_routed_cidrs(),
+            "network_route_mode": "app_gateway",
             "capabilities": {
                 "direct_peer": True,
                 "peer_exchange": True,
                 "gateway_discovery": True,
                 "gateway_proxy": True,
+                "subnet_gateway": True,
+                "active_mesh_exchange": True,
                 "relay_removed": True,
             },
         }
@@ -3246,6 +3456,7 @@ def create_app(
                 "accepts_peer_storage": accepts_peer_storage,
                 "shared_storage_bytes": shared_storage_bytes,
                 "free_storage_bytes": free_storage_bytes,
+                "routed_cidrs": normalize_routed_cidrs(peer_info.get("routed_cidrs") or peer_info.get("local_subnets") or existing.get("routed_cidrs")),
                 "via_gateway_node_id": str(existing.get("via_gateway_node_id") or ""),
                 "gateway_display_name": str(existing.get("gateway_display_name") or ""),
             }
@@ -3281,6 +3492,13 @@ def create_app(
         """Run the active one-sided Direct-Peer handshake with a reachable peer."""
         _ = force
         payload = _peer_exchange_payload()
+        try:
+            # Actively push our known directly reachable peers to the target.
+            # The receiver stores them as routes via this node, which makes a
+            # one-sided VPN/NAT connection usable for both subnets.
+            payload["peers"] = _known_peers_export_payload(peer.node_id)
+        except Exception:
+            payload["peers"] = []
         response = p2p_client.post_peer_connect(peer, payload)
         count = _ingest_peer_exchange_response(response, gateway_peer=peer)
         try:
@@ -3288,6 +3506,59 @@ def create_app(
         except Exception:
             LOG.debug("Gateway discovery after peer exchange failed for %s", peer.node_id, exc_info=True)
         return count
+
+    def _active_direct_mesh_peers() -> list[Peer]:
+        disabled = _disabled_peer_ids()
+        result: list[Peer] = []
+        for peer in peer_provider.list_peers():
+            node_id = str(getattr(peer, "node_id", "") or "")
+            if not node_id or node_id == identity.node_id or node_id in disabled:
+                continue
+            if getattr(peer, "route_via_node_id", None):
+                continue
+            if getattr(peer, "host", "") == RELAY_HOST:
+                continue
+            result.append(peer)
+        return result
+
+    def _run_active_mesh_exchange(peers: list[Peer], *, force: bool = False) -> None:
+        _ = force
+        for peer in peers[:24]:
+            try:
+                _perform_peer_exchange(peer)
+            except Exception:
+                LOG.debug("Active mesh exchange with %s failed", getattr(peer, "node_id", "?"), exc_info=True)
+
+    def _schedule_active_mesh_exchange(*, force: bool = False, min_interval_seconds: float = 25.0) -> None:
+        """Keep the direct mesh bidirectional without blocking the UI.
+
+        When A manually connects to B, B may also know C, D and whole local
+        subnets.  This background exchange pushes the newly learned routes to
+        all currently direct peers so C can learn that A is reachable via B and
+        A can learn that C is reachable via B.  It is an application-level
+        gateway exchange; no OS VPN/NAT routes are changed.
+        """
+        nonlocal last_mesh_exchange_at
+        now = time.time()
+        if not force and last_mesh_exchange_at and now - last_mesh_exchange_at < min_interval_seconds:
+            return
+        if not mesh_exchange_lock.acquire(blocking=False):
+            return
+        try:
+            last_mesh_exchange_at = now
+            peers = _active_direct_mesh_peers()
+            if not peers:
+                return
+            def worker() -> None:
+                if not mesh_exchange_worker_lock.acquire(blocking=False):
+                    return
+                try:
+                    _run_active_mesh_exchange(peers, force=force)
+                finally:
+                    mesh_exchange_worker_lock.release()
+            threading.Thread(target=worker, name="dcloud-mesh-exchange", daemon=True).start()
+        finally:
+            mesh_exchange_lock.release()
 
     try:
         _refresh_manual_peer_routes(force=True)
@@ -3965,6 +4236,7 @@ def create_app(
         _sync_peer_connector_settings()
         stats = chunk_store.stats()
         peers = _list_active_peers()
+        _schedule_active_mesh_exchange(min_interval_seconds=25.0)
         _repair_under_replicated_manifests(peers)
         _deliver_pending_share_revocations(peers)
         if share_delivery_lock.acquire(blocking=False):
@@ -4653,13 +4925,33 @@ def create_app(
         selected = [peer for peer in available_peers if peer.node_id in requested_set]
         return selected if explicit_selection else (selected or available_peers)
 
+    def _adaptive_placement_meta(peer_count: int, upload_result: Any | None = None) -> dict[str, Any]:
+        profile = adaptive_raid_profile(peer_count)
+        seed_ids: list[str] = []
+        if upload_result is not None:
+            seed_ids = [str(node_id) for node_id in getattr(upload_result, "complete_seed_node_ids", []) if str(node_id)]
+            if not seed_ids and getattr(upload_result, "chunks", None):
+                seed_ids = complete_file_locations(list(upload_result.chunks))
+        return {
+            "raid_level": int(profile["raid_level"]),
+            "raid_mode": str(profile["raid_mode"]),
+            "raid_profile": str(profile["raid_profile"]),
+            "desired_replicas": int(profile["desired_replicas"]),
+            "complete_seed_required": True,
+            "complete_seed_node_ids": seed_ids,
+            "complete_seed_count": len(seed_ids),
+            "adaptive_replica_cap": int(profile["adaptive_replica_cap"]),
+        }
+
     def _local_first_upload_placement(upload_result: Any, storage_peers: list[Any]) -> dict[str, Any]:
         peer_ids = [peer.node_id for peer in storage_peers]
         targets = list(dict.fromkeys([identity.node_id, *peer_ids]))
         background_enabled = bool(storage_peers)
-        desired_replicas = dynamic_mirror_replica_count(len(storage_peers)) if background_enabled else 1
+        raid_meta = _adaptive_placement_meta(len(storage_peers), upload_result)
+        if not background_enabled:
+            raid_meta["desired_replicas"] = 1
         return {
-            "strategy": "local_first_background_replication",
+            "strategy": "local_first_adaptive_replication",
             "target_count": len(targets),
             "targets": targets,
             "transfer_status": "background_replication_queued" if background_enabled else upload_result.transfer_status,
@@ -4667,10 +4959,7 @@ def create_app(
             "remote_failures": 0,
             "local_chunks": upload_result.local_chunks,
             "compressed_chunks": upload_result.compressed_chunks,
-            "raid_level": 1,
-            "raid_mode": "dynamic_mirror",
-            "desired_replicas": desired_replicas,
-            "dynamic_mirror_cap": 4,
+            **raid_meta,
             "replicated_chunks": 0,
             "under_replicated_chunks": len(upload_result.chunks) if background_enabled else 0,
             "raw_bytes": upload_result.raw_bytes,
@@ -4693,28 +4982,29 @@ def create_app(
             return False
         return True
 
-    def _remote_primary_upload_placement(upload_result: Any, storage_peers: list[Any], primary: Any, delegation_info: dict[str, Any] | None = None) -> dict[str, Any]:
+    def _remote_primary_upload_placement(upload_result: Any, storage_peers: list[Any], primary: Any, delegation_info: dict[str, Any] | None = None, *, background_enabled: bool = False) -> dict[str, Any]:
         peer_ids = [peer.node_id for peer in storage_peers]
         targets = list(dict.fromkeys([*peer_ids]))
-        desired_replicas = dynamic_mirror_replica_count(len(storage_peers)) if storage_peers else 1
+        raid_meta = _adaptive_placement_meta(len(storage_peers), upload_result)
+        seed_ids = list(dict.fromkeys([*raid_meta.get("complete_seed_node_ids", []), primary.node_id]))
+        raid_meta["complete_seed_node_ids"] = seed_ids
+        raid_meta["complete_seed_count"] = len(seed_ids)
         return {
-            "strategy": "remote_primary_delegated_upload",
+            "strategy": "remote_primary_adaptive_upload",
             "target_count": len(targets),
             "targets": targets,
-            "transfer_status": upload_result.transfer_status,
+            "transfer_status": "remote_primary_seeded_background_distribution_queued" if background_enabled else upload_result.transfer_status,
             "remote_successes": upload_result.remote_successes,
             "remote_failures": upload_result.remote_failures,
             "local_chunks": upload_result.local_chunks,
             "compressed_chunks": upload_result.compressed_chunks,
-            "raid_level": 1,
-            "raid_mode": "dynamic_mirror",
-            "desired_replicas": desired_replicas,
-            "dynamic_mirror_cap": 4,
+            **raid_meta,
             "replicated_chunks": upload_result.replicated_chunks,
             "under_replicated_chunks": upload_result.under_replicated_chunks,
             "raw_bytes": upload_result.raw_bytes,
             "stored_bytes": upload_result.stored_bytes,
-            "background_replication": False,
+            "background_replication": bool(background_enabled),
+            "background_queued_at": datetime.now(timezone.utc).isoformat() if background_enabled else None,
             "primary_peer_id": primary.node_id,
             "delegated_replication": delegation_info or {"delegated": False, "primary_peer_id": primary.node_id},
             "remote_primary_uploaded_at": datetime.now(timezone.utc).isoformat(),
@@ -4734,35 +5024,54 @@ def create_app(
         ranked = rank_peers_by_speed(storage_peers, p2p_client)
         if not ranked:
             raise StorageError("Lokaler Speicher ist voll und kein Direct-/Gateway-Speicher-Peer ist erreichbar")
-        primary = ranked[0]
-        upload_progress.update(
-            upload_id,
-            phase="remote_primary_upload",
-            status="Lokaler Speicher reicht nicht; Datei wird einmalig an den schnellsten Peer übertragen…",
-            percent=45,
-            server_percent=8,
-            total_bytes=file_size,
-            target_count=len(ranked),
-            current_peer=primary.to_dict().get("display_name") or primary.node_id[:12],
-            details={"remotePrimaryUpload": True, "primaryPeer": primary.node_id},
-        )
-        upload_result = distribute_file_chunks(
-            source_path=temp_path,
-            chunk_store=chunk_store,
-            local_node_id=identity.node_id,
-            peers=[primary],
-            p2p_client=p2p_client,
-            progress_callback=_upload_server_progress(upload_id),
-            chunk_size_bytes=chunk_store.chunk_size,
-        )
-        primary_chunks = sum(1 for chunk in upload_result.chunks if primary.node_id in [str(node_id) for node_id in chunk.get("locations", [])])
-        if primary_chunks != len(upload_result.chunks):
-            raise StorageError("Remote-Upload fehlgeschlagen: der erste Peer hat nicht alle Chunks bestätigt")
+        primary = None
+        upload_result = None
+        primary_chunks = 0
+        seed_errors: list[str] = []
+        for candidate in ranked:
+            upload_progress.update(
+                upload_id,
+                phase="remote_primary_upload",
+                status="Lokaler Speicher reicht nicht; vollständiger Seed wird auf einem erreichbaren Peer erstellt…",
+                percent=45,
+                server_percent=8,
+                total_bytes=file_size,
+                target_count=len(ranked),
+                current_peer=candidate.to_dict().get("display_name") or candidate.node_id[:12],
+                details={"remotePrimaryUpload": True, "primaryPeerCandidate": candidate.node_id},
+            )
+            try:
+                candidate_result = distribute_file_chunks(
+                    source_path=temp_path,
+                    chunk_store=chunk_store,
+                    local_node_id=identity.node_id,
+                    peers=[candidate],
+                    p2p_client=p2p_client,
+                    progress_callback=_upload_server_progress(upload_id),
+                    chunk_size_bytes=chunk_store.chunk_size,
+                )
+            except StorageError as exc:
+                seed_errors.append(f"{candidate.node_id[:12]}: {exc}")
+                continue
+            candidate_chunks = sum(
+                1
+                for chunk in candidate_result.chunks
+                if candidate.node_id in [str(node_id) for node_id in chunk.get("locations", [])]
+            )
+            if candidate_chunks == len(candidate_result.chunks):
+                primary = candidate
+                upload_result = candidate_result
+                primary_chunks = candidate_chunks
+                break
+            seed_errors.append(f"{candidate.node_id[:12]}: nur {candidate_chunks}/{len(candidate_result.chunks)} Chunks bestaetigt")
+        if primary is None or upload_result is None:
+            detail = "; ".join(seed_errors[-3:]) if seed_errors else "kein Peer hat alle Chunks bestaetigt"
+            raise StorageError(f"Remote-Upload fehlgeschlagen: kein vollstaendiger Seed-Peer konnte erstellt werden ({detail})")
         placement = _remote_primary_upload_placement(upload_result, ranked, primary)
         upload_progress.update(
             upload_id,
             phase="manifest",
-            status="Remote-Manifest wird geschrieben; der erste Peer verteilt danach intern weiter…",
+            status="Remote-Manifest wird geschrieben; nach dem vollständigen Seed läuft die adaptive Verteilung im Hintergrund…",
             percent=96,
             server_percent=92,
             raw_bytes_processed=upload_result.raw_bytes,
@@ -4785,42 +5094,38 @@ def create_app(
         )
         delegation_info: dict[str, Any] = {
             "delegated": False,
+            "queued": False,
             "primary_peer_id": primary.node_id,
             "primary_chunks": primary_chunks,
             "candidate_peer_count": len(ranked),
+            "failed_seed_candidates": seed_errors,
         }
+        background_queued = False
         if len(ranked) > 1:
-            try:
-                payload = p2p_client.post_replication_delegation(
-                    primary,
-                    manifest=manifest,
-                    exclude_node_ids=[identity.node_id],
-                )
-                upload_result = _merge_peer_delegation_payload(upload_result, payload)
-                delegation_info.update({
-                    "delegated": True,
-                    "delegated_peer_count": int(payload.get("peer_count") or 0),
-                    "delegated_remote_successes": int(payload.get("remote_successes") or 0),
-                    "delegated_remote_failures": int(payload.get("remote_failures") or 0),
-                })
-                placement = _remote_primary_upload_placement(upload_result, ranked, primary, delegation_info)
-                manifest = manifest_store.update_placement(
-                    manifest.manifest_id,
-                    identity,
-                    chunks=upload_result.chunks,
-                    placement=placement,
-                )
-            except StorageError as exc:
-                delegation_info["delegation_error"] = str(exc)
-                placement = _remote_primary_upload_placement(upload_result, ranked, primary, delegation_info)
-                manifest = manifest_store.update_placement(
-                    manifest.manifest_id,
-                    identity,
-                    placement=placement,
-                )
+            background_queued = _enqueue_background_replication(
+                manifest.manifest_id,
+                peer_node_ids=[peer.node_id for peer in ranked],
+                file_name=safe_name,
+                preferred_primary_peer_id=primary.node_id,
+                strategy="remote_primary_background_adaptive_distribution",
+            )
+            delegation_info["queued"] = background_queued
+            placement = _remote_primary_upload_placement(
+                upload_result,
+                ranked,
+                primary,
+                delegation_info,
+                background_enabled=background_queued,
+            )
+            manifest = manifest_store.update_placement(
+                manifest.manifest_id,
+                identity,
+                placement=placement,
+            )
         message = (
-            f"Datei remote gespeichert: {safe_name}; Primär-Peer {primary.to_dict().get('display_name') or primary.node_id[:12]} "
-            "übernimmt die weitere Direct-/Gateway-Verteilung."
+            f"Datei remote gespeichert: {safe_name}; vollständiger Seed liegt auf "
+            f"{primary.to_dict().get('display_name') or primary.node_id[:12]}. "
+            + ("Adaptive Verteilung läuft im Hintergrund." if background_queued else "Keine weitere Hintergrundverteilung nötig.")
         )
         upload_progress.finish(
             upload_id,
@@ -4828,8 +5133,10 @@ def create_app(
             message=message,
             details={
                 "manifestId": manifest.manifest_id,
-                "transferStatus": upload_result.transfer_status,
+                "transferStatus": placement.get("transfer_status", upload_result.transfer_status),
                 "remotePrimaryUpload": True,
+                "backgroundReplication": background_queued,
+                "backgroundReplicationQueued": background_queued,
                 "primaryPeer": primary.node_id,
                 "delegatedReplication": delegation_info,
             },
@@ -4924,26 +5231,28 @@ def create_app(
             folder_path=folder_path,
             placement=placement,
         )
+        background_queued = False
         if storage_peers:
-            _enqueue_background_replication(
+            background_queued = _enqueue_background_replication(
                 manifest.manifest_id,
-                upload_id=upload_id,
                 peer_node_ids=[peer.node_id for peer in storage_peers],
                 file_name=safe_name,
+                strategy="local_seed_background_adaptive_distribution",
             )
-            message = f"Datei lokal gespeichert: {safe_name}; Sicherheitskopie läuft im Hintergrund."
+            message = f"Datei lokal gespeichert: {safe_name}; adaptive Sicherheitsverteilung läuft entkoppelt im Hintergrund."
         else:
             message = f"Datei lokal gespeichert: {safe_name} in {folder_path} ({manifest.manifest_id[:12]})"
-            upload_progress.finish(
-                upload_id,
-                ok=True,
-                message=message,
-                details={
-                    "manifestId": manifest.manifest_id,
-                    "transferStatus": upload_result.transfer_status,
-                    "backgroundReplication": False,
-                },
-            )
+        upload_progress.finish(
+            upload_id,
+            ok=True,
+            message=message,
+            details={
+                "manifestId": manifest.manifest_id,
+                "transferStatus": upload_result.transfer_status,
+                "backgroundReplication": background_queued,
+                "backgroundReplicationQueued": background_queued,
+            },
+        )
         return manifest, upload_result, message
 
     def _store_uploaded_temp_file(temp_path: Path, safe_name: str, folder_path: str, upload_id: str, storage_peers: list[Any] | None = None) -> tuple[bool, dict[str, Any], int]:
@@ -5567,8 +5876,15 @@ def create_app(
 
             new_targets = list(dict.fromkeys(location for chunk in updated_chunks for location in chunk.get("locations", [])))
             placement = dict(manifest.placement or {})
+            raid_meta = _adaptive_placement_meta(len(peers), result)
+            raid_meta["desired_replicas"] = result.desired_replicas
+            seed_ids = complete_file_locations(updated_chunks)
+            if add_only:
+                seed_ids = list(dict.fromkeys([*raid_meta.get("complete_seed_node_ids", []), *seed_ids]))
+            raid_meta["complete_seed_node_ids"] = seed_ids
+            raid_meta["complete_seed_count"] = len(seed_ids)
             placement.update({
-                "strategy": "peer_additional_replica" if add_only else "delegated_peer_offload",
+                "strategy": "peer_additional_adaptive_replica" if add_only else "adaptive_seeded_peer_offload",
                 "delegated_replication": delegation_info,
                 "targets": new_targets,
                 "target_count": len(new_targets),
@@ -5578,12 +5894,9 @@ def create_app(
                 "offload_candidate_chunks": len(removal_candidates),
                 "offload_remote_successes": result.remote_successes,
                 "offload_remote_failures": result.remote_failures,
-                "raid_level": 1,
-                "raid_mode": "dynamic_mirror",
+                **raid_meta,
                 "replicated_chunks": result.replicated_chunks,
                 "under_replicated_chunks": result.under_replicated_chunks,
-                "desired_replicas": result.desired_replicas,
-                "dynamic_mirror_cap": 4,
                 "local_chunks_kept": local_kept_count,
             })
             updated_manifest = manifest_store.update_placement(
@@ -6821,6 +7134,10 @@ def create_app(
             item["gateway_node_id"] = identity.node_id
             item["gateway_display_name"] = display_name_for_peer(identity.node_id, config.node.name)
             item["gateway_public_urls"] = gateway_urls[:8]
+            item["via_subnet_gateway"] = True
+            # Keep any peer-advertised CIDRs so the UI can show why this route
+            # is useful across VPN/NAT subnets.
+            item["routed_cidrs"] = normalize_routed_cidrs(item.get("routed_cidrs") or getattr(peer, "routed_cidrs", []))
             peers.append(item)
         return peers
 
@@ -6837,6 +7154,16 @@ def create_app(
         stored_peer = _store_direct_peer_from_info(payload, source_ip=source_ip, source="peer_exchange")
         if stored_peer is None:
             return jsonify({"ok": False, "message": "Peer-Connect konnte keine Rückroute speichern"}), 400
+        try:
+            # Import peer routes that the caller already knows.  Because the
+            # caller is the signed direct peer, those routes are stored through
+            # that caller as application-level gateway routes.  This is what
+            # makes 192.168.1.0/24 <-> 192.168.3.0/24 style VPN/NAT meshes
+            # become visible without configuring OS routes on every device.
+            _ingest_peer_exchange_response({"peers": payload.get("peers") if isinstance(payload.get("peers"), list) else []}, gateway_peer=stored_peer)
+        except Exception:
+            LOG.debug("Peer-Connect route import from %s failed", requester_node_id, exc_info=True)
+        _schedule_active_mesh_exchange(force=True)
         peers = _known_peers_export_payload(requester_node_id)
         return jsonify({
             "ok": True,
@@ -7178,6 +7505,9 @@ def create_app(
                 "remote_successes": result.remote_successes,
                 "remote_failures": result.remote_failures,
                 "desired_replicas": result.desired_replicas,
+                "raid_level": getattr(result, "adaptive_raid_level", 0),
+                "raid_mode": getattr(result, "adaptive_raid_mode", "seeded_adaptive"),
+                "complete_seed_node_ids": getattr(result, "complete_seed_node_ids", []),
                 "replicated_chunks": result.replicated_chunks,
                 "under_replicated_chunks": result.under_replicated_chunks,
                 "peer_count": len(peers),
@@ -7433,12 +7763,17 @@ def create_app(
             "accepts_peer_storage": True,
             "public_urls": _configured_public_peer_urls(),
             "callback_urls": _local_peer_callback_urls(),
+            "routed_cidrs": _detect_local_routed_cidrs(),
+            "local_subnets": _detect_local_routed_cidrs(),
+            "network_route_mode": "app_gateway",
             "relay_data_enabled": False,
             "relay_removed": True,
             "direct_peer": True,
             "peer_exchange": True,
             "gateway_discovery": True,
             "gateway_proxy": True,
+            "subnet_gateway": True,
+            "active_mesh_exchange": True,
         }
 
     app.config["DCLOUD_STOP_RELAYS"] = _stop_relay_transport

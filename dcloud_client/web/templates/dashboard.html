@@ -811,7 +811,7 @@
           </section>
         </div>
         <h3>Aktive Peers</h3>
-        <p class="settings-note">Speicherziele für neue Uploads und Hintergrund-Replikation auswählen. Deaktivierte Peers bleiben ausgeblendet, bis du sie wieder zulässt.</p>
+        <p class="settings-note">Speicherziele für adaptive Verteilung auswählen. Ein vollständiger Seed bleibt erhalten; zusätzliche Peers bekommen rotierende Chunk-Streifen. Deaktivierte Peers bleiben ausgeblendet, bis du sie wieder zulässt.</p>
         <div class="status-list" id="network-storage-peer-selection"></div>
         <ul class="status-list" id="network-peer-list"><li>Keine aktiven Peers online.</li></ul>
         <h3>Deaktivierte Peers</h3>
@@ -905,7 +905,7 @@
               <button type="button" class="explorer-btn" id="recovery-scan-peers">Wiederherstellung von Peers starten</button>
             </div>
             <p class="settings-note">Bewahre diesen Token sicher auf. Er stellt die Peer-Identität wieder her und gibt einem neu installierten Peer wieder dieselbe Node-ID: <strong id="recovery-node-id">{{ recovery_json.nodeIdShort }}</strong>…</p>
-            <p class="settings-note">Speicher-Peers behalten entfernte RAID-/Sicherheitskopien mindestens <strong id="recovery-retention-days">{{ recovery_json.retentionDays }}</strong> Tage als Wiederherstellungsreserve, bevor Chunks endgültig gelöscht werden dürfen.</p>
+            <p class="settings-note">Speicher-Peers behalten entfernte adaptive Sicherheitskopien mindestens <strong id="recovery-retention-days">{{ recovery_json.retentionDays }}</strong> Tage als Wiederherstellungsreserve, bevor Chunks endgültig gelöscht werden dürfen.</p>
             <label for="recovery-import-token">Backup-Token auf diesem Peer wiederherstellen</label>
             <textarea id="recovery-import-token" rows="3" placeholder="DCLOUD-BACKUP-v1:..."></textarea>
             <div class="settings-inline">
@@ -999,8 +999,8 @@
             <input id="settings-relay-enabled" type="hidden" name="relay_enabled" value="">
             <textarea id="settings-relay-url" rows="1" readonly hidden></textarea>
             <textarea id="settings-relay-urls" name="relay_server_urls" rows="1" hidden></textarea>
-            <p class="settings-note" id="settings-relay-note"><strong>Direct-Peer-Modus:</strong> Peers werden manuell über LAN-, NAT-/DDNS- oder Reverse-Proxy-Endpunkte verbunden. Wenn hinter einem eingetragenen Endpunkt weitere Peers im LAN hängen, meldet der Endpunkt diese automatisch als <strong>Gateway-Peers</strong>. Daten und Freigaben laufen dann über diesen Gateway-Peer weiter ins interne Netz.</p>
-            <p class="settings-note"><strong>Empfehlung:</strong> Einen Gateway-Peer öffentlich freigeben und interne Peers dahinter per LAN anbinden.</p>
+            <p class="settings-note" id="settings-relay-note"><strong>Direct-Peer-Modus:</strong> Peers werden manuell über LAN-, NAT-/DDNS- oder Reverse-Proxy-Endpunkte verbunden. Wenn hinter einem eingetragenen Endpunkt weitere Peers oder ganze VPN-/LAN-Subnetze hängen, meldet der Endpunkt diese automatisch als <strong>Subnetz-/Gateway-Peers</strong>. Daten und Freigaben laufen dann über diesen Gateway-Peer weiter ins jeweilige Netz.</p>
+            <p class="settings-note"><strong>Empfehlung:</strong> Einen Gateway-Peer pro Standort/VPN-Netz eintragen. Beispiel: <code>192.168.1.3</code> verbindet sich mit <code>192.168.3.4</code>; danach verteilt der aktive Mesh-Austausch die sichtbaren Peers aus <code>192.168.1.0/24</code> und <code>192.168.3.0/24</code> als App-Gateway-Routen. Es werden keine Betriebssystem-Routen oder Firewall-Regeln verändert.</p>
           </section>
 
           <section class="settings-panel">
@@ -1020,7 +1020,7 @@
         </form>
 
         <hr style="border:0;border-top:1px solid #d8e4f6;margin:1.1rem 0;">
-        <p>Peers manuell eintragen oder per LAN-Discovery finden. Internet-Peers benötigen einen NAT-/DDNS-Endpunkt oder Reverse Proxy. Ein öffentlicher Gateway-Peer kann dahinterliegende interne Peers bekannt machen und für sie weiterleiten.</p>
+        <p>Peers manuell eintragen oder per LAN-Discovery finden. Internet-Peers benötigen einen NAT-/DDNS-Endpunkt oder Reverse Proxy. Ein erreichbarer Gateway-Peer kann dahinterliegende interne Peers und VPN-/LAN-Subnetze bekannt machen und für sie auf Anwendungsebene weiterleiten.</p>
         <form method="post" action="/peers" class="settings-form">
           <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
           <label for="settings-peer">LAN/UDP-Peer-Adresse (host:port)</label>
@@ -1032,8 +1032,8 @@
         </form>
         <section class="settings-panel" style="margin-top:1rem;">
           <h3>Direkte NAT-/DDNS-Endpunkte</h3>
-          <p class="settings-note">Trage hier die erreichbare Adresse eines Peers ein, z. B. <code>http://192.168.3.1:8787</code>, <code>https://peer.example.de</code> oder <code>mein-ddns.net:8787</code>. Beim Speichern startet ein signierter Peer-Austausch: Die Gegenseite speichert automatisch deine Rückroute, wenn sie dich über VPN/LAN/NAT erreichen kann. Einseitiges Eintragen reicht dann für beide Seiten.</p>
-          <p class="settings-note"><strong>Gateway:</strong> Kennt der eingetragene Peer weitere interne Peers, werden diese als „über Gateway erreichbar“ übernommen. Freigaben und Chunks laufen dann über den eingetragenen Gateway-Peer weiter.</p>
+          <p class="settings-note">Trage hier die erreichbare Adresse eines Peers ein, z. B. <code>http://192.168.3.1:8787</code>, <code>https://peer.example.de</code> oder <code>mein-ddns.net:8787</code>. Beim Speichern startet ein signierter Peer-Austausch: Die Gegenseite speichert automatisch deine Rückroute, wenn sie dich über VPN/LAN/NAT erreichen kann. Danach läuft ein aktiver Mesh-Austausch, der bekannte Standort-Subnetze und Peers an beide Seiten verteilt. Einseitiges Eintragen reicht dann für beide Seiten.</p>
+          <p class="settings-note"><strong>Subnetz-Gateway:</strong> Kennt der eingetragene Peer weitere interne Peers oder lokale Netze, werden diese als „über Gateway erreichbar“ übernommen. So kann z. B. ein Peer aus <code>192.168.1.0/24</code> über den verbundenen Gateway-Peer Peers aus <code>192.168.3.0/24</code> nutzen — ohne PHP-Relay und ohne OS-Routing im Tool zu verändern.</p>
           <div class="settings-form" id="manual-peer-route-form">
             <label for="settings-nat-endpoint">NAT-/DDNS-Endpunkt</label>
             <input id="settings-nat-endpoint" type="text" placeholder="https://peer.example.de oder mein-ddns.net:8787">
@@ -1205,7 +1205,7 @@
           <p class="settings-note" id="movePeerFileLabel">Datei auswählen…</p>
           <label for="movePeerSelect">Ziel-Peer auswählen</label>
           <select id="movePeerSelect" name="target_peer_node_id"></select>
-          <p class="settings-note">Es wird eine zusätzliche Kopie auf dem Ziel-Peer erstellt. Die lokale Sicherheitskopie bleibt erhalten.</p>
+          <p class="settings-note">Es wird eine zusätzliche Direct-/Gateway-Kopie auf dem Ziel-Peer erstellt. Die lokale vollständige Seed-Kopie bleibt erhalten.</p>
           <div class="dialog-actions">
             <button type="button" class="explorer-btn" id="movePeerDialogCancel">Abbrechen</button>
             <button type="submit" class="explorer-btn">Peer-Kopie erstellen</button>
@@ -2394,7 +2394,8 @@
           const kind = viaGateway ? `Gateway-Peer über ${gatewayName}` : (source === "peer_exchange" ? "gegenseitig synchronisierter Direkt-Peer" : "direkter Endpunkt");
           const storage = route.accepts_peer_storage ? `P2P-Speicher aktiv · frei ${formatBytes(route.free_storage_bytes || route.shared_storage_bytes || 0)}` : "keine P2P-Ablage";
           const status = route.active ? "aktiv" : (route.last_error ? `nicht erreichbar: ${route.last_error}` : "wartet auf Austausch");
-          text.textContent = `${label} · ${kind} · ${urls} · ${storage} · ${status}`;
+          const cidrs = Array.isArray(route.routed_cidrs) && route.routed_cidrs.length ? ` · Subnetze: ${route.routed_cidrs.join(", ")}` : "";
+          text.textContent = `${label} · ${kind} · ${urls} · ${storage} · ${status}${cidrs}`;
           const removeBtn = document.createElement("button");
           removeBtn.type = "button";
           removeBtn.className = "explorer-btn";
@@ -2770,7 +2771,8 @@
           meta.className = "tile-meta";
           const desiredMirrors = Number(file.placement?.desired_replicas || 0);
           const distribution = file.remoteStorageCount > 0 ? ` · verteilt auf ${file.remoteStorageCount + 1} Knoten` : " · lokal";
-          const raidInfo = desiredMirrors > 1 ? ` · RAID‑1 ${desiredMirrors}x` : "";
+          const raidProfile = file.placement?.raid_profile || file.placement?.raid_mode || "";
+          const raidInfo = desiredMirrors > 1 ? ` · ${raidProfile || "Adaptive Verteilung"} · ${desiredMirrors} Kopien/Chunk` : "";
           meta.textContent = file.web ? `${formatBytes(file.size)} · storage/web${file.modifiedAt ? " · geändert " + formatDateTime(file.modifiedAt) : ""}` : (file.browserDownload ? `${formatBytes(file.size)} · storage/Downloads${file.modifiedAt ? " · gespeichert " + formatDateTime(file.modifiedAt) : ""}` : `${formatBytes(file.size)} · ${file.chunks} Chunk(s)${distribution}${raidInfo}`);
           const access = document.createElement("span");
           access.className = "tile-access";
@@ -3186,7 +3188,7 @@
       function applyUploadProgress(progress){
         if(!progress) return;
         if(progress.known === false){
-          document.getElementById("transfer-status").textContent = "Transfer läuft im Hintergrund – Status wird synchronisiert…";
+          document.getElementById("transfer-status").textContent = "Transfer läuft entkoppelt im Hintergrund – Status wird synchronisiert…";
           document.getElementById("transfer-subtitle").textContent = "Nach Seiten-Neuladen wird der Server-Fortschritt wieder verbunden";
           return;
         }
@@ -3199,7 +3201,7 @@
         document.getElementById("transfer-subtitle").textContent = progress.active === false
           ? (progress.ok ? "Fertig verarbeitet" : "Verarbeitung fehlgeschlagen")
           : (backgroundReplication
-            ? "Datei ist lokal verfügbar; Sicherheitskopie läuft im Hintergrund"
+            ? "Datei ist verfügbar; adaptive Sicherheitsverteilung läuft entkoppelt im Hintergrund"
             : "Server verarbeitet: Chunking, Komprimierung und Peer-Speicherung");
 
         setMiniProgress("server", backgroundReplication ? 100 : serverPercent);
@@ -3217,8 +3219,8 @@
         if(Number(progress.remoteSuccesses || 0)) peerParts.push(`${Number(progress.remoteSuccesses || 0)} Peer ok`);
         if(Number(progress.localChunks || 0)) peerParts.push(`${Number(progress.localChunks || 0)} lokal`);
         if(Number(progress.remoteFailures || 0)) peerParts.push(`${Number(progress.remoteFailures || 0)} Fehler`);
-        if(Number(progress.desiredReplicas || 0) > 1) peerParts.push(`${Number(progress.desiredReplicas)} Kopien/Ziel`);
-        document.getElementById("transfer-peers").textContent = peerParts.length ? peerParts.join(" · ") : (backgroundReplication ? "läuft im Hintergrund" : "noch keine Verteilung");
+        if(Number(progress.desiredReplicas || 0) > 1) peerParts.push(`${Number(progress.desiredReplicas)} Kopien/Chunk`);
+        document.getElementById("transfer-peers").textContent = peerParts.length ? peerParts.join(" · ") : (backgroundReplication ? "läuft entkoppelt im Hintergrund" : "noch keine Verteilung");
         const localLine = document.getElementById("transfer-local");
         if(localLine) localLine.textContent = `${Number(progress.localChunks || 0)} Kopie(n)`;
 
@@ -3279,7 +3281,7 @@
         const icon = document.querySelector(".transfer-icon");
         if(icon) icon.textContent = "⬆️";
         document.getElementById("transfer-title").textContent = "Upload läuft";
-        document.getElementById("transfer-subtitle").textContent = "Datei wird lokal gespeichert; Peer-Sync läuft danach im Hintergrund";
+        document.getElementById("transfer-subtitle").textContent = "Datei wird als vollständiger Seed gespeichert; weitere Peer-Verteilung läuft danach im Hintergrund";
         document.getElementById("transfer-name").textContent = file.name;
         document.getElementById("transfer-target").textContent = folder;
         document.getElementById("transfer-status").textContent = "Upload wird vorbereitet…";
@@ -3600,7 +3602,7 @@
           updateTransfer(Math.max(lastTransferPercent, 35), "Übertragung abgeschlossen; Server verarbeitet Chunks…");
           document.getElementById("transfer-browser").textContent = `${formatBytes(file.size)} / ${formatBytes(file.size)}`;
           document.getElementById("transfer-server").textContent = "startet…";
-          document.getElementById("transfer-subtitle").textContent = "Datei ist bereits sichtbar, Peer-Sync läuft im Hintergrund";
+          document.getElementById("transfer-subtitle").textContent = "Datei ist bereits sichtbar; Redundanzaufbau läuft getrennt im Hintergrund";
           refreshState().catch(() => {});
           pollUploadProgress(uploadId);
         };
@@ -3859,11 +3861,15 @@ ${folderPath}`)) return;
         }
         return "Transfer: direkt";
       }
+      function peerSubnetSummary(peer){
+        const cidrs = Array.isArray(peer.routed_cidrs) ? peer.routed_cidrs.filter(Boolean) : [];
+        return cidrs.length ? ` · Subnetz-Gateway: ${cidrs.join(", ")}` : "";
+      }
       function peerRouteSummary(peer){
-        return `${peerApiEndpoint(peer)} · ${peerDiscoveryLabel(peer)} · ${peerTransferLabel(peer)} · ${peerInventarSummary(peer)}`;
+        return `${peerApiEndpoint(peer)} · ${peerDiscoveryLabel(peer)} · ${peerTransferLabel(peer)} · ${peerInventarSummary(peer)}${peerSubnetSummary(peer)}`;
       }
       function peerRouteLabel(peer){
-        return `${peerApiEndpoint(peer)} · ${peerTransferLabel(peer)} · ${peerInventarSummary(peer)}`;
+        return `${peerApiEndpoint(peer)} · ${peerTransferLabel(peer)} · ${peerInventarSummary(peer)}${peerSubnetSummary(peer)}`;
       }
       function openShareDialog(file){
         pendingShareFile = file;

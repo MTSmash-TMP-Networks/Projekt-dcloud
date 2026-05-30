@@ -21,6 +21,20 @@ http://203.0.113.10:8787
 
 Beim Eintragen wird `/healthz` geprüft und danach ein signierter Peer-Austausch über `/api/p2p/peers/connect` gestartet. Dadurch speichert die Gegenseite automatisch die Rückroute zu diesem Knoten, sofern sie über LAN/VPN/NAT erreichbar ist. Einseitiges Eintragen reicht also für beide Seiten, wenn beide Richtungen direkt routbar sind. Danach können Freigaben, Uploads, Downloads und Gateway-Zugriffe direkt über diesen Endpunkt laufen.
 
+
+### Standort-/VPN-Subnetz-Gateway
+
+Wenn zwei Peers aus unterschiedlichen Netzen direkt verbunden sind, verteilt dcloud jetzt die sichtbaren Peers aktiv in beide Richtungen. Beispiel:
+
+```text
+Standort A: 192.168.1.0/24, Gateway-Peer 192.168.1.3
+Standort B: 192.168.3.0/24, Gateway-Peer 192.168.3.4
+```
+
+Wenn `192.168.1.3` und `192.168.3.4` erfolgreich verbunden sind, tauschen sie signiert ihre Peer-Listen und lokalen Subnetz-Hinweise aus. Peers wie `192.168.3.5` lernen dadurch Peers aus `192.168.1.0/24` als „über Gateway 192.168.3.4/192.168.1.3 erreichbar“ und umgekehrt. Dateiübertragung, Freigaben und Chunk-Zugriffe laufen dann über den verbundenen Gateway-Peer weiter.
+
+Wichtig: Das ist eine Anwendungsebene innerhalb von dcloud. Das Tool setzt keine Betriebssystem-Routen, NAT-Regeln oder Firewall-Regeln. Andere Programme auf dem Rechner sehen dadurch nicht automatisch das entfernte Subnetz. Für dcloud-Peers reicht diese App-Gateway-Route aber aus.
+
 ## Ports
 
 | Zweck | Port | Hinweis |
@@ -29,6 +43,31 @@ Beim Eintragen wird `/healthz` geprüft und danach ein signierter Peer-Austausch
 | LAN-Discovery | UDP 6881 | Nur für lokale automatische Suche nötig |
 | HTTPS-Reverse-Proxy | TCP 443 | Empfohlen für öffentliche Endpunkte |
 | SMB | TCP 445 | Nur lokal verwenden, nicht öffentlich freigeben |
+
+
+## Adaptive Speicherverteilung
+
+Die Direct-Peer-Variante verteilt Dateien nicht mehr stumpf als komplette RAID-1-Kopie auf jeden Peer. Stattdessen gilt:
+
+- Pro Datei muss mindestens ein erreichbarer Knoten die komplette Datei als Seed besitzen.
+- Wenn der lokale Speicher voll ist, wird zuerst ein vollständiger Remote-Seed auf einem erreichbaren Speicher-Peer erstellt.
+- Weitere Peers erhalten rotierende Chunk-Streifen. Mit mehr Peers steigt die Zahl der Kopien pro Chunk stufenweise.
+- Fällt ein Peer während der Verteilung aus, werden offene Chunks auf andere aktive Peers umgelegt, statt den ganzen Ablauf abzubrechen.
+- Die UI zeigt deshalb Kopien pro Chunk und das adaptive Verteilungsprofil an, nicht mehr eine starre RAID-1-Spiegelung pro Peer.
+
+### Hintergrund-Verteilung nach Upload
+
+Der Upload wartet nicht mehr auf den kompletten Redundanzaufbau. Sobald die Datei lokal gespeichert ist oder bei vollem lokalem Speicher ein vollständiger Remote-Seed existiert, wird der Upload als abgeschlossen gemeldet. Die adaptive Verteilung auf weitere Peers läuft danach als entkoppelter Hintergrund-Job weiter. Dadurch ist die Datei schneller sichtbar und ein langsamer oder ausfallender Zusatz-Peer blockiert nicht mehr den eigentlichen Upload.
+
+Richtwerte:
+
+| Aktive Speicher-Peers | Profil | Ziel |
+| --- | --- | --- |
+| 0 | Einzelner Seed | lokale Datei bleibt komplett |
+| 1 | Seed + Spiegel-Peer | zwei Kopien pro Chunk |
+| 2-3 | Seed + rotierende Chunk-Streifen | zwei Kopien pro Chunk, logisch verteilt |
+| 4-6 | Seed + doppelte Chunk-Streifen | drei Kopien pro Chunk |
+| 7+ | Seed + mehrfache Chunk-Streifen | bis zu vier Kopien pro Chunk |
 
 ## Freigaben
 

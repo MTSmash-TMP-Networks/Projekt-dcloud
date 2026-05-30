@@ -208,6 +208,50 @@ def merge_public_urls(*groups: object) -> list[str]:
     return merged
 
 
+
+
+def normalize_routed_cidrs(values: object, *, max_cidrs: int = 32) -> list[str]:
+    """Return normalized IPv4/IPv6 network routes advertised by a peer.
+
+    These are application-level route hints for the Direct-Peer gateway layer.
+    They do not modify the operating system routing table; they tell dcloud that
+    peers discovered behind a node may be reached through that node as gateway.
+    """
+    raw_items: list[object]
+    if values is None:
+        raw_items = []
+    elif isinstance(values, (list, tuple, set)):
+        raw_items = list(values)
+    else:
+        raw_items = [values]
+    result: list[str] = []
+    for item in raw_items:
+        value = str(item or "").strip()
+        if not value:
+            continue
+        try:
+            network = ipaddress.ip_network(value, strict=False)
+        except ValueError:
+            continue
+        # Avoid advertising host-only loopback/multicast/unspecified networks.
+        if network.is_loopback or network.is_multicast or network.is_unspecified:
+            continue
+        normalized = str(network)
+        if normalized not in result:
+            result.append(normalized)
+        if len(result) >= max_cidrs:
+            break
+    return result
+
+
+def merge_routed_cidrs(*groups: object) -> list[str]:
+    merged: list[str] = []
+    for group in groups:
+        for cidr in normalize_routed_cidrs(group):
+            if cidr not in merged:
+                merged.append(cidr)
+    return merged
+
 def _route_preference(peer: "Peer") -> int:
     """Higher value means the peer route should be kept as primary."""
     if peer.host == "__relay__":
@@ -242,6 +286,7 @@ class Peer:
     gateway_node_id: str | None = None
     gateway_display_name: str | None = None
     gateway_public_urls: list[str] = field(default_factory=list)
+    routed_cidrs: list[str] = field(default_factory=list)
     chat_enabled: bool = True
     chat_alias: str | None = None
     last_seen: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
@@ -293,6 +338,7 @@ class Peer:
             "gateway_node_id": self.gateway_node_id or self.route_via_node_id,
             "gateway_display_name": self.gateway_display_name,
             "gateway_public_urls": list(self.gateway_public_urls),
+            "routed_cidrs": list(self.routed_cidrs),
             "reachable_via_gateway": bool(self.route_via_node_id or self.gateway_node_id),
             "chat_enabled": bool(self.chat_enabled),
             "chat_alias": self.chat_alias,
@@ -374,6 +420,7 @@ class InMemoryPeerProvider:
                 peer.gateway_node_id = peer.gateway_node_id if peer.gateway_node_id is not None else existing.gateway_node_id
                 peer.gateway_display_name = peer.gateway_display_name if peer.gateway_display_name is not None else existing.gateway_display_name
                 peer.gateway_public_urls = merge_public_urls(peer.gateway_public_urls, existing.gateway_public_urls)
+                peer.routed_cidrs = merge_routed_cidrs(peer.routed_cidrs, existing.routed_cidrs)
                 peer.scheme = peer.scheme if peer.scheme is not None else existing.scheme
                 peer.lan_addresses = merge_lan_addresses(peer.lan_addresses, existing.lan_addresses, [peer.host, existing.host])
                 peer.chunk_inventory = merge_chunk_inventory(peer.chunk_inventory, existing.chunk_inventory)

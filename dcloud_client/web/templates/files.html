@@ -796,7 +796,7 @@
         if(snapshot.remoteSuccesses) peerParts.push(`${snapshot.remoteSuccesses} Peer-Schreibvorgänge`);
         if(snapshot.localChunks) peerParts.push(`${snapshot.localChunks} lokal`);
         if(snapshot.remoteFailures) peerParts.push(`${snapshot.remoteFailures} Fehler`);
-        if(snapshot.desiredReplicas && snapshot.desiredReplicas > 1) peerParts.push(`${snapshot.desiredReplicas} Replikate/Ziel`);
+        if(snapshot.desiredReplicas && snapshot.desiredReplicas > 1) peerParts.push(`${snapshot.desiredReplicas} Kopien/Chunk`);
         document.getElementById('uploadPeers').textContent = peerParts.length ? peerParts.join(' · ') : 'noch keine Verteilung';
         const detail = [];
         if(snapshot.currentPeer) detail.push(`Aktuelles Ziel: ${snapshot.currentPeer}`);
